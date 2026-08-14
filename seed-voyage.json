@@ -1,0 +1,9 @@
+{
+  "vesselId": "e4d5964e-310e-40ca-8bd6-82c6edaa5927",
+  "cargoQuantity": 50000,
+  "cargoType": "Coal",
+  "loadPort": "USNOL",
+  "dischargePort": "NLRTM",
+  "laycanStart": "2026-09-01T00:00:00Z",
+  "laycanEnd": "2026-09-05T00:00:00Z"
+}
