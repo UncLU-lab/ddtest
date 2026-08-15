@@ -14,6 +14,7 @@ import { CalculationPeriod } from '../entities/calculation-period.entity';
 import { LaytimeCalculation } from '../entities/laytime-calculation.entity';
 import {
   CalculationResult,
+  CalculationAuditResponse,
   LaytimeCalculationsService,
 } from './laytime-calculations.service';
 
@@ -43,6 +44,13 @@ export class LaytimeCalculationsController {
     @Param('calculationId', ParseUUIDPipe) calculationId: string,
   ): Promise<LaytimeCalculation> {
     return this.calculationsService.findOne(calculationId);
+  }
+
+  @Get('laytime-calculations/:calculationId/audit')
+  getAudit(
+    @Param('calculationId', ParseUUIDPipe) calculationId: string,
+  ): Promise<CalculationAuditResponse> {
+    return this.calculationsService.getAudit(calculationId);
   }
 
   @Get('laytime-calculations/:calculationId/periods')

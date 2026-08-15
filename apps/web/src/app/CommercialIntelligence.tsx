@@ -1,11 +1,18 @@
-import {
-  Download, ArrowUpRight, ChevronDown,
-} from "lucide-react";
+import { useEffect, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Cell,
 } from "recharts";
 import { PageHeader } from "./Layout";
+import {
+  getAllBulkDisputes,
+  getAllVessels,
+  getLaytimeCalculations,
+  getVoyages,
+  type BulkDispute,
+  type LaytimeCalculation,
+  type Voyage,
+} from "../lib/api";
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
 
@@ -38,19 +45,49 @@ const donutSegments = [
   { label: "Ops/other",        pct: 40, hours: 496, color: "#D1D5DB" },
 ];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const ACTIVE_CLAIM_STATUSES = new Set(["Open", "Evidence Submitted", "In Negotiation"]);
 
-function FilterSelect({ placeholder }: { placeholder: string }) {
-  return (
-    <div className="relative">
-      <select className="appearance-none outline-none cursor-pointer"
-        style={{ height: "30px", border: "0.5px solid #E5E7EB", borderRadius: "8px", padding: "0 24px 0 9px", fontSize: "12px", color: "#374151", backgroundColor: "#ffffff" }}>
-        <option>{placeholder}</option>
-      </select>
-      <ChevronDown size={10} className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "#9CA3AF" }} />
-    </div>
-  );
+type AnalyticsKpis = {
+  totalVoyages: number | null;
+  totalVessels: number | null;
+  activeClaims: number | null;
+  totalDisputedValue: number | null;
+  totalPositiveDemurrageExposure: number | null;
+};
+
+type StatusCount = {
+  status: string;
+  count: number;
+};
+
+type PortCount = {
+  port: string;
+  count: number;
+};
+
+function formatMetricValue(value: number | null, formatter?: Intl.NumberFormat): string {
+  if (value === null || Number.isNaN(value)) {
+    return "Not available";
+  }
+
+  return formatter ? formatter.format(value) : String(value);
 }
+
+function aggregateTopPorts(voyages: Voyage[], key: "loadPort" | "dischargePort"): PortCount[] {
+  const counts = new Map<string, number>();
+
+  voyages.forEach((voyage) => {
+    const port = String(voyage[key] ?? "").trim() || "Not available";
+    counts.set(port, (counts.get(port) ?? 0) + 1);
+  });
+
+  return Array.from(counts.entries())
+    .map(([port, count]) => ({ port, count }))
+    .sort((a, b) => b.count - a.count || a.port.localeCompare(b.port))
+    .slice(0, 5);
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function SectionLabel({ children, badge }: { children: React.ReactNode; badge?: React.ReactNode }) {
   return (
@@ -140,6 +177,179 @@ function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function CommercialIntelligence({ onTerminal }: { onTerminal?: () => void }) {
+  const [kpis, setKpis] = useState<AnalyticsKpis>({
+    totalVoyages: null,
+    totalVessels: null,
+    activeClaims: null,
+    totalDisputedValue: null,
+    totalPositiveDemurrageExposure: null,
+  });
+  const [claimsByStatus, setClaimsByStatus] = useState<StatusCount[] | null>(null);
+  const [loadPorts, setLoadPorts] = useState<PortCount[] | null>(null);
+  const [dischargePorts, setDischargePorts] = useState<PortCount[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function loadMetrics() {
+      setLoading(true);
+      setLoadError(null);
+      setClaimsByStatus(null);
+      setLoadPorts(null);
+      setDischargePorts(null);
+
+      const [voyagesResult, vesselsResult, disputesResult] = await Promise.allSettled([
+        getVoyages(),
+        getAllVessels(),
+        getAllBulkDisputes(),
+      ]);
+
+      const nextKpis: AnalyticsKpis = {
+        totalVoyages: null,
+        totalVessels: null,
+        activeClaims: null,
+        totalDisputedValue: null,
+        totalPositiveDemurrageExposure: null,
+      };
+
+      const issues: string[] = [];
+
+      if (voyagesResult.status === "fulfilled") {
+        const voyages = Array.isArray(voyagesResult.value) ? voyagesResult.value : [];
+        nextKpis.totalVoyages = voyages.length;
+        setLoadPorts(aggregateTopPorts(voyages, "loadPort"));
+        setDischargePorts(aggregateTopPorts(voyages, "dischargePort"));
+
+        const laytimeResults = await Promise.allSettled(
+          voyages.map((voyage: Voyage) => getLaytimeCalculations(voyage.id, { page: 1, limit: 1 }))
+        );
+
+        const exposureValues: number[] = [];
+        let laytimeFailed = false;
+
+        laytimeResults.forEach((result) => {
+          if (result.status !== "fulfilled") {
+            laytimeFailed = true;
+            return;
+          }
+
+          const calculation = result.value.data?.[0];
+          const demurrageValue = calculation ? Number((calculation as LaytimeCalculation).demurrageAmount) : NaN;
+
+          if (Number.isFinite(demurrageValue) && demurrageValue > 0) {
+            exposureValues.push(demurrageValue);
+          }
+        });
+
+        if (!laytimeFailed) {
+          nextKpis.totalPositiveDemurrageExposure = exposureValues.reduce((sum, value) => sum + value, 0);
+        } else {
+          issues.push("laytime calculations");
+        }
+      } else {
+        issues.push("voyages");
+        setLoadPorts(null);
+        setDischargePorts(null);
+      }
+
+      if (vesselsResult.status === "fulfilled") {
+        const vessels = Array.isArray(vesselsResult.value) ? vesselsResult.value : [];
+        nextKpis.totalVessels = vessels.length;
+      } else {
+        issues.push("vessels");
+      }
+
+      if (disputesResult.status === "fulfilled") {
+        const disputes = Array.isArray(disputesResult.value) ? disputesResult.value : [];
+        const statuses: Record<string, number> = {
+          Open: 0,
+          "Evidence Submitted": 0,
+          "In Negotiation": 0,
+          Resolved: 0,
+        };
+
+        const activeClaims = disputes.filter((dispute: BulkDispute) =>
+          ACTIVE_CLAIM_STATUSES.has(String(dispute.status ?? ""))
+        );
+
+        disputes.forEach((dispute: BulkDispute) => {
+          const status = String(dispute.status ?? "Not available");
+          if (status in statuses) {
+            statuses[status] += 1;
+          }
+        });
+
+        nextKpis.activeClaims = activeClaims.length;
+        nextKpis.totalDisputedValue = activeClaims.reduce((sum: number, dispute: BulkDispute) => {
+          const amount = Number(dispute.amountDisputed);
+          return Number.isFinite(amount) ? sum + amount : sum;
+        }, 0);
+        setClaimsByStatus([
+          { status: "Open", count: statuses.Open },
+          { status: "Evidence Submitted", count: statuses["Evidence Submitted"] },
+          { status: "In Negotiation", count: statuses["In Negotiation"] },
+          { status: "Resolved", count: statuses.Resolved },
+        ]);
+      } else {
+        issues.push("claims");
+        setClaimsByStatus(null);
+      }
+
+      if (!alive) {
+        return;
+      }
+
+      setKpis(nextKpis);
+      if (issues.length > 0) {
+        setLoadError(`Some analytics data could not be loaded: ${issues.join(", ")}.`);
+      }
+      setLoading(false);
+    }
+
+    void loadMetrics();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const currencyFormatter = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  });
+  const countFormatter = new Intl.NumberFormat("en-US");
+
+  const kpiCards = [
+    {
+      label: "Total voyages",
+      value: loading ? "Loading..." : formatMetricValue(kpis.totalVoyages, countFormatter),
+      sub: "Persisted voyage count",
+    },
+    {
+      label: "Total vessels",
+      value: loading ? "Loading..." : formatMetricValue(kpis.totalVessels, countFormatter),
+      sub: "Persisted vessel count",
+    },
+    {
+      label: "Active claims",
+      value: loading ? "Loading..." : formatMetricValue(kpis.activeClaims, countFormatter),
+      sub: "Open, Evidence Submitted, In Negotiation",
+    },
+    {
+      label: "Total disputed value",
+      value: loading ? "Loading..." : formatMetricValue(kpis.totalDisputedValue, currencyFormatter),
+      sub: "Sum of active disputed amounts",
+    },
+    {
+      label: "Total positive demurrage exposure",
+      value: loading ? "Loading..." : formatMetricValue(kpis.totalPositiveDemurrageExposure, currencyFormatter),
+      sub: "Latest laytime calculations only",
+    },
+  ];
+
   return (
     <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
       <PageHeader crumbs={[{ label: "Analytics", to: "/analytics" }, { label: "Commercial intelligence" }]} />
@@ -155,249 +365,143 @@ export default function CommercialIntelligence({ onTerminal }: { onTerminal?: ()
             Auto-syncing
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <FilterSelect placeholder="All suppliers" />
-          <FilterSelect placeholder="All ports" />
-          <FilterSelect placeholder="Last 30 days" />
-          <button className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
-            style={{ height: "30px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1e40af")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1A4ED8")}>
-            <Download size={11} /> Export
-          </button>
-        </div>
+        <div aria-hidden="true" />
       </div>
 
       {/* ── KPI Strip ── */}
+      {loadError && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          style={{
+            margin: "0 24px 12px",
+            padding: "10px 12px",
+            borderRadius: "8px",
+            border: "1px solid #FECACA",
+            backgroundColor: "#FEF2F2",
+            color: "#991B1B",
+            fontSize: "12px",
+          }}
+        >
+          {loadError}
+        </div>
+      )}
       <div className="flex gap-2.5 flex-shrink-0"
         style={{ padding: "14px 24px", borderBottom: "0.5px solid #E5E7EB", backgroundColor: "#ffffff" }}>
-        {[
-          { label: "Total exposure", value: "$4.2M", vc: "#C53030", sub: "▲ 12% vs prior period" },
-          { label: "Avg delay time", value: "42.5h", vc: "#B45309", sub: "▲ 4.4h vs prior period" },
-          { label: "Port congestion index", value: "7.8", vc: "#C53030", sub: "High — threshold 6.0" },
-          { label: "Operational efficiency", value: "88%", vc: "#22543D", sub: "Target 90% — 2pts below" },
-        ].map(({ label, value, vc, sub }) => (
+        {kpiCards.map(({ label, value, sub }) => (
           <div key={label} className="flex-1 rounded-lg border flex flex-col gap-1 p-[12px_14px]"
             style={{ backgroundColor: "#F9FAFB", borderColor: "#E5E7EB", borderWidth: "0.5px" }}>
             <p style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</p>
-            <p style={{ fontSize: "20px", fontWeight: 500, color: vc, lineHeight: 1.2 }}>{value}</p>
+            <p style={{ fontSize: "20px", fontWeight: 500, color: "#111827", lineHeight: 1.2 }}>{value}</p>
             <p style={{ fontSize: "11px", color: "#6B7280" }}>{sub}</p>
           </div>
         ))}
       </div>
-
-      {/* ── Main Body ── */}
-      <div className="flex gap-3.5 flex-1" style={{ padding: "16px 24px" }}>
-
-        {/* ── Left Column ── */}
-        <div className="flex-1 min-w-0 flex flex-col gap-3.5">
-
-          {/* Card 1 — Supplier performance */}
-          <div className="rounded-xl border p-[14px_16px]"
-            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-            <div className="flex items-center justify-between mb-3">
-              <SectionLabel>Supplier performance vs laycan</SectionLabel>
-              <div className="flex items-center gap-3">
-                <LegendSwatch color="#93C5FD" label="Target" />
-                <LegendSwatch color="#1A4ED8" label="Actual" solid />
-              </div>
-            </div>
-            <ResponsiveContainer width="100%" height={180}>
-              <BarChart data={supplierPerf} barGap={4} barCategoryGap="30%">
-                <CartesianGrid vertical={false} stroke="#F3F4F6" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
-                <YAxis domain={[80, 140]} tick={{ fontSize: 11, fill: "#9CA3AF" }} axisLine={false} tickLine={false} tickFormatter={(v) => `${v}%`} width={36} />
-                <Tooltip content={<ChartTooltip />} cursor={{ fill: "#F9FAFB" }} />
-                <Bar dataKey="target" name="Target" fill="#BFDBFE" radius={[2, 2, 0, 0]} maxBarSize={16} />
-                <Bar dataKey="actual" name="Actual" radius={[2, 2, 0, 0]} maxBarSize={16}>
-                  {supplierPerf.map((entry) => (
-                    <Cell key={entry.name} fill={entry.actual > 100 ? "#1A4ED8" : "#3B82F6"} />
+      <div style={{ padding: "16px 24px 0" }}>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <section
+            className="rounded-xl border p-[14px_16px]"
+            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+          >
+            <SectionLabel>Claims by status</SectionLabel>
+            {loading ? (
+              <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+                Loading persisted claims...
+              </p>
+            ) : claimsByStatus ? (
+              claimsByStatus.length > 0 ? (
+                <ul className="flex flex-col gap-2">
+                  {claimsByStatus.map((item) => (
+                    <li key={item.status} className="flex items-center justify-between py-1.5" style={{ borderBottom: "0.5px solid #F3F4F6" }}>
+                      <span style={{ fontSize: "12px", color: "#374151" }}>{item.status}</span>
+                      <span style={{ fontSize: "12px", fontWeight: 500, color: "#111827" }}>{item.count}</span>
+                    </li>
                   ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-            <p style={{ fontSize: "10px", color: "#9CA3AF", marginTop: "6px" }}>
-              Values above 100% indicate late delivery relative to laycan window
-            </p>
-          </div>
+                </ul>
+              ) : (
+                <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+                  No claims found.
+                </p>
+              )
+            ) : (
+              <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+                Not available.
+              </p>
+            )}
+          </section>
 
-          {/* Card 2 — Terminal delay distribution */}
-          <div className="rounded-xl border p-[14px_16px]"
-            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-            <div className="flex items-center justify-between mb-3">
-              <SectionLabel>Terminal delay distribution</SectionLabel>
-              <span className="rounded-full px-2 py-0.5 font-medium"
-                style={{ fontSize: "10px", backgroundColor: "#F3F4F6", color: "#374151" }}>
-                1,240 total hours
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-6 items-center">
-              <div className="flex justify-center">
-                <DonutChart />
-              </div>
-              <div className="flex flex-col gap-3">
-                {donutSegments.map((s) => (
-                  <div key={s.label}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span style={{ fontSize: "11px", color: "#374151" }}>{s.label}</span>
-                      <div className="flex items-center gap-2">
-                        <span style={{ fontSize: "11px", color: "#6B7280" }}>{s.hours}h</span>
-                        <span style={{ fontSize: "11px", fontWeight: 500, color: "#111827", width: "28px", textAlign: "right" }}>{s.pct}%</span>
-                      </div>
-                    </div>
-                    <div className="rounded-full overflow-hidden" style={{ height: "5px", backgroundColor: "#F3F4F6" }}>
-                      <div className="h-full rounded-full" style={{ width: `${s.pct * 2.5}%`, backgroundColor: s.color }} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Card 3 — Monthly trend */}
-          <div className="rounded-xl border p-[14px_16px]"
-            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-            <div className="flex items-center justify-between mb-3">
-              <SectionLabel>Monthly trend — cause breakdown</SectionLabel>
-              <div className="flex items-center gap-3">
-                <LegendSwatch color="#EF4444" label="Berth wait" solid />
-                <LegendSwatch color="#F59E0B" label="Weather" solid />
-                <LegendSwatch color="#D1D5DB" label="Ops/other" solid />
-              </div>
-            </div>
-            <ResponsiveContainer width="100%" height={160}>
-              <BarChart data={monthlyTrend} barCategoryGap="35%">
-                <CartesianGrid vertical={false} stroke="#F3F4F6" />
-                <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#9CA3AF" }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: "#9CA3AF" }} axisLine={false} tickLine={false} tickFormatter={(v) => `${v}h`} width={36} />
-                <Tooltip content={<ChartTooltip />} cursor={{ fill: "#F9FAFB" }} />
-                <Bar dataKey="berth" name="Berth wait" stackId="a" fill="#EF4444" />
-                <Bar dataKey="weather" name="Weather" stackId="a" fill="#F59E0B" />
-                <Bar dataKey="ops" name="Ops/other" stackId="a" fill="#D1D5DB" radius={[2, 2, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* Card 4 — Cost ranking */}
-          <div className="rounded-xl border p-[14px_16px]"
-            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-            <div className="flex items-center gap-2 mb-4">
-              <SectionLabel>Cost ranking by supplier</SectionLabel>
-              <span className="rounded-full px-2 py-0.5 font-semibold"
-                style={{ fontSize: "10px", backgroundColor: "#FED7D7", color: "#9B2C2C" }}>
-                4 high risk
-              </span>
-            </div>
-            <div className="flex flex-col gap-3">
-              {costRanking.map((row) => (
-                <div key={row.name} className="flex items-center gap-2">
-                  <span className="flex-shrink-0" style={{ width: "130px", fontSize: "12px", color: "#374151" }}>{row.name}</span>
-                  <div className="flex-1 rounded overflow-hidden" style={{ height: "8px", backgroundColor: "#F3F4F6", borderRadius: "4px" }}>
-                    <div className="h-full" style={{ width: `${row.pct}%`, backgroundColor: row.color, borderRadius: "4px" }} />
-                  </div>
-                  <span className="flex-shrink-0 font-medium text-right" style={{ width: "52px", fontSize: "12px", color: "#374151" }}>{row.value}</span>
+          <section
+            className="rounded-xl border p-[14px_16px]"
+            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+          >
+            <SectionLabel>Voyages by port</SectionLabel>
+            {loading ? (
+              <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+                Loading persisted voyages...
+              </p>
+            ) : loadPorts || dischargePorts ? (
+              <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                  <p style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
+                    Load ports
+                  </p>
+                  {loadPorts && loadPorts.length > 0 ? (
+                    <ul className="flex flex-col gap-2">
+                      {loadPorts.map((item) => (
+                        <li key={item.port} className="flex items-center justify-between py-1.5" style={{ borderBottom: "0.5px solid #F3F4F6" }}>
+                          <span style={{ fontSize: "12px", color: "#374151" }}>{item.port}</span>
+                          <span style={{ fontSize: "12px", fontWeight: 500, color: "#111827" }}>{item.count}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+                      No voyages found.
+                    </p>
+                  )}
                 </div>
-              ))}
-            </div>
-          </div>
-        </div>
 
-        {/* ── Right Sidebar ── */}
-        <div style={{ width: "200px", flexShrink: 0 }} className="flex flex-col gap-3">
-
-          {/* Card 1 — High risk suppliers */}
-          <div className="rounded-xl border p-[14px_16px]"
-            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-            <p className="mb-2.5" style={{ fontSize: "10px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              High risk suppliers
-            </p>
-            <div className="flex flex-col gap-2">
-              {[
-                { name: "Global Energy Co.", sub: "VOY-2310 · 12 voyages", risk: "HIGH", bg: "#FED7D7", text: "#9B2C2C" },
-                { name: "Pacific Logistics", sub: "VOY-2298 · 8 voyages", risk: "HIGH", bg: "#FED7D7", text: "#9B2C2C" },
-                { name: "Northern Oil", sub: "VOY-2187 · 5 voyages", risk: "MED", bg: "#FEEBC8", text: "#7B341E" },
-              ].map(({ name, sub, risk, bg, text }) => (
-                <div key={name} className="flex items-start justify-between rounded-lg border p-[10px_12px]"
-                  style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
-                  onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
-                  onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}>
-                  <div>
-                    <p style={{ fontSize: "12px", fontWeight: 500, color: "#111827", marginBottom: "2px" }}>{name}</p>
-                    <p style={{ fontSize: "11px", color: "#9CA3AF" }}>{sub}</p>
-                  </div>
-                  <span className="rounded-full px-1.5 py-0.5 font-semibold flex-shrink-0 ml-1"
-                    style={{ fontSize: "10px", backgroundColor: bg, color: text }}>{risk}</span>
+                <div>
+                  <p style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
+                    Discharge ports
+                  </p>
+                  {dischargePorts && dischargePorts.length > 0 ? (
+                    <ul className="flex flex-col gap-2">
+                      {dischargePorts.map((item) => (
+                        <li key={item.port} className="flex items-center justify-between py-1.5" style={{ borderBottom: "0.5px solid #F3F4F6" }}>
+                          <span style={{ fontSize: "12px", color: "#374151" }}>{item.port}</span>
+                          <span style={{ fontSize: "12px", fontWeight: 500, color: "#111827" }}>{item.count}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+                      No voyages found.
+                    </p>
+                  )}
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Card 2 — Operational feed */}
-          <div className="rounded-xl border p-[14px_16px]"
-            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-            <p className="mb-2" style={{ fontSize: "10px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Operational feed
-            </p>
-            {[
-              { type: "Port alert", color: "#EF4444", desc: "Rotterdam T4 avg wait +3.2h above monthly mean." },
-              { type: "Supplier alert", color: "#F59E0B", desc: "Global Energy showing 4th consecutive late delivery." },
-              { type: "Efficiency", color: "#10B981", desc: "Atlantic Fuels: 98% on-time across last 6 voyages." },
-              { type: "Weather", color: "#F59E0B", desc: "North Sea Biscay — 72h window disruption forecast." },
-            ].map(({ type, color, desc }, i, arr) => (
-              <div key={type} className="py-2" style={{ borderBottom: i < arr.length - 1 ? "0.5px solid #F3F4F6" : "none" }}>
-                <p style={{ fontSize: "10px", color, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "2px", fontWeight: 500 }}>{type}</p>
-                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.4 }}>{desc}</p>
               </div>
-            ))}
-          </div>
-
-          {/* Card 3 — Key metrics */}
-          <div className="rounded-xl border p-[14px_16px]"
-            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-            <p className="mb-2" style={{ fontSize: "10px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Key metrics
-            </p>
-            {[
-              { label: "Recovery rate", value: "91%", vc: "#22543D" },
-              { label: "Avg cycle time", value: "18 days" },
-              { label: "Suppliers on time", value: "62%", vc: "#B45309" },
-              { label: "Avg POB wait", value: "6.4h", vc: "#B45309" },
-              { label: "Active claims", value: "24" },
-            ].map(({ label, value, vc }) => (
-              <div key={label} className="flex items-center justify-between py-1.5" style={{ borderBottom: "0.5px solid #F3F4F6" }}>
-                <span style={{ fontSize: "12px", color: "#6B7280" }}>{label}</span>
-                <span style={{ fontSize: "12px", color: vc ?? "#111827", fontWeight: 500 }}>{value}</span>
-              </div>
-            ))}
-            <div style={{ borderTop: "0.5px solid #E5E7EB", margin: "8px 0" }} />
-            {[
-              { label: "Top delay driver", value: "Berth wait", vc: "#C53030" },
-              { label: "Worst terminal", value: "Rotterdam T4", vc: "#C53030" },
-            ].map(({ label, value, vc }) => (
-              <div key={label} className="flex items-center justify-between py-1.5" style={{ borderBottom: "0.5px solid #F3F4F6" }}>
-                <span style={{ fontSize: "12px", color: "#6B7280" }}>{label}</span>
-                <span style={{ fontSize: "12px", color: vc, fontWeight: 500 }}>{value}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Action buttons */}
-          <div className="flex flex-col gap-2">
-            <button onClick={onTerminal}
-              className="w-full flex items-center justify-center gap-1.5 rounded-lg transition-colors cursor-pointer"
-              style={{ height: "36px", fontSize: "13px", fontWeight: 500, color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1e40af")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1A4ED8")}>
-              Terminal analytics <ArrowUpRight size={13} />
-            </button>
-            <button className="w-full flex items-center justify-center gap-1.5 rounded-lg border transition-colors cursor-pointer"
-              style={{ height: "34px", fontSize: "13px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}>
-              Export full report
-            </button>
-          </div>
+            ) : (
+              <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+                Not available.
+              </p>
+            )}
+          </section>
         </div>
+      </div>
+      <div style={{ padding: "16px 24px" }}>
+        <section
+          className="rounded-xl border p-[14px_16px]"
+          style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+        >
+          <SectionLabel>Persisted analytics context</SectionLabel>
+          <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280", lineHeight: 1.5 }}>
+            Not available from persisted data.
+          </p>
+          <p style={{ marginTop: "4px", fontSize: "11px", color: "#6B7280", lineHeight: 1.5 }}>
+            The remaining supplier, terminal, and operational visuals are not backed by current persisted metrics yet.
+          </p>
+        </section>
       </div>
     </div>
   );

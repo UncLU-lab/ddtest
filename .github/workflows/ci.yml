@@ -14,12 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Verify
+  verify-api:
+    name: Verify API
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       DB_ENABLED: 'false'
+    defaults:
+      run:
+        working-directory: apps/api
 
     steps:
       - name: Check out repository
@@ -28,8 +31,9 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version-file: apps/api/.nvmrc
           cache: npm
+          cache-dependency-path: apps/api/package-lock.json
 
       - name: Install dependencies
         run: npm ci

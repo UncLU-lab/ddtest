@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -11,6 +12,8 @@ import { VoyagesService } from '../voyages/voyages.service';
 import { CreateBulkDisputeDto } from './dto/create-bulk-dispute.dto';
 import { ListBulkDisputesQueryDto } from './dto/list-bulk-disputes-query.dto';
 import { UpdateBulkDisputeDto } from './dto/update-bulk-dispute.dto';
+
+const ACTIVE_DISPUTE_STATUSES = ['Open', 'Evidence Submitted', 'In Negotiation'] as const;
 
 @Injectable()
 export class BulkDisputesService {
@@ -56,6 +59,20 @@ export class BulkDisputesService {
 
   async create(dto: CreateBulkDisputeDto): Promise<DisputeCaseBulk> {
     await this.voyagesService.ensureExists(dto.voyageId);
+
+    const existingActiveDispute = await this.disputes.findOne({
+      where: ACTIVE_DISPUTE_STATUSES.map((status) => ({
+        voyageId: dto.voyageId,
+        type: dto.type,
+        status,
+      })),
+    });
+
+    if (existingActiveDispute) {
+      throw new ConflictException(
+        'An active claim already exists for this voyage and claim type.',
+      );
+    }
 
     return this.disputes.save(
       this.disputes.create({

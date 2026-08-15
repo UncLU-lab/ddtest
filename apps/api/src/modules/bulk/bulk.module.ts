@@ -16,6 +16,7 @@ import { NorDocument } from './entities/nor-document.entity';
 import { SofDocument } from './entities/sof-document.entity';
 import { SofEvent } from './entities/sof-event.entity';
 import { Vessel } from './entities/vessel.entity';
+import { VoyageCounterparty } from './entities/voyage-counterparty.entity';
 import { Voyage } from './entities/voyage.entity';
 import { LaytimeCalculationsController } from './laytime-calculations/laytime-calculations.controller';
 import { LaytimeCalculationsService } from './laytime-calculations/laytime-calculations.service';
@@ -45,6 +46,7 @@ import { VoyagesService } from './voyages/voyages.service';
       SofDocument,
       SofEvent,
       Vessel,
+      VoyageCounterparty,
       Voyage,
     ]),
   ],

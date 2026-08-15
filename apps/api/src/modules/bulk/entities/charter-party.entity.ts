@@ -30,6 +30,47 @@ export class CharterParty extends UuidEntity {
   @Column({ name: 'effective_date', type: 'date' })
   effectiveDate!: string;
 
+  @Column({
+    name: 'laytime_allowed',
+    type: 'integer',
+    nullable: true,
+  })
+  laytimeAllowed?: number | null;
+
+  @Column({
+    name: 'demurrage_rate',
+    type: 'decimal',
+    precision: 12,
+    scale: 2,
+    nullable: true,
+  })
+  demurrageRate?: string | null;
+
+  @Column({
+    name: 'dispatch_rate',
+    type: 'decimal',
+    precision: 12,
+    scale: 2,
+    nullable: true,
+  })
+  dispatchRate?: string | null;
+
+  @Column({
+    name: 'time_counting_basis',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  timeCountingBasis?: string | null;
+
+  @Column({
+    name: 'nor_notice_period',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  norNoticePeriod?: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

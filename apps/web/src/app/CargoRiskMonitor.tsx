@@ -1,112 +1,326 @@
-import { useState } from "react";
-import { useNavigate } from "react-router";
-import { Filter, Download, ChevronDown, ExternalLink } from "lucide-react";
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import { useNavigate, useParams } from "react-router";
 import { PageHeader } from "./Layout";
-import { useShipments } from "./data/ShipmentsContext";
+import {
+  createVessel,
+  getVessel,
+  getVesselVoyages,
+  getVessels,
+  updateVessel,
+  type Vessel as ApiVessel,
+  type Voyage as ApiVoyage,
+} from "../lib/api";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+type VesselRecord = ApiVessel;
+type VoyageRecord = ApiVoyage;
 
-type RiskTier = "breach" | "emerging" | "safe";
+function formatText(value: unknown, fallback = "Not available") {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value.toLocaleString() : fallback;
+  }
 
-const RISK = {
-  breach: {
-    topBorder: "#EF4444",
-    badgeBg: "#FED7D7",
-    badgeText: "#9B2C2C",
-    badgeDot: "#C53030",
-    label: "Likely breach",
-    barColor: "#EF4444",
-    pillBg: "#FED7D7",
-    pillText: "#9B2C2C",
-  },
-  emerging: {
-    topBorder: "#F59E0B",
-    badgeBg: "#FEEBC8",
-    badgeText: "#7B341E",
-    badgeDot: "#C05621",
-    label: "Emerging risk",
-    barColor: "#F59E0B",
-    pillBg: "#FEEBC8",
-    pillText: "#7B341E",
-  },
-  safe: {
-    topBorder: "#10B981",
-    badgeBg: "#C6F6D5",
-    badgeText: "#22543D",
-    badgeDot: "#276749",
-    label: "Safe",
-    barColor: "#10B981",
-    pillBg: "#C6F6D5",
-    pillText: "#22543D",
-  },
-} as const;
+  const text = String(value).trim();
+  return text || fallback;
+}
 
-// ─── Data ────────────────────────────────────────────────────────────────────
+function formatDateTime(value: unknown, fallback = "Not available") {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
 
-const vessels = [
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) {
+    return fallback;
+  }
+
+  return date.toLocaleString();
+}
+
+function formatDwt(value: unknown, fallback = "Not available") {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  return `${numeric.toLocaleString()} DWT`;
+}
+
+function formatQuantity(value: unknown, fallback = "Not available") {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value.toLocaleString() : fallback;
+  }
+
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && String(value).trim() !== "") {
+    return numeric.toLocaleString();
+  }
+
+  const text = String(value).trim();
+  return text || fallback;
+}
+
+type VesselFormValues = {
+  name: string;
+  imo: string;
+  flag: string;
+  type: string;
+  dwt: string;
+};
+
+type VesselFormField = keyof VesselFormValues;
+type VesselFormErrors = Partial<Record<VesselFormField, string>>;
+
+const vesselFieldConfigs = [
   {
-    name: "MV Oceanic Voyager",
-    imo: "IMO 9412301 · Atlantic NW",
-    tier: "safe" as RiskTier,
-    supplierLaycan: "12–16 Oct 2023",
-    receiverLaycan: "15–19 Oct 2023",
-    eta: "Oct 15, 08:20",
-    etaPct: 72,
-    statusLabel: "On schedule",
-  },
-  {
-    name: "SS Northern Star",
-    imo: "IMO 9338821 · North Sea",
-    tier: "breach" as RiskTier,
-    supplierLaycan: "10–14 Oct 2023",
-    receiverLaycan: "13–16 Oct 2023",
-    eta: "Oct 14, 22:45",
-    etaPct: 91,
-    statusLabel: "Conflict detected",
-  },
-  {
-    name: "MT Caspian Relayer",
-    imo: "IMO 9501234 · Med East",
-    tier: "emerging" as RiskTier,
-    supplierLaycan: "14–18 Oct 2023",
-    receiverLaycan: "16–20 Oct 2023",
-    eta: "Oct 17, 14:00",
-    etaPct: 54,
-    statusLabel: "Tight window",
-  },
-  {
-    name: "MV Arctic Pioneer",
-    imo: "IMO 9220178 · Barents",
-    tier: "safe" as RiskTier,
-    supplierLaycan: "12–15 Oct 2023",
-    receiverLaycan: "13–16 Oct 2023",
-    eta: "Oct 14, 06:30",
-    etaPct: 88,
-    statusLabel: "Normal flow",
-  },
-  {
-    name: "SS Gulf Trader",
-    imo: "IMO 9389011 · Arabian Gulf",
-    tier: "emerging" as RiskTier,
-    supplierLaycan: "18–23 Oct 2023",
-    receiverLaycan: "20–25 Oct 2023",
-    eta: "Oct 22, 18:15",
-    etaPct: 31,
-    statusLabel: "Port delay risk",
+    id: "vessel-name",
+    label: "Name",
+    field: "name" as const,
+    type: "text",
+    placeholder: "e.g. Test Vessel",
   },
   {
-    name: "MT Pacific Sentinel",
-    imo: "IMO 9467892 · Trans-Pacific",
-    tier: "breach" as RiskTier,
-    supplierLaycan: "15–19 Oct 2023",
-    receiverLaycan: "18–22 Oct 2023",
-    eta: "Oct 19, 03:00",
-    etaPct: 78,
-    statusLabel: "Critical delay",
+    id: "vessel-imo",
+    label: "IMO",
+    field: "imo" as const,
+    type: "text",
+    placeholder: "7 digits, e.g. 9412301",
+    helper: "Enter exactly 7 digits.",
   },
-];
+  {
+    id: "vessel-flag",
+    label: "Flag",
+    field: "flag" as const,
+    type: "text",
+    placeholder: "e.g. Panama",
+  },
+  {
+    id: "vessel-type",
+    label: "Type",
+    field: "type" as const,
+    type: "text",
+    placeholder: "e.g. LNG carrier",
+  },
+  {
+    id: "vessel-dwt",
+    label: "DWT",
+    field: "dwt" as const,
+    type: "number",
+    placeholder: "e.g. 100000",
+    helper: "Enter a positive whole number.",
+  },
+] as const;
+
+function emptyVesselForm(): VesselFormValues {
+  return {
+    name: "",
+    imo: "",
+    flag: "",
+    type: "",
+    dwt: "",
+  };
+}
+
+function vesselFormFromRecord(vessel?: VesselRecord | null): VesselFormValues {
+  return {
+    name: String(vessel?.name ?? ""),
+    imo: String(vessel?.imo ?? ""),
+    flag: String(vessel?.flag ?? ""),
+    type: String(vessel?.type ?? ""),
+    dwt: vessel?.dwt !== undefined && vessel?.dwt !== null ? String(vessel.dwt) : "",
+  };
+}
+
+function validateVesselForm(form: VesselFormValues): VesselFormErrors {
+  const nextErrors: VesselFormErrors = {};
+
+  if (!form.name.trim()) {
+    nextErrors.name = "Name is required.";
+  }
+
+  if (!/^\d{7}$/.test(form.imo.trim())) {
+    nextErrors.imo = "IMO must be exactly 7 digits.";
+  }
+
+  if (!form.flag.trim()) {
+    nextErrors.flag = "Flag is required.";
+  }
+
+  if (!form.type.trim()) {
+    nextErrors.type = "Type is required.";
+  }
+
+  const dwtValue = Number(form.dwt);
+  if (
+    !form.dwt.trim() ||
+    !Number.isFinite(dwtValue) ||
+    !Number.isInteger(dwtValue) ||
+    dwtValue <= 0
+  ) {
+    nextErrors.dwt = "DWT must be a positive whole number.";
+  }
+
+  return nextErrors;
+}
+
+function VesselForm({
+  form,
+  errors,
+  onChange,
+  onSubmit,
+  onCancel,
+  submitLabel,
+  cancelLabel,
+  submitting,
+  submitError,
+}: {
+  form: VesselFormValues;
+  errors: VesselFormErrors;
+  onChange: (field: VesselFormField, value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCancel: () => void;
+  submitLabel: string;
+  cancelLabel: string;
+  submitting: boolean;
+  submitError?: string | null;
+}) {
+  const submitErrorId = "vessel-submit-error";
+
+  return (
+    <form
+      onSubmit={(event) => void onSubmit(event)}
+      className="rounded-xl border p-[16px_18px]"
+      style={{
+        borderColor: "#E5E7EB",
+        borderWidth: "0.5px",
+        backgroundColor: "#ffffff",
+        maxWidth: "560px",
+      }}
+    >
+      {submitError && (
+        <div
+          id={submitErrorId}
+          role="alert"
+          aria-live="assertive"
+          className="rounded-lg border px-4 py-3 mb-4"
+          style={{
+            borderColor: "#FCA5A5",
+            backgroundColor: "#FEF2F2",
+            color: "#991B1B",
+          }}
+        >
+          <p style={{ fontSize: "12px", fontWeight: 500 }}>{submitError}</p>
+        </div>
+      )}
+
+      <p
+        className="mb-4"
+        style={{
+          fontSize: "11px",
+          color: "#6B7280",
+          textTransform: "uppercase",
+          letterSpacing: "0.05em",
+        }}
+      >
+        All fields are required.
+      </p>
+
+      {vesselFieldConfigs.map((item) => {
+        const error = errors[item.field];
+        const helpId = `${item.id}-help`;
+        const errorTextId = `${item.id}-error`;
+        const describedBy = [item.helper ? helpId : null, error ? errorTextId : null, submitError ? submitErrorId : null]
+          .filter(Boolean)
+          .join(" ");
+
+        return (
+          <label key={item.id} htmlFor={item.id} className="flex flex-col gap-1.5 mb-4">
+            <span style={{ fontSize: "12px", fontWeight: 500, color: "#111827" }}>
+              {item.label} <span style={{ color: "#DC2626" }}>*</span>
+            </span>
+            <input
+              id={item.id}
+              type={item.type}
+              value={form[item.field]}
+              onChange={(event) => onChange(item.field, event.target.value)}
+              aria-invalid={error ? "true" : "false"}
+              aria-describedby={describedBy || undefined}
+              placeholder={item.placeholder}
+              min={item.field === "dwt" ? 1 : undefined}
+              step={item.field === "dwt" ? 1 : undefined}
+              inputMode={item.field === "dwt" ? "numeric" : undefined}
+              style={{
+                height: "36px",
+                border: `0.5px solid ${error ? "#DC2626" : "#E5E7EB"}`,
+                borderRadius: "8px",
+                padding: "0 10px",
+                fontSize: "12px",
+              }}
+            />
+            {item.helper && (
+              <p id={helpId} style={{ fontSize: "10px", color: "#6B7280", lineHeight: 1.3 }}>
+                {item.helper}
+              </p>
+            )}
+            {error && (
+              <p
+                id={errorTextId}
+                role="alert"
+                aria-live="assertive"
+                style={{ fontSize: "11px", color: "#B91C1C", lineHeight: 1.3 }}
+              >
+                {error}
+              </p>
+            )}
+          </label>
+        );
+      })}
+
+      <div className="flex items-center justify-end gap-2 pt-1" style={{ borderTop: "0.5px solid #E5E7EB" }}>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-3 py-1.5 rounded-md border cursor-pointer"
+          style={{
+            fontSize: "12px",
+            color: "#374151",
+            borderColor: "#E5E7EB",
+            borderWidth: "0.5px",
+            backgroundColor: "#ffffff",
+          }}
+        >
+          {cancelLabel}
+        </button>
+        <button
+          type="submit"
+          disabled={submitting}
+          className="px-3 py-1.5 rounded-md"
+          style={{
+            fontSize: "12px",
+            color: "#ffffff",
+            backgroundColor: submitting ? "#93C5FD" : "#1A4ED8",
+            border: "none",
+            cursor: submitting ? "not-allowed" : "pointer",
+          }}
+        >
+          {submitLabel}
+        </button>
+      </div>
+    </form>
+  );
+}
 
 const feedItems = [
   {
@@ -152,103 +366,6 @@ const feedItems = [
   },
 ];
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-function RiskBadge({ tier }: { tier: RiskTier }) {
-  const c = RISK[tier];
-  return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold flex-shrink-0"
-      style={{ backgroundColor: c.badgeBg, color: c.badgeText, fontSize: "10px" }}
-    >
-      <span
-        className="inline-block rounded-full flex-shrink-0"
-        style={{ width: "5px", height: "5px", backgroundColor: c.badgeDot }}
-      />
-      {c.label}
-    </span>
-  );
-}
-
-function EtaRow({ pct, color, eta }: { pct: number; color: string; eta: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span style={{ width: "90px", fontSize: "12px", color: "#6B7280", flexShrink: 0 }}>
-        Calculated ETA
-      </span>
-      <div
-        className="flex-1 rounded-full overflow-hidden"
-        style={{ height: "4px", backgroundColor: "#F3F4F6" }}
-      >
-        <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
-      </div>
-      <span style={{ fontSize: "12px", color: "#111827", flexShrink: 0 }}>{eta}</span>
-    </div>
-  );
-}
-
-function DataRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span style={{ width: "90px", fontSize: "12px", color: "#6B7280", flexShrink: 0 }}>
-        {label}
-      </span>
-      <span style={{ fontSize: "12px", color: "#111827" }}>{value}</span>
-    </div>
-  );
-}
-
-function VesselCard({ vessel }: { vessel: (typeof vessels)[0] }) {
-  const c = RISK[vessel.tier];
-  return (
-    <div
-      className="flex flex-col cursor-pointer transition-colors"
-      style={{
-        backgroundColor: "#ffffff",
-        border: "0.5px solid #E5E7EB",
-        borderRadius: "0 0 12px 12px",
-        borderTop: `2px solid ${c.topBorder}`,
-      }}
-      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#FAFAFA")}
-      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}
-    >
-      <div className="flex flex-col gap-2 p-[13px_14px]">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-2">
-          <div>
-            <p style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>{vessel.name}</p>
-            <p style={{ fontSize: "10px", color: "#9CA3AF", marginTop: "2px" }}>{vessel.imo}</p>
-          </div>
-          <RiskBadge tier={vessel.tier} />
-        </div>
-
-        {/* Data rows */}
-        <div className="flex flex-col gap-1.5 mt-0.5">
-          <DataRow label="Supplier laycan" value={vessel.supplierLaycan} />
-          <DataRow label="Receiver laycan" value={vessel.receiverLaycan} />
-          <EtaRow pct={vessel.etaPct} color={c.barColor} eta={vessel.eta} />
-        </div>
-      </div>
-
-      {/* Footer */}
-      <div
-        className="flex items-center justify-between px-[14px] py-[8px]"
-        style={{ borderTop: "0.5px solid #E5E7EB" }}
-      >
-        <span style={{ fontSize: "10px", color: "#9CA3AF" }}>
-          Laytime clock active
-        </span>
-        <span
-          className="rounded px-1.5 py-0.5 font-medium"
-          style={{ fontSize: "10px", backgroundColor: c.pillBg, color: c.pillText, borderRadius: "4px" }}
-        >
-          {vessel.statusLabel}
-        </span>
-      </div>
-    </div>
-  );
-}
-
 function FeedItem({
   vessel,
   desc,
@@ -272,16 +389,9 @@ function FeedItem({
     >
       <div className="flex items-center justify-between gap-2">
         <span style={{ fontSize: "12px", fontWeight: 500, color: "#111827" }}>{vessel}</span>
-        {link && (
-          <button
-            className="flex items-center gap-0.5 transition-colors flex-shrink-0"
-            style={{ fontSize: "11px", color: "#1A4ED8", background: "none", border: "none", cursor: "pointer", padding: 0 }}
-            onClick={() => onMitigate()}
-          >
-            Mitigate
-            <ExternalLink size={10} style={{ marginLeft: "2px" }} />
-          </button>
-        )}
+        {link ? (
+          <span style={{ fontSize: "11px", color: "#6B7280" }}>Mitigation available</span>
+        ) : null}
       </div>
       <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.4 }}>{desc}</p>
     </div>
@@ -319,257 +429,896 @@ function StatusItem({
   );
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+function VesselCard({
+  vessel,
+  onOpen,
+}: {
+  vessel: VesselRecord;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex flex-col text-left transition-colors cursor-pointer"
+      style={{
+        backgroundColor: "#ffffff",
+        border: "0.5px solid #E5E7EB",
+        borderRadius: "0 0 12px 12px",
+        borderTop: "2px solid #1A4ED8",
+        padding: 0,
+      }}
+      aria-label={`Open vessel ${formatText(vessel.name)}`}
+    >
+      <div className="flex flex-col gap-2 p-[13px_14px]">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>
+              {formatText(vessel.name)}
+            </p>
+            <p style={{ fontSize: "10px", color: "#9CA3AF", marginTop: "2px" }}>
+              {formatText(vessel.imo)}
+            </p>
+          </div>
 
-export default function CargoRiskMonitor() {
-  const navigate = useNavigate();
-  const { shipments } = useShipments();
-  const [corridorFilter, setCorridorFilter] = useState("All corridors");
-  const [tierFilter, setTierFilter] = useState<Set<RiskTier>>(new Set(["breach", "emerging", "safe"]));
-  const [showFilters, setShowFilters] = useState(false);
+          <span
+            className="rounded-full px-2 py-0.5 font-medium"
+            style={{
+              fontSize: "10px",
+              color: "#1E40AF",
+              backgroundColor: "#EFF6FF",
+              flexShrink: 0,
+            }}
+          >
+            {formatText(vessel.flag)}
+          </span>
+        </div>
 
-  const vesselCorridor = (v: (typeof vessels)[0]) => v.imo.split("·")[1]?.trim() ?? "";
-  const filteredVessels = vessels.filter(
-    (v) => (corridorFilter === "All corridors" || vesselCorridor(v) === corridorFilter) && tierFilter.has(v.tier)
+        <div className="flex flex-col gap-1.5 mt-0.5">
+          <div className="flex items-center justify-between gap-2">
+            <span style={{ fontSize: "12px", color: "#6B7280", flexShrink: 0 }}>Type</span>
+            <span style={{ fontSize: "12px", color: "#111827", textAlign: "right" }}>
+              {formatText(vessel.type)}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span style={{ fontSize: "12px", color: "#6B7280", flexShrink: 0 }}>DWT</span>
+            <span style={{ fontSize: "12px", color: "#111827", textAlign: "right" }}>
+              {formatDwt(vessel.dwt)}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span style={{ fontSize: "12px", color: "#6B7280", flexShrink: 0 }}>Created</span>
+            <span style={{ fontSize: "12px", color: "#111827", textAlign: "right" }}>
+              {formatDateTime(vessel.createdAt)}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span style={{ fontSize: "12px", color: "#6B7280", flexShrink: 0 }}>Updated</span>
+            <span style={{ fontSize: "12px", color: "#111827", textAlign: "right" }}>
+              {formatDateTime(vessel.updatedAt)}
+            </span>
+          </div>
+        </div>
+      </div>
+    </button>
   );
+}
 
-  function toggleTier(tier: RiskTier) {
-    setTierFilter((prev) => {
-      const next = new Set(prev);
-      if (next.has(tier)) next.delete(tier); else next.add(tier);
-      return next;
-    });
+function VesselVoyageCard({
+  voyage,
+  onOpen,
+}: {
+  voyage: VoyageRecord;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex flex-col text-left transition-colors cursor-pointer"
+      style={{
+        backgroundColor: "#ffffff",
+        border: "0.5px solid #E5E7EB",
+        borderRadius: "10px",
+        padding: "14px 16px",
+      }}
+      aria-label={`Open voyage ${formatText(voyage.reference, voyage.id)}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>
+            {formatText(voyage.reference)}
+          </p>
+          <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "3px" }}>
+            {formatText(voyage.status)}
+          </p>
+        </div>
+        <span
+          className="rounded-full px-2 py-0.5 font-medium"
+          style={{
+            fontSize: "10px",
+            color: "#1E40AF",
+            backgroundColor: "#EFF6FF",
+            flexShrink: 0,
+          }}
+        >
+          {formatText(voyage.cargoType)}
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2">
+        {[
+          ["Load port", formatText(voyage.loadPort)],
+          ["Discharge port", formatText(voyage.dischargePort)],
+          ["Cargo quantity", formatQuantity(voyage.cargoQuantity)],
+          ["ETA", formatDateTime(voyage.eta)],
+        ].map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <span style={{ fontSize: "10px", color: "#6B7280", display: "block" }}>{label}</span>
+            <span
+              style={{
+                fontSize: "12px",
+                color: "#111827",
+                fontWeight: 500,
+                display: "block",
+                marginTop: "1px",
+                wordBreak: "break-word",
+              }}
+            >
+              {value}
+            </span>
+          </div>
+        ))}
+      </div>
+    </button>
+  );
+}
+
+export function VesselDetail() {
+  const { vesselId } = useParams();
+  const navigate = useNavigate();
+  const [vessel, setVessel] = useState<VesselRecord | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [voyages, setVoyages] = useState<VoyageRecord[]>([]);
+  const [voyagesLoading, setVoyagesLoading] = useState(false);
+  const [voyagesError, setVoyagesError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function loadVessel() {
+      if (!vesselId) {
+        if (alive) {
+          setVessel(null);
+          setLoading(false);
+          setNotFound(true);
+        }
+        return;
+      }
+
+      setLoading(true);
+      setError(null);
+      setNotFound(false);
+
+      try {
+        const result = await getVessel(vesselId);
+        if (!alive) return;
+
+        setVessel(result ?? null);
+        setNotFound(!result);
+        setIsEditing(false);
+        setSuccessMessage(null);
+      } catch (loadError: any) {
+        if (!alive) return;
+
+        if (loadError?.status === 404) {
+          setNotFound(true);
+          setVessel(null);
+        } else {
+          setError(loadError?.message ?? "Unable to load vessel.");
+          setVessel(null);
+        }
+      } finally {
+        if (alive) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadVessel();
+
+    return () => {
+      alive = false;
+    };
+  }, [vesselId]);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function loadVoyages() {
+      if (!vesselId || !vessel) {
+        if (alive) {
+          setVoyages([]);
+          setVoyagesLoading(false);
+          setVoyagesError(null);
+        }
+        return;
+      }
+
+      setVoyagesLoading(true);
+      setVoyagesError(null);
+
+      try {
+        const result = await getVesselVoyages(vesselId);
+        if (!alive) return;
+
+        setVoyages(Array.isArray(result) ? result : []);
+      } catch (loadError: any) {
+        if (!alive) return;
+
+        setVoyagesError(loadError?.message ?? "Unable to load voyages.");
+        setVoyages([]);
+      } finally {
+        if (alive) {
+          setVoyagesLoading(false);
+        }
+      }
+    }
+
+    void loadVoyages();
+
+    return () => {
+      alive = false;
+    };
+  }, [vesselId, vessel]);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", backgroundColor: "#F9FAFB", padding: "40px", fontFamily: "'Inter', sans-serif" }}>
+        <h1 style={{ fontSize: "20px", fontWeight: 500, color: "#111827" }}>Loading vessel</h1>
+        <p style={{ marginTop: "8px", fontSize: "13px", color: "#6B7280" }}>
+          Fetching the persisted vessel record from the backend.
+        </p>
+      </div>
+    );
   }
 
-  function exportReport() {
-    const header = ["Vessel", "IMO / corridor", "Risk tier", "Supplier laycan", "Receiver laycan", "ETA", "Status"];
-    const rows = filteredVessels.map((v) => [v.name, v.imo, v.tier, v.supplierLaycan, v.receiverLaycan, v.eta, v.statusLabel]);
-    const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "cargo-risk-report.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+  if (error) {
+    return (
+      <div style={{ minHeight: "100vh", backgroundColor: "#F9FAFB", padding: "40px", fontFamily: "'Inter', sans-serif" }}>
+        <h1 style={{ fontSize: "20px", fontWeight: 500, color: "#111827" }}>Vessel could not be loaded</h1>
+        <p style={{ marginTop: "8px", fontSize: "13px", color: "#6B7280" }}>{error}</p>
+        <button
+          type="button"
+          onClick={() => navigate("/vessels")}
+          style={{
+            marginTop: "20px",
+            backgroundColor: "#1A4ED8",
+            color: "#ffffff",
+            border: "none",
+            borderRadius: "6px",
+            padding: "8px 14px",
+            cursor: "pointer",
+          }}
+        >
+          Back to vessels
+        </button>
+      </div>
+    );
   }
 
-  const onMitigate = () => navigate("/analytics/recommendations");
-  const onVesselCard = (vesselName: string) => {
-    const match = shipments.find((s) => s.vessel === vesselName);
-    navigate(`/shipments/${match ? match.id : shipments[0].id}`);
-  };
+  if (notFound || !vessel) {
+    return (
+      <div style={{ minHeight: "100vh", backgroundColor: "#F9FAFB", padding: "40px", fontFamily: "'Inter', sans-serif" }}>
+        <h1 style={{ fontSize: "20px", fontWeight: 500, color: "#111827" }}>Vessel not found</h1>
+        <p style={{ marginTop: "8px", fontSize: "13px", color: "#6B7280" }}>
+          The requested vessel could not be found.
+        </p>
+        <button
+          type="button"
+          onClick={() => navigate("/vessels")}
+          style={{
+            marginTop: "20px",
+            backgroundColor: "#1A4ED8",
+            color: "#ffffff",
+            border: "none",
+            borderRadius: "6px",
+            padding: "8px 14px",
+            cursor: "pointer",
+          }}
+        >
+          Back to vessels
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
-      <PageHeader crumbs={[{ label: "Vessels" }]} />
+      <PageHeader
+        crumbs={[{ label: "Vessels", to: "/vessels" }, { label: formatText(vessel.name) }]}
+        actions={
+          !isEditing ? (
+            <button
+              type="button"
+              onClick={() => setIsEditing(true)}
+              className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
+              style={{
+                height: "34px",
+                fontSize: "13px",
+                color: "#ffffff",
+                backgroundColor: "#1A4ED8",
+                border: "none",
+              }}
+            >
+              Edit vessel
+            </button>
+          ) : null
+        }
+      />
 
-      {/* ── Page Header ── */}
+      {successMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            margin: "16px 24px 0",
+            padding: "10px 12px",
+            borderRadius: "8px",
+            border: "1px solid #BBF7D0",
+            backgroundColor: "#F0FDF4",
+            color: "#166534",
+            fontSize: "12px",
+          }}
+        >
+          {successMessage}
+        </div>
+      )}
+
       <div
         className="flex items-center justify-between flex-shrink-0"
-        style={{ padding: "16px 24px", borderBottom: "0.5px solid #E5E7EB", backgroundColor: "#ffffff" }}
+        style={{
+          padding: "16px 24px",
+          borderBottom: "0.5px solid #E5E7EB",
+          backgroundColor: "#ffffff",
+        }}
       >
         <div>
           <div className="flex items-center gap-2.5 mb-1">
-            <h1 style={{ fontSize: "17px", fontWeight: 500, color: "#111827" }}>Cargo risk monitor</h1>
-            {/* Live console badge */}
-            <span
-              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5"
-              style={{ backgroundColor: "#C6F6D5", fontSize: "11px", fontWeight: 500, color: "#22543D" }}
-            >
-              <span
-                className="rounded-full animate-pulse"
-                style={{ width: "6px", height: "6px", backgroundColor: "#22543D" }}
-              />
-              Live console
-            </span>
+            <h1 style={{ fontSize: "17px", fontWeight: 500, color: "#111827" }}>
+              {formatText(vessel.name)}
+            </h1>
           </div>
           <p style={{ fontSize: "12px", color: "#6B7280" }}>
-            Monitoring 42 active shipments across 12 maritime corridors
+            Persisted vessel record loaded from the backend.
           </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {/* Corridor filter */}
-          <div className="relative">
-            <select
-              value={corridorFilter}
-              onChange={(e) => setCorridorFilter(e.target.value)}
-              className="appearance-none outline-none cursor-pointer"
-              style={{
-                height: "34px",
-                border: "0.5px solid #E5E7EB",
-                borderRadius: "8px",
-                padding: "0 28px 0 10px",
-                fontSize: "12px",
-                color: "#374151",
-                backgroundColor: "#ffffff",
-              }}
-            >
-              <option>All corridors</option>
-              <option>Atlantic NW</option>
-              <option>North Sea</option>
-              <option>Med East</option>
-              <option>Barents</option>
-              <option>Arabian Gulf</option>
-              <option>Trans-Pacific</option>
-            </select>
-            <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "#9CA3AF" }} />
-          </div>
-
-          <div className="relative">
-            <button
-              onClick={() => setShowFilters((v) => !v)}
-              className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
-              style={{ height: "34px", fontSize: "13px", color: showFilters ? "#1A4ED8" : "#374151", borderColor: showFilters ? "#1A4ED8" : "#E5E7EB", borderWidth: "0.5px", backgroundColor: showFilters ? "#EFF6FF" : "#ffffff" }}
-            >
-              <Filter size={12} />
-              Filters{tierFilter.size < 3 ? ` (${tierFilter.size})` : ""}
-            </button>
-            {showFilters && (
-              <div className="absolute right-0 rounded-lg border p-3 z-10"
-                style={{ top: "calc(100% + 6px)", width: "180px", backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px", boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}>
-                <p style={{ fontSize: "10px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px" }}>Risk tier</p>
-                <div className="flex flex-col gap-1.5">
-                  {(["breach", "emerging", "safe"] as RiskTier[]).map((tier) => (
-                    <label key={tier} className="flex items-center gap-2 cursor-pointer" style={{ fontSize: "12px", color: "#374151" }}>
-                      <input type="checkbox" checked={tierFilter.has(tier)} onChange={() => toggleTier(tier)} />
-                      {tier[0].toUpperCase() + tier.slice(1)}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <button
-            onClick={exportReport}
-            className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
-            style={{ height: "34px", fontSize: "13px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1e40af")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1A4ED8")}
-          >
-            <Download size={12} />
-            Export report
-          </button>
         </div>
       </div>
 
-      {/* ── KPI Strip ── */}
+      <div className="flex gap-3.5 flex-1" style={{ padding: "16px 24px" }}>
+        <div className="flex-1 min-w-0">
+          <h2
+            className="mb-3"
+            style={{
+              fontSize: "11px",
+              color: "#6B7280",
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
+          >
+            Vessel details
+          </h2>
+          {isEditing ? (
+            <VesselEditForm
+              vessel={vessel}
+              onCancel={() => setIsEditing(false)}
+              onSaved={(nextVessel) => {
+                setVessel(nextVessel);
+                setIsEditing(false);
+                setSuccessMessage("Vessel updated successfully.");
+              }}
+            />
+          ) : (
+            <div
+              className="rounded-xl border p-[16px_18px]"
+              style={{
+                borderColor: "#E5E7EB",
+                borderWidth: "0.5px",
+                backgroundColor: "#ffffff",
+              }}
+            >
+              {[
+                ["Name", formatText(vessel.name)],
+                ["IMO", formatText(vessel.imo)],
+                ["Flag", formatText(vessel.flag)],
+                ["Type", formatText(vessel.type)],
+                ["DWT", formatDwt(vessel.dwt)],
+                ["Created at", formatDateTime(vessel.createdAt)],
+                ["Updated at", formatDateTime(vessel.updatedAt)],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="flex items-center justify-between py-1.5"
+                  style={{ borderBottom: "0.5px solid #F3F4F6" }}
+                >
+                  <span style={{ fontSize: "12px", color: "#6B7280" }}>{label}</span>
+                  <span style={{ fontSize: "12px", color: "#111827", fontWeight: 500 }}>
+                    {value}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-5">
+            <h2
+              className="mb-3"
+              style={{
+                fontSize: "11px",
+                color: "#6B7280",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              Voyages
+            </h2>
+
+            <div
+              className="rounded-xl border p-[16px_18px]"
+              style={{
+                borderColor: "#E5E7EB",
+                borderWidth: "0.5px",
+                backgroundColor: "#ffffff",
+              }}
+            >
+              {voyagesLoading && (
+                <p style={{ fontSize: "12px", color: "#6B7280" }}>
+                  Loading persisted voyages...
+                </p>
+              )}
+
+              {!voyagesLoading && voyagesError && (
+                <div role="status" aria-live="polite" style={{ fontSize: "12px", color: "#991B1B" }}>
+                  {voyagesError}
+                </div>
+              )}
+
+              {!voyagesLoading && !voyagesError && voyages.length === 0 && (
+                <div role="status" aria-live="polite">
+                  <p style={{ fontSize: "12px", color: "#111827", fontWeight: 500 }}>
+                    No voyages found.
+                  </p>
+                  <p style={{ marginTop: "4px", fontSize: "11px", color: "#6B7280" }}>
+                    Persisted voyages will appear here when available.
+                  </p>
+                </div>
+              )}
+
+              {!voyagesLoading && !voyagesError && voyages.length > 0 && (
+                <div className="grid gap-3">
+                  {voyages.map((voyage) => (
+                    <VesselVoyageCard
+                      key={voyage.id}
+                      voyage={voyage}
+                      onOpen={() => navigate(`/shipments/${voyage.id}`)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ width: "200px", flexShrink: 0 }}>
+          <p
+            className="mb-3"
+            style={{
+              fontSize: "11px",
+              color: "#6B7280",
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
+          >
+            Risk intelligence feed
+          </p>
+
+          <div
+            role="status"
+            aria-live="polite"
+            className="rounded-lg border p-3"
+            style={{
+              borderColor: "#E5E7EB",
+              borderWidth: "0.5px",
+              backgroundColor: "#ffffff",
+            }}
+          >
+            <p style={{ fontSize: "12px", color: "#111827", fontWeight: 500 }}>
+              No live vessel risk intelligence available.
+            </p>
+            <p style={{ marginTop: "4px", fontSize: "11px", color: "#6B7280", lineHeight: 1.4 }}>
+              Vessel risk intelligence will appear here when persisted signals are available.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function VesselCreateForm() {
+  const navigate = useNavigate();
+  const [form, setForm] = useState<VesselFormValues>(emptyVesselForm());
+  const [fieldErrors, setFieldErrors] = useState<VesselFormErrors>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const nextErrors = validateVesselForm(form);
+    setFieldErrors(nextErrors);
+    setSubmitError(null);
+
+    if (Object.keys(nextErrors).length > 0) {
+      return;
+    }
+
+    setSubmitting(true);
+
+    try {
+      const created = await createVessel({
+        name: form.name.trim(),
+        imo: form.imo.trim(),
+        flag: form.flag.trim(),
+        type: form.type.trim(),
+        dwt: Number(form.dwt),
+      });
+
+      navigate(`/vessels/${created.id}`);
+    } catch (error: any) {
+      setSubmitError(error?.message ?? "Unable to create vessel.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function updateField(field: VesselFormField, value: string) {
+    setForm((current) => ({ ...current, [field]: value }));
+    setFieldErrors((current) => {
+      if (!current[field]) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+    setSubmitError(null);
+  }
+
+  return (
+    <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
+      <PageHeader crumbs={[{ label: "Vessels", to: "/vessels" }, { label: "New vessel" }]} />
+
+      <div
+        className="flex items-center justify-between flex-shrink-0"
+        style={{
+          padding: "16px 24px",
+          borderBottom: "0.5px solid #E5E7EB",
+          backgroundColor: "#ffffff",
+        }}
+      >
+        <div>
+          <div className="flex items-center gap-2.5 mb-1">
+            <h1 style={{ fontSize: "17px", fontWeight: 500, color: "#111827" }}>New vessel</h1>
+          </div>
+          <p style={{ fontSize: "12px", color: "#6B7280" }}>
+            Create a persisted vessel record using backend-supported fields only.
+          </p>
+        </div>
+      </div>
+
+      <div style={{ padding: "16px 24px" }}>
+        <VesselForm
+          form={form}
+          errors={fieldErrors}
+          onChange={updateField}
+          onSubmit={handleSubmit}
+          onCancel={() => navigate("/vessels")}
+          submitLabel={submitting ? "Creating..." : "Create vessel"}
+          cancelLabel="Cancel"
+          submitting={submitting}
+          submitError={submitError}
+        />
+      </div>
+    </div>
+  );
+}
+
+export function VesselEditForm({
+  vessel,
+  onCancel,
+  onSaved,
+}: {
+  vessel: VesselRecord;
+  onCancel: () => void;
+  onSaved: (vessel: VesselRecord) => void;
+}) {
+  const [form, setForm] = useState<VesselFormValues>(() => vesselFormFromRecord(vessel));
+  const [fieldErrors, setFieldErrors] = useState<VesselFormErrors>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setForm(vesselFormFromRecord(vessel));
+    setFieldErrors({});
+    setSubmitError(null);
+  }, [vessel.id]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const nextErrors = validateVesselForm(form);
+    setFieldErrors(nextErrors);
+    setSubmitError(null);
+
+    if (Object.keys(nextErrors).length > 0) {
+      return;
+    }
+
+    setSubmitting(true);
+
+    try {
+      const updated = await updateVessel(vessel.id, {
+        name: form.name.trim(),
+        imo: form.imo.trim(),
+        flag: form.flag.trim(),
+        type: form.type.trim(),
+        dwt: Number(form.dwt),
+      });
+
+      const refreshed = await getVessel(vessel.id);
+      onSaved(refreshed ?? updated);
+    } catch (error: any) {
+      setSubmitError(error?.message ?? "Unable to update vessel.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function updateField(field: VesselFormField, value: string) {
+    setForm((current) => ({ ...current, [field]: value }));
+    setFieldErrors((current) => {
+      if (!current[field]) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+    setSubmitError(null);
+  }
+
+  return (
+    <VesselForm
+      form={form}
+      errors={fieldErrors}
+      onChange={updateField}
+      onSubmit={handleSubmit}
+      onCancel={onCancel}
+      submitLabel={submitting ? "Saving..." : "Save changes"}
+      cancelLabel="Cancel"
+      submitting={submitting}
+      submitError={submitError}
+    />
+  );
+}
+
+export default function CargoRiskMonitor() {
+  const navigate = useNavigate();
+  const [vessels, setVessels] = useState<VesselRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function loadVessels() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const result = await getVessels({ page: 1, limit: 200 });
+        if (!alive) return;
+
+        setVessels(Array.isArray(result) ? result : []);
+      } catch (loadError: any) {
+        if (!alive) return;
+
+        setError(loadError?.message ?? "Unable to load vessels.");
+        setVessels([]);
+      } finally {
+        if (alive) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadVessels();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  return (
+    <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
+      <PageHeader
+        crumbs={[{ label: "Vessels" }]}
+        actions={
+          <button
+            type="button"
+            onClick={() => navigate("/vessels/new")}
+            className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
+            style={{
+              height: "34px",
+              fontSize: "13px",
+              color: "#ffffff",
+              backgroundColor: "#1A4ED8",
+              border: "none",
+            }}
+          >
+            New vessel
+          </button>
+        }
+      />
+
+      <div
+        className="flex items-center justify-between flex-shrink-0"
+        style={{
+          padding: "16px 24px",
+          borderBottom: "0.5px solid #E5E7EB",
+          backgroundColor: "#ffffff",
+        }}
+      >
+        <div>
+          <div className="flex items-center gap-2.5 mb-1">
+            <h1 style={{ fontSize: "17px", fontWeight: 500, color: "#111827" }}>
+              Vessels
+            </h1>
+          </div>
+          <p style={{ fontSize: "12px", color: "#6B7280" }}>
+            Persisted vessel records loaded from the backend.
+          </p>
+        </div>
+      </div>
+
       <div
         className="flex gap-4 flex-shrink-0"
-        style={{ padding: "16px 24px", borderBottom: "0.5px solid #E5E7EB", backgroundColor: "#ffffff" }}
+        style={{
+          padding: "16px 24px",
+          borderBottom: "0.5px solid #E5E7EB",
+          backgroundColor: "#ffffff",
+        }}
       >
         {[
-          { label: "Total vessels", value: "42", vc: undefined, sub: "Across 12 corridors" },
-          { label: "Breach risk", value: "3", vc: "#C53030", sub: "Immediate attention" },
-          { label: "Emerging risk", value: "4", vc: "#B45309", sub: "Monitoring required" },
-          { label: "Global efficiency", value: "94%", vc: "#22543D", sub: "+1.2pts vs last week" },
+          {
+            label: "Total vessels",
+            value: loading ? "Not available" : String(vessels.length),
+            vc: undefined,
+            sub: loading ? "Not available" : "Loaded from persisted backend data",
+          },
+          { label: "Breach risk", value: "Not available", vc: "#111827", sub: "Not available" },
+          { label: "Emerging risk", value: "Not available", vc: "#111827", sub: "Not available" },
+          { label: "Global efficiency", value: "Not available", vc: "#111827", sub: "Not available" },
         ].map(({ label, value, vc, sub }) => (
           <div
             key={label}
             className="flex-1 rounded-lg border flex flex-col gap-1 p-[14px_16px]"
-            style={{ backgroundColor: "#F9FAFB", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+            style={{
+              backgroundColor: "#F9FAFB",
+              borderColor: "#E5E7EB",
+              borderWidth: "0.5px",
+            }}
           >
-            <p style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</p>
-            <p style={{ fontSize: "22px", fontWeight: 500, color: vc ?? "#111827", lineHeight: 1.2 }}>{value}</p>
+            <p
+              style={{
+                fontSize: "11px",
+                color: "#6B7280",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              {label}
+            </p>
+            <p
+              style={{
+                fontSize: "22px",
+                fontWeight: 500,
+                color: vc ?? "#111827",
+                lineHeight: 1.2,
+              }}
+            >
+              {value}
+            </p>
             <p style={{ fontSize: "11px", color: "#6B7280" }}>{sub}</p>
           </div>
         ))}
       </div>
 
-      {/* ── Main Body ── */}
       <div className="flex gap-3.5 flex-1" style={{ padding: "16px 24px" }}>
-
-        {/* ── Left: Risk Grid ── */}
         <div className="flex-1 min-w-0">
-          <p
+          <h2
             className="mb-3"
-            style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}
+            style={{
+              fontSize: "11px",
+              color: "#6B7280",
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
           >
-            Active shipments — risk grid
-          </p>
-          <div className="grid grid-cols-2 gap-3">
-            {filteredVessels.length === 0 && (
-              <p style={{ fontSize: "12px", color: "#9CA3AF", gridColumn: "1 / -1" }}>No vessels in this corridor right now.</p>
-            )}
-            {filteredVessels.map((v) => (
-              <div key={v.name} onClick={() => onVesselCard(v.name)} className="cursor-pointer">
-                <VesselCard vessel={v} />
-              </div>
-            ))}
-          </div>
+            Vessel list
+          </h2>
+
+          {loading ? (
+            <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+              Loading vessels...
+            </p>
+          ) : error ? (
+            <p role="alert" aria-live="assertive" style={{ fontSize: "12px", color: "#B45309" }}>
+              Unable to load vessels: {error}
+            </p>
+          ) : vessels.length === 0 ? (
+            <p role="status" aria-live="polite" style={{ fontSize: "12px", color: "#6B7280" }}>
+              No vessels found.
+            </p>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              {vessels.map((vessel) => (
+                <VesselCard
+                  key={vessel.id}
+                  vessel={vessel}
+                  onOpen={() => navigate(`/vessels/${vessel.id}`)}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
-        {/* ── Right: Intelligence Feed ── */}
         <div style={{ width: "200px", flexShrink: 0 }}>
           <p
             className="mb-3"
-            style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}
+            style={{
+              fontSize: "11px",
+              color: "#6B7280",
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
           >
             Risk intelligence feed
           </p>
 
-          <div className="flex flex-col gap-4">
-            {feedItems.map((section) => (
-              <div key={section.section}>
-                <p
-                  className="mb-2"
-                  style={{
-                    fontSize: "10px",
-                    color: section.sectionColor,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.05em",
-                    fontWeight: 500,
-                  }}
-                >
-                  {section.section}
-                </p>
-                <div className="flex flex-col gap-0">
-                  {section.items.map((item) => (
-                    <FeedItem
-                      key={item.vessel}
-                      vessel={item.vessel}
-                      desc={item.desc}
-                      link={item.link}
-                      borderColor={section.borderColor}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Export ghost button */}
-          <button
-            onClick={exportReport}
-            className="w-full flex items-center justify-center gap-1.5 mt-5 rounded-lg border transition-colors cursor-pointer"
-            style={{ height: "34px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}
+          <div
+            role="status"
+            aria-live="polite"
+            className="rounded-lg border p-3"
+            style={{
+              borderColor: "#E5E7EB",
+              borderWidth: "0.5px",
+              backgroundColor: "#ffffff",
+            }}
           >
-            <Download size={12} />
-            Export report
-          </button>
+            <p style={{ fontSize: "12px", color: "#111827", fontWeight: 500 }}>
+              No live vessel risk intelligence available.
+            </p>
+            <p style={{ marginTop: "4px", fontSize: "11px", color: "#6B7280", lineHeight: 1.4 }}>
+              Vessel risk intelligence will appear here when persisted signals are available.
+            </p>
+          </div>
         </div>
-      </div>
-
-      {/* ── Status Bar ── */}
-      <div
-        className="flex items-center justify-between flex-shrink-0"
-        style={{ padding: "8px 24px", borderTop: "0.5px solid #E5E7EB", backgroundColor: "#ffffff" }}
-      >
-        <StatusItem label="System active" dot dotColor="#10B981" />
-        <div style={{ width: "0.5px", height: "12px", backgroundColor: "#E5E7EB" }} />
-        <StatusItem label="Total vessels:" value="42" />
-        <div style={{ width: "0.5px", height: "12px", backgroundColor: "#E5E7EB" }} />
-        <StatusItem label="Breach risk:" value="3" valueColor="#C53030" />
-        <div style={{ width: "0.5px", height: "12px", backgroundColor: "#E5E7EB" }} />
-        <StatusItem label="Emerging risk:" value="4" valueColor="#B45309" />
-        <div style={{ width: "0.5px", height: "12px", backgroundColor: "#E5E7EB" }} />
-        <StatusItem label="Avg port time:" value="34.2h" />
-        <div style={{ width: "0.5px", height: "12px", backgroundColor: "#E5E7EB" }} />
-        <StatusItem label="Global efficiency:" value="94%" valueColor="#22543D" />
       </div>
     </div>
   );

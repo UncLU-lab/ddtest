@@ -1,9 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  Download, ArrowUpRight,
+  ArrowUpRight,
   CheckCircle, AlertTriangle,
 } from "lucide-react";
 import { PageHeader } from "./Layout";
+import {
+  getBulkDispute,
+  getLaytimeCalculations,
+  getVoyageSummary,
+  updateBulkDispute,
+  type BulkDispute,
+} from "../lib/api";
 
 // ─── Variance Card ────────────────────────────────────────────────────────────
 
@@ -99,22 +106,900 @@ function DiscrepancyCard({ level, type, title, desc, variance }: {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-export default function ClaimsAuditConsole({ onGenerateReport, onSaveForReview }: {
+function formatMoney(value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return "Not available";
+  }
+
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) {
+    return String(value);
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(numeric);
+}
+
+function formatDate(value?: string | null) {
+  if (!value) {
+    return "Not available";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toLocaleString("en-AU", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function toDatetimeLocalValue(value?: string | null) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const pad = (part: number) => String(part).padStart(2, "0");
+
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-") + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatText(value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return "Not available";
+  }
+
+  return String(value);
+}
+
+function toNumber(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const numeric = Number(value);
+  return Number.isNaN(numeric) ? null : numeric;
+}
+
+function ClaimFieldCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      className="rounded-lg border p-[12px_14px] flex flex-col gap-1"
+      style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+    >
+      <p
+        style={{
+          fontSize: "10px",
+          color: "#6B7280",
+          textTransform: "uppercase",
+          letterSpacing: "0.05em",
+        }}
+      >
+        {label}
+      </p>
+      <p style={{ fontSize: "12px", color: "#111827", fontWeight: 500, lineHeight: 1.4 }}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
+const CLAIM_STATUSES = [
+  "Open",
+  "Evidence Submitted",
+  "In Negotiation",
+  "Resolved",
+] as const;
+
+export default function ClaimsAuditConsole({ onGenerateReport, onSaveForReview, claimId }: {
   onGenerateReport?: () => void;
   onSaveForReview?: () => void;
+  claimId?: string;
 }) {
   const [notes, setNotes] = useState("");
-  const [decision, setDecision] = useState<"escalated" | "accepted" | null>(null);
-  const [noteError, setNoteError] = useState(false);
+  const [claim, setClaim] = useState<BulkDispute | null>(null);
+  const [claimLoading, setClaimLoading] = useState(Boolean(claimId));
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const [statusValue, setStatusValue] = useState<string>("Open");
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [statusSuccess, setStatusSuccess] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [settlementAmount, setSettlementAmount] = useState("");
+  const [resolvedDate, setResolvedDate] = useState("");
+  const [settlementSaving, setSettlementSaving] = useState(false);
+  const [voyageSummary, setVoyageSummary] = useState<any | null>(null);
+  const [latestLaytimeCalculation, setLatestLaytimeCalculation] = useState<any | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
 
-  function handleEscalate() {
-    if (!notes.trim()) { setNoteError(true); return; }
-    setNoteError(false);
-    setDecision("escalated");
+  async function loadClaim() {
+    if (!claimId) {
+      return;
+    }
+
+    setClaimLoading(true);
+    setClaimError(null);
+
+    try {
+      const result = await getBulkDispute(claimId);
+      setClaim(result);
+      setStatusValue(String(result.status ?? "Open"));
+      setSettlementAmount(
+        result.finalSettlementAmount === undefined ||
+        result.finalSettlementAmount === null ||
+        result.finalSettlementAmount === ""
+          ? ""
+          : String(result.finalSettlementAmount)
+      );
+      setResolvedDate(toDatetimeLocalValue(result.resolvedDate as string | null | undefined));
+      setStatusError(null);
+    } catch (error: any) {
+      setClaim(null);
+      setClaimError(error?.message ?? "Unable to load persisted claim.");
+    } finally {
+      setClaimLoading(false);
+    }
   }
-  function handleAccept() {
-    setDecision("accepted");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadClaimContext(voyageId: string) {
+      setContextLoading(true);
+
+      try {
+        const [summaryResult, calculationsResult] = await Promise.allSettled([
+          getVoyageSummary(voyageId),
+          getLaytimeCalculations(voyageId, { page: 1, limit: 1 }),
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        setVoyageSummary(summaryResult.status === "fulfilled" ? summaryResult.value : null);
+        setLatestLaytimeCalculation(
+          calculationsResult.status === "fulfilled"
+            ? calculationsResult.value.data?.[0] ?? null
+            : null
+        );
+      } finally {
+        if (!cancelled) {
+          setContextLoading(false);
+        }
+      }
+    }
+
+    if (!claim?.voyageId) {
+      setVoyageSummary(null);
+      setLatestLaytimeCalculation(null);
+      setContextLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void loadClaimContext(claim.voyageId);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [claim?.voyageId]);
+
+  useEffect(() => {
+    void loadClaim();
+  }, [claimId]);
+
+  async function handleStatusChange(nextStatus: string) {
+    if (!claimId || !claim) {
+      return;
+    }
+
+    if (nextStatus === claim.status) {
+      setStatusValue(nextStatus);
+      return;
+    }
+
+    setStatusValue(nextStatus);
+    setStatusSaving(true);
+    setStatusError(null);
+    setStatusSuccess(null);
+
+    try {
+      await updateBulkDispute(claimId, { status: nextStatus as (typeof CLAIM_STATUSES)[number] });
+      await loadClaim();
+      setStatusSuccess(`Status updated to ${nextStatus}.`);
+    } catch (error: any) {
+      setStatusError(error?.message ?? "Unable to update claim status.");
+      setStatusValue(String(claim.status ?? "Open"));
+    } finally {
+      setStatusSaving(false);
+    }
   }
+
+  async function handleSettlementSave() {
+    if (!claimId || !claim) {
+      return;
+    }
+
+    const currentStatus = String(claim.status ?? statusValue);
+    if (currentStatus !== "Resolved") {
+      return;
+    }
+
+    const trimmedAmount = settlementAmount.trim();
+    const parsedAmount = trimmedAmount === "" ? undefined : Number(trimmedAmount);
+
+    if (trimmedAmount !== "" && Number.isNaN(parsedAmount)) {
+      setStatusError("Enter a valid settlement amount.");
+      return;
+    }
+
+    if (!resolvedDate) {
+      setStatusError("Enter a resolved date.");
+      return;
+    }
+
+    setSettlementSaving(true);
+    setStatusError(null);
+    setStatusSuccess(null);
+
+    try {
+      await updateBulkDispute(claimId, {
+        status: "Resolved",
+        finalSettlementAmount: parsedAmount,
+        resolvedDate: new Date(resolvedDate).toISOString(),
+      });
+      await loadClaim();
+      setStatusSuccess("Settlement details updated.");
+    } catch (error: any) {
+      setStatusError(error?.message ?? "Unable to update settlement details.");
+    } finally {
+      setSettlementSaving(false);
+    }
+  }
+
+  if (claimLoading) {
+    return (
+      <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
+        <PageHeader crumbs={[{ label: "Claims", to: "/claims" }, { label: "Claim detail" }]} />
+        <div style={{ padding: "24px", color: "#6B7280", fontSize: "12px" }}>
+          Loading persisted claim...
+        </div>
+      </div>
+    );
+  }
+
+  if (claimError || !claim) {
+    return (
+      <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
+        <PageHeader crumbs={[{ label: "Claims", to: "/claims" }, { label: "Claim detail" }]} />
+        <div style={{ padding: "24px" }}>
+          <div
+            className="rounded-lg border p-[12px_14px]"
+            style={{ backgroundColor: "#ffffff", borderColor: "#FCA5A5", borderWidth: "0.5px" }}
+          >
+            <p style={{ fontSize: "12px", fontWeight: 500, color: "#9B2C2C", marginBottom: "4px" }}>
+              Unable to load persisted claim.
+            </p>
+            <p style={{ fontSize: "11px", color: "#6B7280" }}>
+              {claimError ?? "Not available"}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (claimId) {
+    const summaryVoyage = voyageSummary?.voyage ?? null;
+    const currentStatus = String(claim.status ?? statusValue ?? "Open");
+    const isResolved = currentStatus === "Resolved";
+    const claimAmount = toNumber(claim.amountDisputed);
+    const demurrageAmount = toNumber(latestLaytimeCalculation?.demurrageAmount);
+    const despatchAmount = toNumber(latestLaytimeCalculation?.despatchAmount);
+    const hasCalculation = Boolean(latestLaytimeCalculation);
+    const reconstructedAmount = hasCalculation
+      ? (demurrageAmount !== null && demurrageAmount > 0
+        ? demurrageAmount
+        : despatchAmount !== null && despatchAmount > 0
+          ? despatchAmount
+          : 0)
+      : null;
+    const varianceAmount =
+      claimAmount !== null && reconstructedAmount !== null ? claimAmount - reconstructedAmount : null;
+    const isVarianceZero = varianceAmount !== null && Math.abs(varianceAmount) < 0.005;
+    const recommendedAction = !hasCalculation
+      ? "Calculation data unavailable."
+      : isVarianceZero
+        ? "Calculated position matches the claim amount."
+        : varianceAmount !== null && varianceAmount > 0
+          ? "Review and dispute the unsupported variance."
+          : "Review whether additional recovery is available.";
+    const recommendedStrategy = currentStatus === "Resolved"
+      ? "Close-out and reconcile"
+      : !hasCalculation
+        ? "Await laytime calculation"
+        : isVarianceZero
+          ? "Accept and reconcile"
+          : varianceAmount !== null && varianceAmount > 0
+            ? "Dispute & negotiate"
+            : "Review for recovery";
+    const targetPosition = currentStatus === "Resolved" && claim.finalSettlementAmount !== undefined && claim.finalSettlementAmount !== null
+      ? formatMoney(claim.finalSettlementAmount)
+      : reconstructedAmount !== null
+        ? formatMoney(reconstructedAmount)
+        : "Not available";
+    const settlementStatus =
+      currentStatus === "Resolved"
+        ? claim.finalSettlementAmount !== undefined && claim.finalSettlementAmount !== null
+          ? `Resolved at ${formatMoney(claim.finalSettlementAmount)}`
+          : "Resolved"
+        : currentStatus;
+    const counterpartyLinks = Array.isArray(summaryVoyage?.counterpartyLinks)
+      ? summaryVoyage.counterpartyLinks
+      : [];
+    const supplierLink = counterpartyLinks.find((link: any) => link?.role === "Supplier");
+    const receiverLink = counterpartyLinks.find((link: any) => link?.role === "Receiver");
+    const supplierName =
+      supplierLink?.counterparty?.name ??
+      supplierLink?.counterpartyName ??
+      supplierLink?.name ??
+      supplierLink?.party?.name ??
+      supplierLink?.partyName ??
+      null;
+    const receiverName =
+      receiverLink?.counterparty?.name ??
+      receiverLink?.counterpartyName ??
+      receiverLink?.name ??
+      receiverLink?.party?.name ??
+      receiverLink?.partyName ??
+      null;
+
+    return (
+      <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
+        <PageHeader
+          crumbs={[
+            { label: "Claims", to: "/claims" },
+            { label: claim.id },
+            { label: "Claim detail" },
+          ]}
+          actions={
+            <button
+              className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
+              style={{
+                height: "32px",
+                fontSize: "12px",
+                color: "#374151",
+                borderColor: "#E5E7EB",
+                borderWidth: "0.5px",
+                backgroundColor: "#ffffff",
+              }}
+              onClick={onSaveForReview}
+            >
+              Back to claims
+            </button>
+          }
+        />
+
+        <div
+          className="flex items-center justify-between flex-shrink-0"
+          style={{ padding: "14px 24px", borderBottom: "0.5px solid #E5E7EB", backgroundColor: "#ffffff" }}
+        >
+          <div className="flex items-start gap-4">
+            <h1 style={{ fontSize: "17px", fontWeight: 500, color: "#111827" }}>Claim detail</h1>
+            <p style={{ fontSize: "12px", color: "#6B7280" }}>
+              Persisted bulk-dispute record loaded from the backend.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span style={{ fontSize: "11px", color: "#6B7280" }}>Status</span>
+            <select
+              value={statusValue}
+              disabled={statusSaving}
+              onChange={(e) => void handleStatusChange(e.target.value)}
+              className="appearance-none outline-none cursor-pointer"
+              style={{
+                height: "32px",
+                border: "0.5px solid #E5E7EB",
+                borderRadius: "8px",
+                padding: "0 12px",
+                fontSize: "12px",
+                color: "#374151",
+                backgroundColor: "#ffffff",
+                opacity: statusSaving ? 0.7 : 1,
+              }}
+            >
+              {CLAIM_STATUSES.map((status) => (
+                <option key={status}>{status}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {(statusSuccess || statusError) && (
+          <div style={{ padding: "12px 24px 0" }}>
+            <div
+              className="rounded-lg border px-3 py-2"
+              style={{
+                backgroundColor: statusError ? "#FEF2F2" : "#F0FDF4",
+                borderColor: statusError ? "#FCA5A5" : "#86EFAC",
+                borderWidth: "0.5px",
+                color: statusError ? "#9B2C2C" : "#22543D",
+                fontSize: "12px",
+              }}
+            >
+              {statusError ?? statusSuccess}
+            </div>
+          </div>
+        )}
+
+        <div style={{ padding: "24px" }}>
+          <div
+            className="rounded-xl border"
+            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+          >
+            <div
+              className="grid gap-3"
+              style={{
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                padding: "16px",
+              }}
+            >
+              <ClaimFieldCard label="Claim ID" value={claim.id || "Not available"} />
+              <ClaimFieldCard label="Voyage ID" value={claim.voyageId || "Not available"} />
+              <ClaimFieldCard label="Type" value={claim.type || "Not available"} />
+              <ClaimFieldCard label="Amount disputed" value={formatMoney(claim.amountDisputed)} />
+              <ClaimFieldCard label="Status" value={claim.status || "Not available"} />
+              <ClaimFieldCard label="Created date" value={formatDate(claim.createdDate as string | null | undefined)} />
+            </div>
+          </div>
+        </div>
+
+        {isResolved && (
+          <div style={{ padding: "0 24px 24px" }}>
+            <div
+              className="rounded-xl border"
+              style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <div style={{ padding: "16px 16px 12px" }}>
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <h2 style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>
+                      Resolution & settlement
+                    </h2>
+                    <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "3px" }}>
+                      Persisted settlement details for the resolved claim.
+                    </p>
+                  </div>
+                  <button
+                    className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
+                    style={{
+                      height: "32px",
+                      fontSize: "12px",
+                      color: "#ffffff",
+                      border: "none",
+                      backgroundColor: "#1A4ED8",
+                      opacity: settlementSaving ? 0.75 : 1,
+                    }}
+                    onClick={() => void handleSettlementSave()}
+                    disabled={settlementSaving}
+                  >
+                    Save settlement
+                  </button>
+                </div>
+              </div>
+              <div
+                className="grid gap-3"
+                style={{
+                  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+                  padding: "0 16px 16px",
+                }}
+              >
+                <div
+                  className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                  style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+                >
+                  <div>
+                    <p
+                      style={{
+                        fontSize: "10px",
+                        color: "#6B7280",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.05em",
+                      }}
+                    >
+                      Final settlement amount
+                    </p>
+                    <p style={{ fontSize: "12px", color: "#111827", fontWeight: 500, lineHeight: 1.4 }}>
+                      {formatMoney(claim.finalSettlementAmount)}
+                    </p>
+                  </div>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={settlementAmount}
+                    placeholder="Not available"
+                    onChange={(e) => setSettlementAmount(e.target.value)}
+                    className="w-full rounded-md border px-3 py-2 outline-none"
+                    style={{
+                      height: "32px",
+                      borderColor: "#E5E7EB",
+                      borderWidth: "0.5px",
+                      fontSize: "12px",
+                      color: "#111827",
+                    }}
+                  />
+                </div>
+
+                <div
+                  className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                  style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+                >
+                  <div>
+                    <p
+                      style={{
+                        fontSize: "10px",
+                        color: "#6B7280",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.05em",
+                      }}
+                    >
+                      Resolved date
+                    </p>
+                    <p style={{ fontSize: "12px", color: "#111827", fontWeight: 500, lineHeight: 1.4 }}>
+                      {formatDate(claim.resolvedDate as string | null | undefined)}
+                    </p>
+                  </div>
+                  <input
+                    type="datetime-local"
+                    value={resolvedDate}
+                    onChange={(e) => setResolvedDate(e.target.value)}
+                    className="w-full rounded-md border px-3 py-2 outline-none"
+                    style={{
+                      height: "32px",
+                      borderColor: "#E5E7EB",
+                      borderWidth: "0.5px",
+                      fontSize: "12px",
+                      color: "#111827",
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div style={{ padding: "0 24px 24px" }}>
+          <div
+            className="rounded-xl border"
+            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+          >
+            <div style={{ padding: "16px 16px 12px" }}>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h2 style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>
+                    Voyage & calculation context
+                  </h2>
+                  <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "3px" }}>
+                    Persisted voyage summary and latest laytime calculation.
+                  </p>
+                </div>
+                {contextLoading && (
+                  <span style={{ fontSize: "11px", color: "#6B7280" }}>Loading context...</span>
+                )}
+              </div>
+            </div>
+            <div
+              className="grid gap-3"
+              style={{
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                padding: "0 16px 16px",
+              }}
+            >
+              <ClaimFieldCard label="Vessel name" value={formatText(summaryVoyage?.vessel?.name)} />
+              <ClaimFieldCard label="Voyage reference" value={formatText(summaryVoyage?.reference)} />
+              <ClaimFieldCard label="Supplier" value={formatText(supplierName)} />
+              <ClaimFieldCard label="Receiver" value={formatText(receiverName)} />
+              <ClaimFieldCard label="Load port" value={formatText(summaryVoyage?.loadPort)} />
+              <ClaimFieldCard label="Discharge port" value={formatText(summaryVoyage?.dischargePort)} />
+              <ClaimFieldCard
+                label="Laytime calculation ID"
+                value={formatText(latestLaytimeCalculation?.id)}
+              />
+              <ClaimFieldCard
+                label="Version"
+                value={formatText(latestLaytimeCalculation?.version)}
+              />
+              <ClaimFieldCard
+                label="Allowed laytime"
+                value={formatText(latestLaytimeCalculation?.allowedLaytime)}
+              />
+              <ClaimFieldCard
+                label="Used laytime"
+                value={formatText(latestLaytimeCalculation?.usedLaytime)}
+              />
+              <ClaimFieldCard
+                label="Demurrage amount"
+                value={formatMoney(latestLaytimeCalculation?.demurrageAmount)}
+              />
+              <ClaimFieldCard
+                label="Despatch amount"
+                value={formatMoney(latestLaytimeCalculation?.despatchAmount)}
+              />
+              <ClaimFieldCard
+                label="Calculated at"
+                value={formatDate(latestLaytimeCalculation?.calculatedAt)}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div style={{ padding: "0 24px 24px" }}>
+          <div
+            className="rounded-xl border"
+            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+          >
+            <div style={{ padding: "16px 16px 12px" }}>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h2 style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>
+                    Claim analysis
+                  </h2>
+                  <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "3px" }}>
+                    Real-data reconstruction and negotiation context derived from the persisted claim.
+                  </p>
+                </div>
+                <span style={{ fontSize: "11px", color: "#6B7280" }}>
+                  Latest calculation version {formatText(latestLaytimeCalculation?.version)}
+                </span>
+              </div>
+            </div>
+
+            <div
+              className="grid gap-3"
+              style={{
+                gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+                padding: "0 16px 16px",
+              }}
+            >
+              <div
+                className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p
+                    style={{
+                      fontSize: "10px",
+                      color: "#6B7280",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    AI reconstruction
+                  </p>
+                  <span style={{ fontSize: "10px", color: "#1E40AF" }}>
+                    {formatDate(latestLaytimeCalculation?.calculatedAt)}
+                  </span>
+                </div>
+                <ClaimFieldCard label="Claim amount" value={formatMoney(claim.amountDisputed)} />
+                <ClaimFieldCard
+                  label="Reconstructed amount"
+                  value={formatMoney(reconstructedAmount)}
+                />
+                <ClaimFieldCard
+                  label="Allowed laytime"
+                  value={formatText(latestLaytimeCalculation?.allowedLaytime)}
+                />
+                <ClaimFieldCard
+                  label="Used laytime"
+                  value={formatText(latestLaytimeCalculation?.usedLaytime)}
+                />
+              </div>
+
+              <div
+                className="rounded-lg border p-[12px_14px] flex flex-col gap-3"
+                style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+              >
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#6B7280",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  Variance strip
+                </p>
+                <div className="flex gap-2.5 flex-wrap">
+                  <VarianceCard
+                    label="Their claim value"
+                    value={formatMoney(claim.amountDisputed)}
+                    sub="Persisted claim amount"
+                    bg="#FEF2F2"
+                    border="#FECACA"
+                    valueColor="#C53030"
+                    subColor="#9B2C2C"
+                  />
+                  <VarianceCard
+                    label="Our reconstructed value"
+                    value={formatMoney(reconstructedAmount)}
+                    sub="Latest persisted laytime calc"
+                    bg="#EFF6FF"
+                    border="#BFDBFE"
+                    valueColor="#1A4ED8"
+                    subColor="#1E40AF"
+                  />
+                  <VarianceCard
+                    label="Total variance"
+                    value={formatMoney(varianceAmount)}
+                    sub="Claim minus reconstructed"
+                    bg="#FFFBEB"
+                    border="#FDE68A"
+                    valueColor="#B45309"
+                    subColor="#7B341E"
+                  />
+                </div>
+              </div>
+
+              <div
+                className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+              >
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#6B7280",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  Calculation breakdown
+                </p>
+                <ClaimFieldCard
+                  label="Calculation version"
+                  value={formatText(latestLaytimeCalculation?.version)}
+                />
+                <ClaimFieldCard
+                  label="Allowed laytime"
+                  value={formatText(latestLaytimeCalculation?.allowedLaytime)}
+                />
+                <ClaimFieldCard
+                  label="Used laytime"
+                  value={formatText(latestLaytimeCalculation?.usedLaytime)}
+                />
+                <ClaimFieldCard
+                  label="Demurrage amount"
+                  value={formatMoney(latestLaytimeCalculation?.demurrageAmount)}
+                />
+                <ClaimFieldCard
+                  label="Despatch amount"
+                  value={formatMoney(latestLaytimeCalculation?.despatchAmount)}
+                />
+              </div>
+
+              <div
+                className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+              >
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#6B7280",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  Evidence available
+                </p>
+                <ClaimFieldCard
+                  label="Voyage summary"
+                  value={summaryVoyage ? "Available" : "Not available"}
+                />
+                <ClaimFieldCard
+                  label="Latest laytime calculation"
+                  value={latestLaytimeCalculation ? "Available" : "Not available"}
+                />
+                <ClaimFieldCard
+                  label="Supplier / receiver"
+                  value={supplierName && receiverName ? "Available" : "Not available"}
+                />
+              </div>
+
+              <div
+                className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+              >
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#6B7280",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  Recommended action
+                </p>
+                <p style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>{recommendedAction}</p>
+              </div>
+
+              <div
+                className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+              >
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#6B7280",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  Negotiation position
+                </p>
+                <ClaimFieldCard label="Recommended strategy" value={recommendedStrategy} />
+                <ClaimFieldCard label="Target position" value={targetPosition} />
+                <ClaimFieldCard label="Settlement status" value={settlementStatus} />
+              </div>
+
+              <div
+                className="rounded-lg border p-[12px_14px] flex flex-col gap-2"
+                style={{ backgroundColor: "#ffffff", borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+              >
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <p
+                    style={{
+                      fontSize: "10px",
+                      color: "#6B7280",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    Reviewer notes
+                  </p>
+                  <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Not yet persisted</span>
+                </div>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Record the reasoning behind your decision"
+                  style={{
+                    minHeight: "72px",
+                    border: "0.5px solid #E5E7EB",
+                    borderRadius: "8px",
+                    padding: "8px 10px",
+                    fontSize: "12px",
+                    resize: "vertical",
+                    backgroundColor: "#ffffff",
+                    color: "#111827",
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function handleDraftEmail() {
     const subject = encodeURIComponent("Demurrage claim CLM-2311-VAS — dispute discrepancies");
     const body = encodeURIComponent(
@@ -129,15 +1014,13 @@ export default function ClaimsAuditConsole({ onGenerateReport, onSaveForReview }
         crumbs={[{ label: "Claims", to: "/claims" }, { label: "BW Magnolia · VOY-2311", to: "/shipments/VOY-2311" }, { label: "Audit console" }]}
         actions={
           <>
-            <button className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
-              style={{ height: "32px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-              <Download size={11} /> Export audit log
-            </button>
-            <button className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
-              style={{ height: "32px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
-              onClick={onGenerateReport}>
-              Generate dispute report <ArrowUpRight size={12} />
-            </button>
+            {onGenerateReport ? (
+              <button className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
+                style={{ height: "32px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
+                onClick={onGenerateReport}>
+                Generate dispute report <ArrowUpRight size={12} />
+              </button>
+            ) : null}
           </>
         }
       />
@@ -312,19 +1195,17 @@ export default function ClaimsAuditConsole({ onGenerateReport, onSaveForReview }
       <div className="flex-shrink-0" style={{ padding: "12px 24px 0", backgroundColor: "#F9FAFB" }}>
         <label className="flex flex-col gap-1">
           <span style={{ fontSize: "10px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Reviewer notes {decision === null && <span style={{ color: "#9CA3AF", textTransform: "none", letterSpacing: 0 }}>(required to escalate)</span>}
+            Reviewer notes
           </span>
           <textarea
             value={notes}
-            disabled={decision !== null}
-            onChange={(e) => { setNotes(e.target.value); if (e.target.value.trim()) setNoteError(false); }}
-            placeholder="Record the reasoning behind your decision — this is saved with the audit trail…"
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Record the reasoning behind your review — this is used for the email draft…"
             style={{
-              height: "60px", border: `0.5px solid ${noteError ? "#DC2626" : "#E5E7EB"}`, borderRadius: "8px",
-              padding: "8px 10px", fontSize: "12px", resize: "none", backgroundColor: decision !== null ? "#F3F4F6" : "#ffffff",
+              height: "60px", border: "0.5px solid #E5E7EB", borderRadius: "8px",
+              padding: "8px 10px", fontSize: "12px", resize: "none", backgroundColor: "#ffffff",
             }}
           />
-          {noteError && <span style={{ fontSize: "11px", color: "#DC2626" }}>Add a note before escalating internally.</span>}
         </label>
       </div>
 
@@ -332,59 +1213,33 @@ export default function ClaimsAuditConsole({ onGenerateReport, onSaveForReview }
       <div className="flex items-center justify-between flex-shrink-0"
         style={{ padding: "12px 24px", borderTop: "0.5px solid #E5E7EB", backgroundColor: "#ffffff" }}>
         <div className="flex items-center gap-2">
-          <span className="rounded-full" style={{ width: "7px", height: "7px", backgroundColor: decision ? "#1A4ED8" : "#10B981" }} />
-          <span style={{ fontSize: "11px", color: "#6B7280" }}>
-            {decision === "escalated" && "Status: escalated for internal review"}
-            {decision === "accepted" && "Status: claim accepted"}
-            {decision === null && "Status: draft verified"}
-          </span>
+          <span className="rounded-full" style={{ width: "7px", height: "7px", backgroundColor: "#10B981" }} />
+          <span style={{ fontSize: "11px", color: "#6B7280" }}>Status: review notes ready</span>
         </div>
         <div className="flex items-center gap-2">
-          {decision === null ? (
-            <>
-              <button onClick={onSaveForReview}
-                className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
-                style={{ height: "34px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}>
-                Save for review
-              </button>
-              <button onClick={handleDraftEmail}
-                className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
-                style={{ height: "34px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}>
-                Draft email
-              </button>
-              <button onClick={handleEscalate}
-                className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
-                style={{ height: "34px", fontSize: "12px", color: "#ffffff", backgroundColor: "#B45309", border: "none" }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#92400e")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#B45309")}>
-                <AlertTriangle size={12} /> Escalate internally
-              </button>
-              <button onClick={onGenerateReport}
-                className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
-                style={{ height: "34px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1e40af")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1A4ED8")}>
-                Generate dispute report <ArrowUpRight size={12} />
-              </button>
-              <button onClick={handleAccept}
-                className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
-                style={{ height: "34px", fontSize: "12px", color: "#ffffff", backgroundColor: "#276749", border: "none" }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1c4532")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#276749")}>
-                <CheckCircle size={12} /> Accept claim
-              </button>
-            </>
-          ) : (
-            <button onClick={() => setDecision(null)}
-              className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
-              style={{ height: "34px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-              Undo
+          <button onClick={onSaveForReview}
+            className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
+            style={{ height: "34px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}>
+            Save for review
+          </button>
+          <button onClick={handleDraftEmail}
+            className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
+            style={{ height: "34px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}>
+            Draft email
+          </button>
+          {onGenerateReport ? (
+            <button onClick={onGenerateReport}
+              className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
+              style={{ height: "34px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
+              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1e40af")}
+              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1A4ED8")}>
+              Generate dispute report <ArrowUpRight size={12} />
             </button>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

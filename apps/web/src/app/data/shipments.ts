@@ -4,6 +4,8 @@ export type Shipment = {
   id: string;
   vessel: string;
   port: string;
+  loadPort?: string;
+  voyageRef?: string;
   supplier: string;
   receiver: string;
   eta: string;
@@ -11,6 +13,24 @@ export type Shipment = {
   exposure: number;
   cargo: string;
   quantity: string;
+
+  status?: string;
+  laycanStart?: string;
+  laycanEnd?: string;
+  laytimeAllowed?: string;
+  demurrageRate?: string;
+  dispatchRate?: string;
+  timeCountingBasis?: string;
+  norNoticePeriod?: string;
+
+  despatchCredit?: number;
+  openDisputeCount?: number;
+  amountUnderDispute?: number;
+
+  readyToCalculate?: boolean;
+  calculationStale?: boolean;
+  laycanExpired?: boolean;
+  blockers?: string[];
 };
 
 export const shipments: Shipment[] = [

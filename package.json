@@ -1,0 +1,16 @@
+{
+  "name": "demurrage-defender",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "dev:api": "npm --prefix apps/api run start:dev",
+    "build:web": "npm --prefix apps/web run build",
+    "build:api": "npm --prefix apps/api run build",
+    "test:api": "npm --prefix apps/api test",
+    "test:e2e:api": "npm --prefix apps/api run test:e2e"
+  }
+}

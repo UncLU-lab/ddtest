@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import {
   Anchor,
@@ -13,6 +13,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { useShipments, ShipmentDraft, missingDraftFields } from "./data/ShipmentsContext";
+import { getVessels } from "../lib/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -260,6 +261,64 @@ export default function CreateShipmentForm() {
     { key: "upload", icon: <Upload size={15} />, title: "Upload contract", sub: "Auto-extraction" },
   ];
 
+  // Minimal vessel picker component: loads vessels and stores selected vessel.id in draft.vesselId
+  function VesselPicker({ draft, update }: { draft: ShipmentDraft; update: <K extends keyof ShipmentDraft>(k: K, v: ShipmentDraft[K]) => void }) {
+    const [vessels, setVessels] = useState<any[] | null>(null);
+
+    useEffect(() => {
+      let mounted = true;
+      getVessels()
+        .then((list) => { if (mounted) setVessels(list); })
+        .catch(() => { if (mounted) setVessels([]); });
+      return () => { mounted = false; };
+    }, []);
+
+    if (vessels === null) {
+      return <Input value={draft.vessel} onChange={(v) => update("vessel", v)} placeholder="Loading vessels..." />;
+    }
+
+    if (vessels.length === 0) {
+      return <Input value={draft.vessel} onChange={(v) => update("vessel", v)} placeholder="e.g. BW Magnolia" />;
+    }
+
+    return (
+      <div className="relative">
+        <select
+          value={draft.vesselId ?? ""}
+          onChange={(e) => {
+            const id = e.target.value;
+            const sel = vessels.find((x: any) => x.id === id);
+            update("vesselId" as any, id as any);
+            if (sel) update("vessel", sel.name as any);
+          }}
+          className="w-full appearance-none outline-none cursor-pointer"
+          style={{
+            height: "34px",
+            border: "0.5px solid #E5E7EB",
+            borderRadius: "8px",
+            padding: "0 28px 0 10px",
+            fontSize: "12px",
+            color: "#111827",
+            backgroundColor: "#ffffff",
+            transition: "border-color 0.15s",
+          }}
+          onFocus={(e) => (e.currentTarget.style.borderColor = "#1A4ED8")}
+          onBlur={(e) => (e.currentTarget.style.borderColor = "#E5E7EB")}
+        >
+          <option value="">Select vessel…</option>
+          {vessels.map((v: any) => (
+            <option key={v.id} value={v.id}>{v.name}</option>
+          ))}
+        </select>
+        <ChevronDown
+          size={12}
+          className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+          style={{ color: "#9CA3AF" }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       className="min-h-screen"
@@ -299,20 +358,6 @@ export default function CreateShipmentForm() {
 
         {/* Actions */}
         <div className="flex items-center gap-3">
-          <button
-            className="px-3 py-1.5 rounded-md border transition-colors"
-            style={{
-              fontSize: "13px",
-              color: "#374151",
-              borderColor: "#E5E7EB",
-              borderWidth: "0.5px",
-              backgroundColor: "#ffffff",
-            }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}
-          >
-            Save draft
-          </button>
           <button
             onClick={onClose}
             className="transition-colors"
@@ -402,7 +447,7 @@ export default function CreateShipmentForm() {
             <SectionEyebrow icon={<Ship size={13} />} label="Vessel & cargo" />
             <div className="grid grid-cols-2 gap-3 mb-3">
               <FormField label="Vessel name" required>
-                <Input value={draft.vessel} onChange={(v) => update("vessel", v)} placeholder="e.g. BW Magnolia" />
+                <VesselPicker draft={draft} update={update} />
               </FormField>
               <FormField label="Voyage ref." required>
                 <Input value={draft.voyageRef} onChange={(v) => update("voyageRef", v)} placeholder="e.g. VOY-2313" />
@@ -722,22 +767,6 @@ export default function CreateShipmentForm() {
                   Fill in the highlighted fields to continue
                 </p>
               )}
-              <button
-                className="w-full flex items-center justify-center rounded-lg border transition-colors cursor-pointer"
-                style={{
-                  height: "38px",
-                  backgroundColor: "#ffffff",
-                  color: "#374151",
-                  fontSize: "13px",
-                  borderColor: "#E5E7EB",
-                  borderWidth: "0.5px",
-                }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}
-                onClick={onClose}
-              >
-                Save draft
-              </button>
             </div>
           </div>
         </div>

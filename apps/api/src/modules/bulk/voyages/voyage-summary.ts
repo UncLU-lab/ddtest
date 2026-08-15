@@ -3,15 +3,30 @@ import { DisputeCaseBulk } from '../entities/dispute-case-bulk.entity';
 import { LaytimeCalculation } from '../entities/laytime-calculation.entity';
 import { NorDocument } from '../entities/nor-document.entity';
 import { SofDocument } from '../entities/sof-document.entity';
+import { VoyageCounterparty } from '../entities/voyage-counterparty.entity';
 import { Voyage } from '../entities/voyage.entity';
 
 export interface VoyageSummaryInput {
   voyage: Voyage;
   charterParty: CharterParty | null;
+  counterpartyLinks: VoyageCounterparty[];
   sofDocuments: SofDocument[];
   norDocuments: NorDocument[];
   latestCalculation: LaytimeCalculation | null;
   disputes: DisputeCaseBulk[];
+}
+
+export interface VoyageParties {
+  supplier: string | null;
+  receiver: string | null;
+}
+
+export interface VoyageCommercialTerms {
+  laytimeAllowed: number | null;
+  demurrageRate: string | null;
+  dispatchRate: string | null;
+  timeCountingBasis: string | null;
+  norNoticePeriod: string | null;
 }
 
 export interface VoyageRisk {
@@ -33,6 +48,8 @@ export interface VoyageRisk {
 export interface VoyageSummary {
   voyage: Voyage;
   charterParty: CharterParty | null;
+  parties: VoyageParties;
+  commercialTerms: VoyageCommercialTerms;
   sofDocuments: SofDocument[];
   norDocuments: NorDocument[];
   latestCalculation: LaytimeCalculation | null;
@@ -41,7 +58,12 @@ export interface VoyageSummary {
 }
 
 export function buildVoyageSummary(input: VoyageSummaryInput): VoyageSummary {
-  return { ...input, risk: buildRisk(input) };
+  return {
+    ...input,
+    parties: buildParties(input.counterpartyLinks),
+    commercialTerms: buildCommercialTerms(input.charterParty),
+    risk: buildRisk(input),
+  };
 }
 
 function buildRisk({
@@ -89,6 +111,36 @@ function buildRisk({
       latestCalculation !== null &&
       newestSofUpload !== null &&
       latestCalculation.calculatedAt.getTime() < newestSofUpload,
+  };
+}
+
+function buildParties(
+  links: VoyageCounterparty[],
+): VoyageParties {
+  return {
+    supplier:
+      links.find((link) => link.role === 'Supplier')
+        ?.counterparty?.name ?? null,
+    receiver:
+      links.find((link) => link.role === 'Receiver')
+        ?.counterparty?.name ?? null,
+  };
+}
+
+function buildCommercialTerms(
+  charterParty: CharterParty | null,
+): VoyageCommercialTerms {
+  return {
+    laytimeAllowed:
+      charterParty?.laytimeAllowed ?? null,
+    demurrageRate:
+      charterParty?.demurrageRate ?? null,
+    dispatchRate:
+      charterParty?.dispatchRate ?? null,
+    timeCountingBasis:
+      charterParty?.timeCountingBasis ?? null,
+    norNoticePeriod:
+      charterParty?.norNoticePeriod ?? null,
   };
 }
 

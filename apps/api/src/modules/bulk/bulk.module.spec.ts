@@ -13,6 +13,7 @@ import { NorDocument } from './entities/nor-document.entity';
 import { SofDocument } from './entities/sof-document.entity';
 import { SofEvent } from './entities/sof-event.entity';
 import { Vessel } from './entities/vessel.entity';
+import { VoyageCounterparty } from './entities/voyage-counterparty.entity';
 import { Voyage } from './entities/voyage.entity';
 
 const ENTITIES = [
@@ -26,6 +27,7 @@ const ENTITIES = [
   SofDocument,
   SofEvent,
   Vessel,
+  VoyageCounterparty,
   Voyage,
 ];
 
@@ -63,6 +65,7 @@ const EXPECTED_ROUTES = [
   'GET /voyages/:voyageId/laytime-calculations',
   'POST /voyages/:voyageId/laytime-calculations',
   'GET /laytime-calculations/:calculationId',
+  'GET /laytime-calculations/:calculationId/audit',
   'GET /laytime-calculations/:calculationId/periods',
   'POST /laytime-calculations/:calculationId/finalize',
   'GET /bulk-disputes',

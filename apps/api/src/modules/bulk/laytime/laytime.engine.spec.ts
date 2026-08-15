@@ -108,6 +108,62 @@ describe('runLaytimeEngine', () => {
     );
   });
 
+  it('uses an explicit despatch rate when laytime is saved', () => {
+    const explicitDespatch: EngineClause = {
+      id: 'clause-despatch-explicit-rate',
+      clauseType: 'despatch',
+      parameters: { rate: 4_000 },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, explicitDespatch],
+        sofEvents: [
+          { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
+          {
+            eventTime: new Date('2026-03-05T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(result.despatchAmount).toBe(4000); // 1 saved day x 4,000/day
+    expect(result.warnings).not.toContain(
+      'The despatch clause has no rate; half the demurrage rate was applied.',
+    );
+  });
+
+  it.each([
+    [0.5, 6_000],
+    [0.25, 3_000],
+    [0, 0],
+  ])(
+    'honours despatch.multiplier of %s',
+    (multiplier, expectedDespatch) => {
+      const multiplierDespatch: EngineClause = {
+        id: `clause-despatch-multiplier-${multiplier}`,
+        clauseType: 'despatch',
+        parameters: { multiplier },
+      };
+
+      const result = runLaytimeEngine(
+        buildInput({
+          clauses: [laytimeRate, demurrageRate, multiplierDespatch],
+          sofEvents: [
+            { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
+            {
+              eventTime: new Date('2026-03-05T06:00:00Z'),
+              eventType: 'CARGO_COMPLETED',
+            },
+          ],
+        }),
+      );
+
+      expect(result.despatchAmount).toBe(expectedDespatch);
+    },
+  );
+
   it('suspends the clock for stoppages recorded in the SOF', () => {
     const result = runLaytimeEngine(
       buildInput({

@@ -177,11 +177,13 @@ export default function RecommendationsEngine({ onAddToClaim }: {
               style={{ height: "32px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
               <Download size={11} /> Generate notes
             </button>
-            <button className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
-              style={{ height: "32px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
-              onClick={onAddToClaim}>
-              Add to claim <ArrowUpRight size={12} />
-            </button>
+            {onAddToClaim ? (
+              <button className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
+                style={{ height: "32px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
+                onClick={onAddToClaim}>
+                Add to claim <ArrowUpRight size={12} />
+              </button>
+            ) : null}
           </>
         }
       />
@@ -376,13 +378,15 @@ export default function RecommendationsEngine({ onAddToClaim }: {
 
           {/* Action buttons */}
           <div className="flex flex-col gap-2">
-            <button className="w-full flex items-center justify-center gap-1.5 rounded-lg transition-colors cursor-pointer"
-              style={{ height: "38px", fontSize: "13px", fontWeight: 500, color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1e40af")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1A4ED8")}
-              onClick={onAddToClaim}>
-              Add to claim workflow <ArrowUpRight size={13} />
-            </button>
+            {onAddToClaim ? (
+              <button className="w-full flex items-center justify-center gap-1.5 rounded-lg transition-colors cursor-pointer"
+                style={{ height: "38px", fontSize: "13px", fontWeight: 500, color: "#ffffff", backgroundColor: "#1A4ED8", border: "none" }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1e40af")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#1A4ED8")}
+                onClick={onAddToClaim}>
+                Add to claim workflow <ArrowUpRight size={13} />
+              </button>
+            ) : null}
             <button className="w-full flex items-center justify-center gap-1.5 rounded-lg border transition-colors cursor-pointer"
               style={{ height: "36px", fontSize: "13px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
               onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}

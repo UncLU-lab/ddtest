@@ -14,6 +14,9 @@ const DAY_SECONDS = 86_400;
 /** Hours between NOR tender/acceptance and laytime commencing, absent a clause. */
 const DEFAULT_NOTICE_HOURS = 6;
 
+/** Bump when the deterministic calculation rules change. */
+export const LAYTIME_ENGINE_VERSION = 'laytime-engine-v1';
+
 /** Clause types this version of the engine understands. */
 const SUPPORTED_CLAUSE_TYPES = new Set([
   'laytime_rate',
@@ -514,16 +517,26 @@ function priceResult(
   ]);
 
   if (despatchRate === undefined) {
+    const multiplier = readNumber(clauses.despatch.parameters, ['multiplier']);
+
     if (demurrageRate === undefined) {
       warnings.push(
-        'The despatch clause has no rate and no demurrage rate is available to halve; the despatch amount is zero.',
+        'The despatch clause has no rate or usable multiplier and no demurrage rate is available; the despatch amount is zero.',
       );
       return { demurrageAmount: 0, despatchAmount: 0 };
     }
-    despatchRate = demurrageRate / 2;
-    warnings.push(
-      'The despatch clause has no rate; half the demurrage rate was applied.',
-    );
+
+    if (multiplier !== undefined) {
+      despatchRate = demurrageRate * multiplier;
+      warnings.push(
+        `The despatch multiplier of ${multiplier} was applied to the demurrage rate.`,
+      );
+    } else {
+      despatchRate = demurrageRate / 2;
+      warnings.push(
+        'The despatch clause has no rate; half the demurrage rate was applied.',
+      );
+    }
   }
 
   return {

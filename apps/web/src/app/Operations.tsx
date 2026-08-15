@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { Filter, Download, Plus } from "lucide-react";
-import { alerts, laytimeRows, RiskLevel } from "./data/shipments";
+import { RiskLevel } from "./data/shipments";
 import { useShipments } from "./data/ShipmentsContext";
 
 // ─── Sub-components ────────────────────────────────────────────────────────
@@ -42,7 +42,32 @@ function KpiCard({ label, value, valueColor, sub, subColor }: { label: string; v
   );
 }
 
-function AlertCard({ borderColor, typeColor, type, subject, desc, time, onNavigate }: (typeof alerts)[0] & { onNavigate?: () => void }) {
+function formatEta(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+
+  if (String(value).trim().toUpperCase() === "TBD") {
+    return "TBD";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toLocaleString();
+}
+
+function AlertCard({ borderColor, typeColor, type, subject, desc, time, onNavigate }: {
+  borderColor: string;
+  typeColor: string;
+  type: string;
+  subject: string;
+  desc: string;
+  time: string;
+  onNavigate?: () => void;
+}) {
   return (
     <div
       onClick={onNavigate}
@@ -59,25 +84,38 @@ function AlertCard({ borderColor, typeColor, type, subject, desc, time, onNaviga
   );
 }
 
-function LaytimeBarRow({ vessel, laytime, deductible, demurrage, dispatch, onClick }: (typeof laytimeRows)[0] & { onClick?: () => void }) {
-  return (
-    <div className="flex items-center gap-3 cursor-pointer" onClick={onClick}>
-      <span className="flex-shrink-0 text-right" style={{ width: "100px", fontSize: "12px", color: "#6B7280" }}>{vessel}</span>
-      <div className="flex-1 flex rounded-full overflow-hidden" style={{ height: "10px", backgroundColor: "#F3F4F6" }}>
-        {laytime > 0 && <div style={{ width: `${laytime}%`, backgroundColor: "#3B82F6" }} />}
-        {deductible > 0 && <div style={{ width: `${deductible}%`, backgroundColor: "#D1D5DB" }} />}
-        {demurrage > 0 && <div style={{ width: `${demurrage}%`, backgroundColor: "#EF4444" }} />}
-        {dispatch > 0 && <div style={{ width: `${dispatch}%`, backgroundColor: "#10B981" }} />}
-      </div>
-    </div>
-  );
-}
-
-// ─── Main ───────────────────────────────────────────────────────────────────
+// --- Main ---------------------------------------------------------------------
 
 export default function Operations() {
   const navigate = useNavigate();
   const { shipments } = useShipments();
+  const activeShipments = shipments.length;
+  const liveAlerts: Array<{
+    id: string;
+    shipmentId: string;
+    borderColor: string;
+    typeColor: string;
+    type: string;
+    subject: string;
+    desc: string;
+    time: string;
+  }> = [];
+
+const netExposure = shipments.reduce(
+  (total, shipment) => total + Math.max(0, shipment.exposure),
+  0
+);
+
+const exposureShipments = shipments.filter(
+  (shipment) => shipment.exposure > 0
+).length;
+
+const shipmentsAtRisk = shipments.filter(
+  (shipment) => shipment.risk === "critical"
+).length;
+
+const claimsPending = shipments.reduce((total, s) => total + (Number(s.openDisputeCount) || 0), 0);
+const amountUnderDispute = shipments.reduce((total, s) => total + (Number(s.amountUnderDispute) || 0), 0);
   const [showFilters, setShowFilters] = useState(false);
   const [riskFilter, setRiskFilter] = useState<Set<RiskLevel>>(new Set(["critical", "elevated", "optimal"]));
   const [portFilter, setPortFilter] = useState("All ports");
@@ -113,11 +151,34 @@ export default function Operations() {
     <div className="px-6">
       {/* ── KPI Strip ── */}
       <div className="flex gap-4 mt-6">
-        <KpiCard label="Active shipments" value="142" sub="+12.5% vs last cycle" subColor="#22543D" />
-        <KpiCard label="Net demurrage exposure" value="$842,500" valueColor="#C53030" sub="Across 18 high-risk vessels" />
-        <KpiCard label="Claims pending" value="24" valueColor="#B45309" sub="$1.2M recoverable value" />
-        <KpiCard label="Shipments at risk" value="09" valueColor="#C53030" sub="Critical attention required" subColor="#C53030" />
-      </div>
+  <KpiCard
+    label="Active shipments"
+    value={String(activeShipments)}
+    sub="Currently tracked"
+  />
+
+  <KpiCard
+    label="Net demurrage exposure"
+    value={`$${netExposure.toLocaleString()}`}
+    valueColor={netExposure > 0 ? "#C53030" : "#111827"}
+    sub={`${exposureShipments} with exposure`}
+  />
+
+  <KpiCard
+    label="Claims pending"
+    value={String(claimsPending)}
+    valueColor="#B45309"
+    sub={`$${amountUnderDispute.toLocaleString()} under dispute`}
+  />
+
+  <KpiCard
+    label="Shipments at risk"
+    value={String(shipmentsAtRisk).padStart(2, "0")}
+    valueColor={shipmentsAtRisk > 0 ? "#C53030" : "#111827"}
+    sub="Critical attention required"
+    subColor={shipmentsAtRisk > 0 ? "#C53030" : "#6B7280"}
+  />
+</div>
 
       {/* ── Main Two-Column Grid ── */}
       <div className="mt-5 flex gap-4">
@@ -207,7 +268,7 @@ export default function Operations() {
                 <span style={{ fontSize: "13px", color: "#374151" }}>{s.port}</span>
                 <span style={{ fontSize: "13px", color: "#374151" }}>{s.supplier}</span>
                 <span style={{ fontSize: "13px", color: "#374151" }}>{s.receiver}</span>
-                <span style={{ fontSize: "13px", color: "#374151" }}>{s.eta}</span>
+                <span style={{ fontSize: "13px", color: "#374151" }}>{formatEta(s.eta)}</span>
                 <RiskBadge level={s.risk} />
                 <ExposureValue amount={s.exposure} />
               </div>
@@ -218,40 +279,59 @@ export default function Operations() {
         {/* ── Right: Alerts Panel ── */}
         <div style={{ width: "240px", flexShrink: 0 }}>
           <div className="flex items-center justify-between mb-3">
-            <span style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Alerts</span>
-            <span className="rounded-full px-2 py-0.5 font-semibold" style={{ fontSize: "11px", backgroundColor: "#FED7D7", color: "#9B2C2C" }}>4 live</span>
+            <span style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Alerts
+            </span>
+            <span
+              className="rounded-full px-2 py-0.5 font-semibold"
+              role="status"
+              aria-live="polite"
+              style={{ fontSize: "11px", backgroundColor: "#F3F4F6", color: "#374151" }}
+            >
+              {liveAlerts.length} live
+            </span>
           </div>
           <div className="flex flex-col gap-2">
-            {alerts.map((a) => (
-              <AlertCard key={a.id} {...a} onNavigate={() => navigate(`/shipments/${a.shipmentId}`)} />
-            ))}
+            {liveAlerts.length === 0 ? (
+              <div
+                className="rounded-lg border px-3 py-[10px]"
+                role="status"
+                aria-live="polite"
+                style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+              >
+                <p style={{ fontSize: "12px", fontWeight: 500, color: "#111827", marginBottom: "2px" }}>
+                  No live operational alerts.
+                </p>
+                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.4 }}>
+                  Alerts will appear here when live operational conditions are available.
+                </p>
+              </div>
+            ) : (
+              liveAlerts.map((a) => (
+                <AlertCard key={a.id} {...a} onNavigate={() => navigate(`/shipments/${a.shipmentId}`)} />
+              ))
+            )}
           </div>
         </div>
       </div>
-
-      {/* ── Laytime Visualiser ── */}
+      {/* -- Laytime Visualiser -- */}
       <div className="mt-5 mb-6">
         <span className="block mb-3" style={{ fontSize: "11px", color: "#6B7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>
           Vessel laytime visualiser
         </span>
         <div className="rounded-xl border p-[14px_16px]" style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}>
-          <div className="flex items-center gap-4 mb-4">
-            {[
-              { label: "Laytime", color: "#3B82F6" },
-              { label: "Dispatch", color: "#10B981" },
-              { label: "Demurrage", color: "#EF4444" },
-              { label: "Deductible", color: "#D1D5DB" },
-            ].map((item) => (
-              <div key={item.label} className="flex items-center gap-1.5">
-                <span className="rounded-sm flex-shrink-0" style={{ width: "8px", height: "8px", backgroundColor: item.color }} />
-                <span style={{ fontSize: "12px", color: "#6B7280" }}>{item.label}</span>
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-col gap-[10px]">
-            {laytimeRows.map((row) => (
-              <LaytimeBarRow key={row.vessel} {...row} onClick={() => navigate(`/shipments/${row.shipmentId}`)} />
-            ))}
+          <div
+            className="rounded-lg border px-3 py-[10px]"
+            role="status"
+            aria-live="polite"
+            style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#F9FAFB" }}
+          >
+            <p style={{ fontSize: "12px", fontWeight: 500, color: "#111827", marginBottom: "2px" }}>
+              No laytime visualisation data available.
+            </p>
+            <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.4 }}>
+              Laytime data will appear here when persisted calculations are available.
+            </p>
           </div>
         </div>
       </div>

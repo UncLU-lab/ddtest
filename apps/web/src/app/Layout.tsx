@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
-import { Search, Bell, Anchor } from "lucide-react";
+import { Anchor } from "lucide-react";
 
 // ─── Primary nav config ─────────────────────────────────────────────────────
 // Route (not label) drives active-state highlighting, so it stays correct
@@ -61,23 +61,6 @@ export default function Layout() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            className="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
-            style={{ color: "#6B7280", border: "none", backgroundColor: "transparent" }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F3F4F6")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "transparent")}
-          >
-            <Search size={16} />
-          </button>
-          <button
-            className="w-8 h-8 flex items-center justify-center rounded-md relative transition-colors"
-            style={{ color: "#6B7280", border: "none", backgroundColor: "transparent" }}
-            onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F3F4F6")}
-            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "transparent")}
-          >
-            <Bell size={16} />
-            <span className="absolute top-1.5 right-1.5 rounded-full" style={{ width: "6px", height: "6px", backgroundColor: "#EF4444" }} />
-          </button>
           <div
             onClick={() => navigate("/settings")}
             className="ml-1 w-8 h-8 rounded-full flex items-center justify-center text-white cursor-pointer"

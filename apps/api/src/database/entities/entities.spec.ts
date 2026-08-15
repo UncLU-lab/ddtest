@@ -2,7 +2,7 @@ import { DataSource } from 'typeorm';
 import { databaseEntities } from '.';
 
 describe('database entities', () => {
-  it('registers all 25 tables defined in the database design document', async () => {
+  it('registers all 27 tables defined in the database design document', async () => {
     const dataSource = new DataSource({
       type: 'postgres',
       database: 'metadata-only',
@@ -35,12 +35,14 @@ describe('database entities', () => {
       'knowledge_base_chunks',
       'laytime_calculations',
       'nor_documents',
+      'organizations',
       'shipment_containers',
       'shipments',
       'sof_documents',
       'sof_events',
       'users',
       'vessels',
+      'voyage_counterparties',
       'voyages',
     ]);
   });

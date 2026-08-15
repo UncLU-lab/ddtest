@@ -1,23 +1,58 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { Shipment, RiskLevel } from "./shipments";
-import { getVoyages } from "../../lib/api";
+import { getVoyages, getVoyageSummary } from "../../lib/api";
 
-function normalizeShipment(item: any): Shipment | null {
+function normalizeShipment(item: any, summary?: any): Shipment | null {
   if (!item) return null;
-
   const id = item.id ?? item.voyageId ?? item.uuid ?? "";
-  const vessel = item.vessel?.name ?? item.vessel ?? item.vesselName ?? "Unknown vessel";
-  const port = item.loadPort ?? item.port ?? item.dischargePort ?? "Unknown port";
-  const supplier = item.supplier ?? item.counterparty?.name ?? "Unknown supplier";
-  const receiver = item.receiver ?? item.buyer ?? item.counterparty?.name ?? "Unknown receiver";
-  const eta = item.eta ?? item.laycanEnd ?? item.arrivalDate ?? item.updatedAt ?? "TBD";
-  const cargo = item.cargoType ?? item.cargo ?? "LNG";
-  const quantity = item.cargoQuantity ? `${Number(item.cargoQuantity).toLocaleString()} MT` : item.quantity ?? "N/A";
+  const parties = summary?.parties ?? {};
+  const commercialTerms = summary?.commercialTerms ?? {};
 
-  const risk =
-    item.risk ??
-    (item.status === "Completed" ? "optimal" : item.status === "Active" ? "elevated" : "optimal");
-  const exposure = typeof item.exposure === "number" ? item.exposure : 0;
+  const vessel =
+    item.vessel?.name ??
+    item.vesselName ??
+    item.vessel ??
+    "Unknown vessel";
+
+  const port =
+    item.dischargePort ??
+    item.port ??
+    item.loadPort ??
+    "Unknown port";
+
+  const eta =
+    item.eta ??
+    item.arrivalDate ??
+    "TBD";
+
+  const cargo =
+    item.cargoType ??
+    item.cargo ??
+    "Unknown";
+
+  const quantity =
+    item.cargoQuantity != null
+      ? `${Number(item.cargoQuantity).toLocaleString()} MT`
+      : item.quantity ?? "N/A";
+
+  const riskData = summary?.risk ?? {};
+
+  const exposure = Number(riskData?.demurrageExposure ? Number(riskData.demurrageExposure) : 0) || 0;
+  const despatchCredit = Number(riskData?.despatchCredit ? Number(riskData.despatchCredit) : 0) || 0;
+
+  let risk: RiskLevel = "optimal";
+  if (riskData?.laycanExpired) {
+    risk = "critical";
+  } else if (
+    (riskData?.openDisputeCount ?? 0) > 0 ||
+    Boolean(riskData?.calculationStale)
+  ) {
+    risk = "elevated";
+  } else if (exposure > 0) {
+    risk = "elevated";
+  } else {
+    risk = "optimal";
+  }
 
   if (!id) return null;
 
@@ -25,18 +60,67 @@ function normalizeShipment(item: any): Shipment | null {
     id: String(id),
     vessel: String(vessel),
     port: String(port),
-    supplier: String(supplier),
-    receiver: String(receiver),
+    loadPort:
+      item.loadPort ??
+      item.departurePort ??
+      item.port ??
+      undefined,
+    voyageRef:
+      item.reference ??
+      item.code ??
+      item.voyageRef ??
+      String(id),
+
+    supplier:
+      parties.supplier ??
+      item.supplier ??
+      "Not specified",
+    receiver:
+      parties.receiver ??
+      item.receiver ??
+      "Not specified",
+
     eta: String(eta),
-    risk: risk as RiskLevel,
-    exposure: Number(exposure),
+    risk,
+    exposure,
     cargo: String(cargo),
     quantity: String(quantity),
+
+    status: item.status,
+    laycanStart: item.laycanStart,
+    laycanEnd: item.laycanEnd,
+    laytimeAllowed:
+      commercialTerms.laytimeAllowed != null
+        ? String(commercialTerms.laytimeAllowed)
+        : item.laytimeAllowed,
+    demurrageRate:
+      commercialTerms.demurrageRate ??
+      item.demurrageRate,
+    dispatchRate:
+      commercialTerms.dispatchRate ??
+      item.dispatchRate,
+    timeCountingBasis:
+      commercialTerms.timeCountingBasis ??
+      item.timeCountingBasis,
+    norNoticePeriod:
+      commercialTerms.norNoticePeriod ??
+      item.norNoticePeriod,
+
+    despatchCredit,
+    openDisputeCount: Number(riskData?.openDisputeCount ?? 0),
+    amountUnderDispute: Number(riskData?.amountUnderDispute ? Number(riskData.amountUnderDispute) : 0),
+
+    readyToCalculate: Boolean(riskData?.readyToCalculate),
+    calculationStale: Boolean(riskData?.calculationStale),
+    laycanExpired: Boolean(riskData?.laycanExpired),
+
+    blockers: riskData?.blockers ?? [],
   };
 }
 
 export interface ShipmentDraft {
   vessel: string;
+  vesselId?: string;
   voyageRef: string;
   productType: string;
   quantity: string;
@@ -63,6 +147,7 @@ export interface ShipmentDraft {
 
 export const emptyDraft: ShipmentDraft = {
   vessel: "",
+  vesselId: "",
   voyageRef: "",
   productType: "LNG",
   quantity: "",
@@ -111,6 +196,9 @@ interface ShipmentsContextValue {
   draft: ShipmentDraft;
   setDraft: (d: ShipmentDraft) => void;
   clearDraft: () => void;
+  loading: boolean;
+  error: string | null;
+  reload: () => void;
 }
 
 const ShipmentsContext = createContext<ShipmentsContextValue | null>(null);
@@ -119,25 +207,49 @@ export function ShipmentsProvider({ children }: { children: ReactNode }) {
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [draft, setDraft] = useState<ShipmentDraft>(emptyDraft);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let keepAlive = true;
 
     async function loadShipments() {
+      setLoading(true);
+      setApiError(null);
       try {
-        const voyages = await getVoyages();
-        const mapped = voyages.map(normalizeShipment).filter(Boolean) as Shipment[];
+        const resp = await getVoyages();
 
-        if (keepAlive) {
-          setShipments(mapped);
-          setApiError(null);
-        }
-      } catch (error: any) {
-        console.error('Failed to load shipments:', error);
-        if (keepAlive) {
-          setApiError(error.message || 'Failed to load shipment data');
-          setShipments([]);
-        }
+if (!keepAlive) return;
+
+const summaries = await Promise.all(
+  (resp ?? []).map(async (voyage: any) => {
+    try {
+      return await getVoyageSummary(voyage.id);
+    } catch (error) {
+      console.error(
+        `Failed to load summary for voyage ${voyage.id}`,
+        error
+      );
+      return null;
+    }
+  })
+);
+
+if (!keepAlive) return;
+
+const mapped: Shipment[] = (resp ?? [])
+  .map((voyage: any, index: number) =>
+    normalizeShipment(voyage, summaries[index])
+  )
+  .filter(Boolean) as Shipment[];
+
+setShipments(mapped);
+      } catch (err: any) {
+        if (!keepAlive) return;
+        setApiError(err?.message ?? String(err) ?? "Failed to load voyages");
+        setShipments([]);
+      } finally {
+        if (keepAlive) setLoading(false);
       }
     }
 
@@ -146,7 +258,11 @@ export function ShipmentsProvider({ children }: { children: ReactNode }) {
     return () => {
       keepAlive = false;
     };
-  }, []);
+  }, [reloadKey]);
+
+  function reload() {
+    setReloadKey((k) => k + 1);
+  }
 
   function getShipmentById(id?: string | null) {
     return shipments.find((s) => s.id === id);
@@ -165,7 +281,7 @@ export function ShipmentsProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <ShipmentsContext.Provider value={{ shipments, getShipmentById, addShipment, updateShipment, draft, setDraft, clearDraft }}>
+    <ShipmentsContext.Provider value={{ shipments, getShipmentById, addShipment, updateShipment, draft, setDraft, clearDraft, loading, error: apiError, reload }}>
       {children}
     </ShipmentsContext.Provider>
   );

@@ -64,6 +64,22 @@ export class LaytimeCalculation extends UuidEntity {
   @Column({ type: 'varchar', length: 20, default: 'Draft' })
   status!: LaytimeCalculationStatus;
 
+  /** Immutable source data used when this calculation was created. */
+  @Column({ name: 'input_snapshot', type: 'jsonb', nullable: true, update: false })
+  inputSnapshot?: Record<string, unknown> | null;
+
+  /** Immutable engine decisions and derived timeline for audit and explanation. */
+  @Column({ name: 'decision_snapshot', type: 'jsonb', nullable: true, update: false })
+  decisionSnapshot?: Record<string, unknown> | null;
+
+  /** Non-fatal engine and source-selection notes captured at calculation time. */
+  @Column({ type: 'jsonb', nullable: true, update: false })
+  warnings?: string[] | null;
+
+  /** Identifies the deterministic laytime rule set used for this calculation. */
+  @Column({ name: 'engine_version', type: 'varchar', length: 50, nullable: true, update: false })
+  engineVersion?: string | null;
+
   @CreateDateColumn({ name: 'calculated_at', type: 'timestamptz' })
   calculatedAt!: Date;
 

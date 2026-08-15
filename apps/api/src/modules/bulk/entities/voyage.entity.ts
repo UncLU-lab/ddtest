@@ -17,6 +17,9 @@ import { LaytimeCalculation } from './laytime-calculation.entity';
 import { NorDocument } from './nor-document.entity';
 import { SofDocument } from './sof-document.entity';
 import { Vessel } from './vessel.entity';
+import { Organization } from '../../cross-cutting/entities/organization.entity';
+import { User } from '../../cross-cutting/entities/user.entity';
+import { VoyageCounterparty } from './voyage-counterparty.entity';
 
 export const VOYAGE_STATUSES = [
   'Planned',
@@ -25,6 +28,10 @@ export const VOYAGE_STATUSES = [
   'Cancelled',
 ] as const;
 export type VoyageStatus = (typeof VOYAGE_STATUSES)[number];
+export const CARGO_QUANTITY_UNITS = ['MT', 'BBL', 'M3'] as const;
+export type CargoQuantityUnit = (typeof CARGO_QUANTITY_UNITS)[number];
+export const LAYTIME_OPERATIONS = ['Loading', 'Discharge'] as const;
+export type LaytimeOperation = (typeof LAYTIME_OPERATIONS)[number];
 
 @Entity('voyages')
 @Check(
@@ -34,7 +41,25 @@ export type VoyageStatus = (typeof VOYAGE_STATUSES)[number];
 @Index('idx_voyages_vessel', ['vesselId'])
 @Index('idx_voyages_status', ['status'])
 @Index('idx_voyages_ports', ['loadPort', 'dischargePort'])
+@Index('uq_voyages_organization_reference', ['organizationId', 'reference'], {
+  unique: true,
+})
+@Index('idx_voyages_organization', ['organizationId'])
 export class Voyage extends UuidEntity {
+  @Column({
+    name: 'organization_id',
+    type: 'uuid',
+    default: '00000000-0000-0000-0000-000000000001',
+  })
+  organizationId!: string;
+
+  @ManyToOne(() => Organization)
+  @JoinColumn({ name: 'organization_id' })
+  organization!: Organization;
+
+  @Column({ type: 'varchar', length: 100 })
+  reference!: string;
+
   @Column({ name: 'vessel_id', type: 'uuid' })
   vesselId!: string;
 
@@ -60,6 +85,14 @@ export class Voyage extends UuidEntity {
   })
   cargoQuantity!: string;
 
+  @Column({
+    name: 'cargo_quantity_unit',
+    type: 'varchar',
+    length: 10,
+    default: 'MT',
+  })
+  cargoQuantityUnit!: CargoQuantityUnit;
+
   @Column({ name: 'cargo_type', type: 'varchar', length: 100 })
   cargoType!: string;
 
@@ -75,12 +108,48 @@ export class Voyage extends UuidEntity {
   @Column({ name: 'laycan_end', type: 'date' })
   laycanEnd!: string;
 
+  @Column({ type: 'timestamptz', nullable: true })
+  eta?: Date | null;
+
+  @Column({
+    name: 'laytime_operation',
+    type: 'varchar',
+    length: 20,
+    default: 'Discharge',
+  })
+  laytimeOperation!: LaytimeOperation;
+
+  @Column({
+    name: 'calculation_time_zone',
+    type: 'varchar',
+    length: 100,
+    default: 'UTC',
+  })
+  calculationTimeZone!: string;
+
+  @Column({ type: 'text', nullable: true })
+  notes?: string | null;
+
   @Column({
     type: 'varchar',
     length: 20,
     default: 'Planned',
   })
   status!: VoyageStatus;
+
+  @Column({ name: 'created_by_user_id', type: 'uuid', nullable: true })
+  createdByUserId?: string | null;
+
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'created_by_user_id' })
+  createdByUser?: User | null;
+
+  @Column({ name: 'updated_by_user_id', type: 'uuid', nullable: true })
+  updatedByUserId?: string | null;
+
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'updated_by_user_id' })
+  updatedByUser?: User | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
@@ -102,4 +171,10 @@ export class Voyage extends UuidEntity {
 
   @OneToMany(() => DisputeCaseBulk, (dispute) => dispute.voyage)
   disputes?: DisputeCaseBulk[];
+
+  @OneToMany(
+    () => VoyageCounterparty,
+    (voyageCounterparty) => voyageCounterparty.voyage,
+  )
+  counterpartyLinks?: VoyageCounterparty[];
 }

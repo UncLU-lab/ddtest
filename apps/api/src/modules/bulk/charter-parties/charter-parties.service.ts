@@ -135,8 +135,8 @@ export class CharterPartiesService {
   }
 
   /**
-   * Removes a clause. Calculation periods that cited it keep their timing but
-   * lose the attribution, so historical calculations stay intact.
+   * Removes a clause unless it is cited by a final calculation period. Draft
+   * calculations can lose the live relation; final calculation evidence cannot.
    */
   async removeClause(id: string): Promise<void> {
     const clause = await this.clauses.findOne({ where: { id } });
@@ -146,6 +146,19 @@ export class CharterPartiesService {
     }
 
     await this.dataSource.transaction(async (manager) => {
+      const finalPeriod = await manager
+        .createQueryBuilder(CalculationPeriod, 'period')
+        .innerJoin('period.calculation', 'calculation')
+        .where('period.appliedClauseId = :id', { id })
+        .andWhere('calculation.status = :status', { status: 'Final' })
+        .getOne();
+
+      if (finalPeriod) {
+        throw new ConflictException(
+          `Clause ${id} is referenced by a final laytime calculation and cannot be removed`,
+        );
+      }
+
       await manager.update(
         CalculationPeriod,
         { appliedClauseId: id },
