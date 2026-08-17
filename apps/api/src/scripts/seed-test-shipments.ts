@@ -1436,9 +1436,19 @@ function assertValue(
   }
 }
 
+function formatSeedError(error: unknown): string {
+  if (error instanceof Error) {
+    const parts = [`${error.name}: ${error.message}`];
+    if (error.stack) {
+      parts.push(error.stack);
+    }
+    return parts.join('\n');
+  }
+
+  return String(error);
+}
+
 void main().catch((error: unknown) => {
-  const message =
-    error instanceof Error ? error.stack ?? error.message : String(error);
-  console.error(message);
+  console.error(formatSeedError(error));
   process.exitCode = 1;
 });
