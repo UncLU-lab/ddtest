@@ -797,6 +797,7 @@ async function main(): Promise<void> {
   const { AppModule } = require('../app.module');
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: false,
+    abortOnError: false,
   });
 
   try {
