@@ -47,7 +47,13 @@ export class SofDocumentsService {
   ): Promise<SofDocument> {
     await this.voyagesService.ensureExists(voyageId);
 
-    return this.documents.save(this.documents.create({ ...dto, voyageId }));
+    return this.documents.save(
+      this.documents.create({
+        ...dto,
+        voyageId,
+        operation: dto.operation ?? null,
+      }),
+    );
   }
 
   async findOne(id: string): Promise<SofDocument> {
@@ -91,6 +97,7 @@ export class SofDocumentsService {
         sofId,
         eventTime: new Date(dto.eventTime),
         eventType: dto.eventType,
+        operation: dto.operation ?? null,
         remarks: dto.remarks ?? null,
         confidenceScore: dto.confidenceScore?.toFixed(2) ?? null,
         isManualOverride: true,
@@ -125,6 +132,9 @@ export class SofDocumentsService {
     }
     if (dto.eventType !== undefined) {
       event.eventType = dto.eventType;
+    }
+    if (dto.operation !== undefined) {
+      event.operation = dto.operation;
     }
     if (dto.remarks !== undefined) {
       event.remarks = dto.remarks;

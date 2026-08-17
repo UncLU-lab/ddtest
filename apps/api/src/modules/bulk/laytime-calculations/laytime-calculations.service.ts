@@ -5,7 +5,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { Paginated, paginate } from '../../../common/dto/paginated';
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 import { CalculationPeriod } from '../entities/calculation-period.entity';
@@ -14,9 +14,11 @@ import { LaytimeCalculation } from '../entities/laytime-calculation.entity';
 import { NorDocument } from '../entities/nor-document.entity';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
+import { normalizeCommercialTermsToClauses } from '../charter-party-terms';
 import { LAYTIME_ENGINE_VERSION, runLaytimeEngine } from '../laytime/laytime.engine';
 import { EngineClause, LaytimeEngineError } from '../laytime/laytime.types';
 import { secondsToInterval } from '../laytime/interval.util';
+import { type LaytimeOperation } from '../entities/voyage.entity';
 import { VoyagesService } from '../voyages/voyages.service';
 
 /** A calculation plus the engine notes that produced it. */
@@ -28,6 +30,56 @@ export interface CalculationResult {
 type ResolvedClause = EngineClause & {
   rawText?: string;
 };
+
+type SofEventOperationClassification =
+  | 'global'
+  | 'legacy-null'
+  | 'matching-operation'
+  | 'mismatched-operation';
+
+type CalculationEventSelection = {
+  rule: 'exclude-explicit-mismatched-operation-completion-events';
+  includedEventIds: string[];
+  excludedEventIds: string[];
+};
+
+type SofDocumentSelection = {
+  voyageLaytimeOperation: LaytimeOperation;
+  candidateDocumentIds: string[];
+  includedDocumentIds: string[];
+  excludedDocumentIds: string[];
+  matchingDocumentIds: string[];
+  legacyNullDocumentIds: string[];
+  oppositeOperationDocumentIds: string[];
+  rule: 'matching-operation-plus-legacy-null';
+};
+
+type OperationSelectionAudit = {
+  voyageLaytimeOperation: LaytimeOperation;
+  hasLoadingCompletion: boolean;
+  hasDischargeCompletion: boolean;
+  mixedOperationEvidence: boolean;
+  includedCompletionEventIds: string[];
+  excludedCompletionEventIds: string[];
+};
+
+const GLOBAL_SOF_EVENT_TYPES = new Set([
+  'NOR_TENDERED',
+  'RAIN_STOPPAGE',
+  'RAIN_COMMENCED',
+  'WEATHER_STOPPAGE',
+  'RAIN_STOPPED',
+  'WEATHER_CLEARED',
+  'BREAKDOWN',
+  'STOPPAGE_START',
+  'WORK_STOPPED',
+  'BREAKDOWN_REPAIRED',
+  'STOPPAGE_END',
+  'WORK_RESUMED',
+  'CARGO_COMPLETED',
+  'COMPLETION_OF_CARGO',
+  'HOSES_DISCONNECTED',
+]);
 
 /** Read-only explanation assembled solely from a calculation's stored evidence. */
 export interface CalculationAuditResponse {
@@ -77,7 +129,7 @@ export class LaytimeCalculationsService {
     await this.voyagesService.ensureExists(voyageId);
 
     const result = await this.calculations.findAndCount({
-      where: { voyageId },
+      where: { voyageId, parentCalculationId: IsNull() },
       order: { version: 'DESC' },
       skip: query.skip,
       take: query.limit,
@@ -184,8 +236,31 @@ export class LaytimeCalculationsService {
       this.norDocuments.find({ where: { voyageId } }),
       this.loadSofEvents(voyageId, warnings),
     ]);
-    const sofEvents = sofSource.events;
+    const documentSelection = this.selectSofDocumentsForEngine(
+      voyage.laytimeOperation,
+      sofSource.documents,
+      warnings,
+    );
+    const loadedSofEvents = sofSource.events.filter((event) =>
+      documentSelection.includedDocumentIds.includes(event.sofId),
+    );
     const clauses = this.resolveClauses(charterParty);
+    const eventSelection = this.selectSofEventsForEngine(
+      voyage.laytimeOperation,
+      loadedSofEvents,
+    );
+    const sofEvents = eventSelection.events;
+    const operationSelection = this.buildOperationSelectionAudit(
+      voyage.laytimeOperation,
+      loadedSofEvents,
+      eventSelection.selection,
+    );
+
+    if (operationSelection.mixedOperationEvidence) {
+      warnings.push(
+        'SOF contains both Loading and Discharge operation-specific completion events. Calculation used the voyage laytimeOperation to select the applicable completion evidence.',
+      );
+    }
 
     let result;
     try {
@@ -209,7 +284,10 @@ export class LaytimeCalculationsService {
       clauses,
       norDocuments,
       sofSource.documents,
-      sofEvents,
+      loadedSofEvents,
+      documentSelection,
+      eventSelection.selection,
+      operationSelection,
     );
     const decisionSnapshot = this.buildDecisionSnapshot(
       charterParty,
@@ -224,11 +302,14 @@ export class LaytimeCalculationsService {
         .createQueryBuilder(LaytimeCalculation, 'calculation')
         .select('MAX(calculation.version)', 'maximum')
         .where('calculation.voyageId = :voyageId', { voyageId })
+        .andWhere('calculation.parentCalculationId IS NULL')
         .getRawOne<{ maximum: number | null }>()) ?? { maximum: null };
 
       const saved = await manager.save(
         manager.create(LaytimeCalculation, {
           voyageId,
+          parentCalculationId: null,
+          operation: null,
           version: (maximum ?? 0) + 1,
           allowedLaytime: secondsToInterval(result.allowedSeconds),
           usedLaytime: secondsToInterval(result.usedSeconds),
@@ -285,7 +366,7 @@ export class LaytimeCalculationsService {
   ): Promise<{ documents: SofDocument[]; events: SofEvent[] }> {
     const documents = await this.sofDocuments.find({
       where: { voyageId },
-      select: { id: true, status: true, uploadDate: true },
+      select: { id: true, status: true, uploadDate: true, operation: true },
     });
 
     if (documents.length === 0) {
@@ -314,15 +395,51 @@ export class LaytimeCalculationsService {
   }
 
   private buildInputSnapshot(
-    voyage: { id: string; cargoQuantity: string },
+    voyage: { id: string; cargoQuantity: string; laytimeOperation: LaytimeOperation },
     charterParty: CharterParty,
     clauses: ResolvedClause[],
     norDocuments: NorDocument[],
     sofDocuments: SofDocument[],
     sofEvents: SofEvent[],
+    sofDocumentSelection: SofDocumentSelection,
+    calculationEventSelection: CalculationEventSelection,
+    operationSelection: OperationSelectionAudit,
   ): Record<string, unknown> {
     return {
-      voyage: { id: voyage.id, cargoQuantity: voyage.cargoQuantity },
+      voyage: {
+        id: voyage.id,
+        cargoQuantity: voyage.cargoQuantity,
+        laytimeOperation: voyage.laytimeOperation,
+      },
+      calculationEventSelection: {
+        rule: calculationEventSelection.rule,
+        includedEventIds: [...calculationEventSelection.includedEventIds],
+        excludedEventIds: [...calculationEventSelection.excludedEventIds],
+      },
+      sofDocumentSelection: {
+        voyageLaytimeOperation: sofDocumentSelection.voyageLaytimeOperation,
+        candidateDocumentIds: [...sofDocumentSelection.candidateDocumentIds],
+        includedDocumentIds: [...sofDocumentSelection.includedDocumentIds],
+        excludedDocumentIds: [...sofDocumentSelection.excludedDocumentIds],
+        matchingDocumentIds: [...sofDocumentSelection.matchingDocumentIds],
+        legacyNullDocumentIds: [...sofDocumentSelection.legacyNullDocumentIds],
+        oppositeOperationDocumentIds: [
+          ...sofDocumentSelection.oppositeOperationDocumentIds,
+        ],
+        rule: sofDocumentSelection.rule,
+      },
+      operationSelection: {
+        voyageLaytimeOperation: operationSelection.voyageLaytimeOperation,
+        hasLoadingCompletion: operationSelection.hasLoadingCompletion,
+        hasDischargeCompletion: operationSelection.hasDischargeCompletion,
+        mixedOperationEvidence: operationSelection.mixedOperationEvidence,
+        includedCompletionEventIds: [
+          ...operationSelection.includedCompletionEventIds,
+        ],
+        excludedCompletionEventIds: [
+          ...operationSelection.excludedCompletionEventIds,
+        ],
+      },
       charterParty: {
         id: charterParty.id,
         clauses: clauses.map((clause) => ({
@@ -341,12 +458,18 @@ export class LaytimeCalculationsService {
         id: document.id,
         status: document.status,
         uploadDate: document.uploadDate.toISOString(),
+        operation: document.operation ?? null,
       })),
       sofEvents: sofEvents.map((event) => ({
         id: event.id,
         sofId: event.sofId,
         eventTime: event.eventTime.toISOString(),
         eventType: event.eventType,
+        operation: event.operation ?? null,
+        operationClassification: this.classifySofEventOperation(
+          event,
+          voyage.laytimeOperation,
+        ),
         remarks: event.remarks ?? null,
         isManualOverride: event.isManualOverride,
         overrideReason: event.overrideReason ?? null,
@@ -362,6 +485,8 @@ export class LaytimeCalculationsService {
     result: {
       commencedAt: Date;
       completedAt: Date;
+      demurrageStartedAt: Date | null;
+      weatherDeductedSeconds: number;
       allowedSeconds: number;
       usedSeconds: number;
       demurrageAmount: number;
@@ -372,6 +497,11 @@ export class LaytimeCalculationsService {
         periodType: string;
         appliedClauseId: string | null;
       }>;
+      ignoredExceptions: Array<{
+        startTime: Date;
+        endTime: Date;
+        appliedClauseId: string | null;
+      }>;
     },
   ): Record<string, unknown> {
     const firstClause = (type: string) =>
@@ -379,6 +509,9 @@ export class LaytimeCalculationsService {
     const laytimeClause = firstClause('laytime_rate');
     const demurrageClause = firstClause('demurrage_rate');
     const despatchClause = firstClause('despatch');
+    const weatherWorkingClause = firstClause('weather_working');
+    const wibonClause = firstClause('wibon');
+    const wiponClause = firstClause('wipon');
     const earliestNor = [...norDocuments].sort(
       (a, b) => a.tenderTime.getTime() - b.tenderTime.getTime(),
     )[0];
@@ -486,8 +619,28 @@ export class LaytimeCalculationsService {
           : null,
         ratePerDay: demurrageRate ?? null,
         excessSeconds: Math.max(0, result.usedSeconds - result.allowedSeconds),
+        startedAt: result.demurrageStartedAt?.toISOString() ?? null,
+        ignoredExceptions: result.ignoredExceptions.map((exception) => ({
+          startTime: exception.startTime.toISOString(),
+          endTime: exception.endTime.toISOString(),
+          appliedClauseId: exception.appliedClauseId,
+          reason: 'already_on_demurrage',
+        })),
         amount: result.demurrageAmount,
       },
+      weatherWorking: weatherWorkingClause
+        ? {
+            clauseId: weatherWorkingClause.id,
+            clauseParameters: this.cloneJson(weatherWorkingClause.parameters),
+            enabled:
+              this.readBoolean(weatherWorkingClause.parameters, ['enabled']) ??
+              null,
+            applied:
+              this.readBoolean(weatherWorkingClause.parameters, ['enabled']) ===
+              true,
+            totalWeatherTimeDeductedBeforeDemurrage: result.weatherDeductedSeconds,
+          }
+        : null,
       despatch: {
         clauseId: despatchClause?.id ?? null,
         clauseParameters: despatchClause
@@ -508,6 +661,26 @@ export class LaytimeCalculationsService {
         savedSeconds: Math.max(0, result.allowedSeconds - result.usedSeconds),
         amount: result.despatchAmount,
       },
+      wibon: wibonClause
+        ? {
+            clauseId: wibonClause.id,
+            clauseParameters: this.cloneJson(wibonClause.parameters),
+            enabled: this.readBoolean(wibonClause.parameters, ['enabled']) ?? null,
+            applied:
+              this.readBoolean(wibonClause.parameters, ['enabled']) === true,
+          }
+        : null,
+      wipon: wiponClause
+        ? {
+            clauseId: wiponClause.id,
+            clauseParameters: this.cloneJson(wiponClause.parameters),
+            enabled: this.readBoolean(wiponClause.parameters, ['enabled']) ?? null,
+            applied:
+              this.readBoolean(wiponClause.parameters, ['enabled']) === true,
+            limitation:
+              'Port-limit status is not currently modeled; timing is unchanged.',
+          }
+        : null,
     };
   }
 
@@ -529,6 +702,24 @@ export class LaytimeCalculationsService {
     return undefined;
   }
 
+  private readBoolean(
+    parameters: Record<string, unknown> | undefined,
+    keys: string[],
+  ): boolean | undefined {
+    if (!parameters) return undefined;
+
+    for (const key of keys) {
+      const value = parameters[key];
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        if (value.toLowerCase() === 'true') return true;
+        if (value.toLowerCase() === 'false') return false;
+      }
+    }
+
+    return undefined;
+  }
+
   private resolveClauses(charterParty: CharterParty): ResolvedClause[] {
     const persistedClauses = (charterParty.clauses ?? []).map((clause) => ({
       id: clause.id,
@@ -541,88 +732,153 @@ export class LaytimeCalculationsService {
       return persistedClauses;
     }
 
-    const clauses: ResolvedClause[] = [];
-    const noticeHours = this.parseNoticeHours(charterParty.norNoticePeriod);
-
-    if (charterParty.laytimeAllowed !== null && charterParty.laytimeAllowed !== undefined) {
-      const parameters: Record<string, unknown> = {
-        hours: charterParty.laytimeAllowed,
-      };
-
-      if (noticeHours !== undefined) {
-        parameters.noticeHours = noticeHours;
-      }
-
-      clauses.push({
-        id: `${charterParty.id}:laytime_rate`,
-        clauseType: 'laytime_rate',
-        rawText: [
-          `Laytime allowed: ${charterParty.laytimeAllowed}h`,
-          noticeHours !== undefined ? `NOR notice: ${charterParty.norNoticePeriod}` : null,
-        ]
-          .filter(Boolean)
-          .join('\n'),
-        parameters,
-      });
-    }
-
-    if (charterParty.demurrageRate !== null && charterParty.demurrageRate !== undefined) {
-      const rate = Number(charterParty.demurrageRate);
-
-      if (Number.isFinite(rate)) {
-        clauses.push({
-          id: `${charterParty.id}:demurrage_rate`,
-          clauseType: 'demurrage_rate',
-          rawText: `Demurrage: $${rate.toLocaleString()}/day`,
-          parameters: { rate },
-        });
-      }
-    }
-
-    if (charterParty.dispatchRate !== null && charterParty.dispatchRate !== undefined) {
-      const rate = Number(charterParty.dispatchRate);
-
-      if (Number.isFinite(rate)) {
-        clauses.push({
-          id: `${charterParty.id}:despatch`,
-          clauseType: 'despatch',
-          rawText: `Dispatch: $${rate.toLocaleString()}/day`,
-          parameters: { rate },
-        });
-      }
-    }
-
-    if (charterParty.timeCountingBasis?.trim().toUpperCase() === 'SHEX') {
-      clauses.push({
-        id: `${charterParty.id}:shex_shinc`,
-        clauseType: 'shex_shinc',
-        rawText: `Time counting basis: ${charterParty.timeCountingBasis}`,
-        parameters: { shex: true },
-      });
-    }
-
-    return clauses;
+    return normalizeCommercialTermsToClauses(charterParty);
   }
 
-  private parseNoticeHours(value?: string | null): number | undefined {
-    const trimmed = value?.trim();
-
-    if (!trimmed) {
-      return undefined;
+  private classifySofEventOperation(
+    event: SofEvent,
+    voyageOperation: LaytimeOperation,
+  ): SofEventOperationClassification {
+    if (GLOBAL_SOF_EVENT_TYPES.has(event.eventType)) {
+      return 'global';
     }
 
-    if (trimmed.toLowerCase() === 'immediate') {
-      return 0;
+    if (event.operation === null || event.operation === undefined) {
+      return 'legacy-null';
     }
 
-    const match = trimmed.match(/(\d+(?:\.\d+)?)/);
+    return event.operation === voyageOperation
+      ? 'matching-operation'
+      : 'mismatched-operation';
+  }
 
-    if (!match) {
-      return undefined;
+  private selectSofEventsForEngine(
+    voyageOperation: LaytimeOperation,
+    sofEvents: SofEvent[],
+  ): {
+    events: SofEvent[];
+    selection: CalculationEventSelection;
+  } {
+    const includedEvents: SofEvent[] = [];
+    const includedEventIds: string[] = [];
+    const excludedEventIds: string[] = [];
+
+    for (const event of sofEvents) {
+      const classification = this.classifySofEventOperation(
+        event,
+        voyageOperation,
+      );
+
+      if (
+        classification === 'mismatched-operation' &&
+        (event.eventType === 'LOADING_COMPLETED' ||
+          event.eventType === 'DISCHARGE_COMPLETED')
+      ) {
+        excludedEventIds.push(event.id);
+        continue;
+      }
+
+      includedEvents.push(event);
+      includedEventIds.push(event.id);
     }
 
-    const hours = Number(match[1]);
-    return Number.isFinite(hours) ? hours : undefined;
+    return {
+      events: includedEvents,
+      selection: {
+        rule: 'exclude-explicit-mismatched-operation-completion-events',
+        includedEventIds,
+        excludedEventIds,
+      },
+    };
+  }
+
+  private selectSofDocumentsForEngine(
+    voyageOperation: LaytimeOperation,
+    sofDocuments: SofDocument[],
+    warnings: string[],
+  ): SofDocumentSelection {
+    const candidateDocumentIds = sofDocuments.map((document) => document.id);
+    const matchingDocuments = sofDocuments.filter(
+      (document) => document.operation === voyageOperation,
+    );
+    const legacyNullDocuments = sofDocuments.filter(
+      (document) => document.operation === null || document.operation === undefined,
+    );
+    const oppositeOperationDocuments = sofDocuments.filter(
+      (document) =>
+        document.operation !== null &&
+        document.operation !== undefined &&
+        document.operation !== voyageOperation,
+    );
+
+    if (matchingDocuments.length === 0 && legacyNullDocuments.length === 0) {
+      throw new UnprocessableEntityException(
+        `No applicable SOF document exists for voyage laytime operation ${voyageOperation}`,
+      );
+    }
+
+    const includedDocuments =
+      matchingDocuments.length > 0
+        ? [...matchingDocuments, ...legacyNullDocuments]
+        : [...legacyNullDocuments];
+
+    if (matchingDocuments.length === 0 && legacyNullDocuments.length > 0) {
+      warnings.push(
+        'Legacy unscoped SOF evidence was used because no operation-matching SOF document existed for the voyage laytime operation.',
+      );
+    }
+
+    return {
+      voyageLaytimeOperation: voyageOperation,
+      candidateDocumentIds,
+      includedDocumentIds: includedDocuments.map((document) => document.id),
+      excludedDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      matchingDocumentIds: matchingDocuments.map((document) => document.id),
+      legacyNullDocumentIds: legacyNullDocuments.map((document) => document.id),
+      oppositeOperationDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      rule: 'matching-operation-plus-legacy-null',
+    };
+  }
+
+  private buildOperationSelectionAudit(
+    voyageOperation: LaytimeOperation,
+    loadedSofEvents: SofEvent[],
+    calculationEventSelection: CalculationEventSelection,
+  ): OperationSelectionAudit {
+    const isExplicitOperationCompletion = (event: SofEvent) =>
+      (event.eventType === 'LOADING_COMPLETED' ||
+        event.eventType === 'DISCHARGE_COMPLETED') &&
+      event.operation !== null &&
+      event.operation !== undefined;
+
+    const hasLoadingCompletion = loadedSofEvents.some(
+      (event) =>
+        event.eventType === 'LOADING_COMPLETED' &&
+        event.operation === 'Loading',
+    );
+    const hasDischargeCompletion = loadedSofEvents.some(
+      (event) =>
+        event.eventType === 'DISCHARGE_COMPLETED' &&
+        event.operation === 'Discharge',
+    );
+    const completionEvents = loadedSofEvents.filter(isExplicitOperationCompletion);
+
+    return {
+      voyageLaytimeOperation: voyageOperation,
+      hasLoadingCompletion,
+      hasDischargeCompletion,
+      mixedOperationEvidence: hasLoadingCompletion && hasDischargeCompletion,
+      includedCompletionEventIds: completionEvents
+        .filter((event) =>
+          calculationEventSelection.includedEventIds.includes(event.id),
+        )
+        .map((event) => event.id),
+      excludedCompletionEventIds: completionEvents
+        .filter((event) =>
+          calculationEventSelection.excludedEventIds.includes(event.id),
+        )
+        .map((event) => event.id),
+    };
   }
 
   private cloneJson<T>(value: T): T {

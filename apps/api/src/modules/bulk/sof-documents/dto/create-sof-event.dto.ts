@@ -2,12 +2,14 @@ import { Type } from 'class-transformer';
 import {
   IsDateString,
   IsNumber,
+  IsIn,
   IsOptional,
   IsString,
   Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { SOF_EVENT_OPERATIONS, type SofEventOperation } from '../../entities/sof-event.entity';
 
 export class CreateSofEventDto {
   @IsDateString({ strict: true })
@@ -17,6 +19,10 @@ export class CreateSofEventDto {
   @IsString()
   @MaxLength(50)
   eventType!: string;
+
+  @IsOptional()
+  @IsIn(SOF_EVENT_OPERATIONS)
+  operation?: SofEventOperation;
 
   @IsOptional()
   @IsString()

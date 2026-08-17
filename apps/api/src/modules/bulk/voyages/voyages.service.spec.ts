@@ -1,4 +1,4 @@
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, IsNull, Repository } from 'typeorm';
 import { CpClause } from '../entities/cp-clause.entity';
 import { CharterParty } from '../entities/charter-party.entity';
 import { Counterparty } from '../entities/counterparty.entity';
@@ -9,6 +9,7 @@ import { SofDocument } from '../entities/sof-document.entity';
 import { Vessel } from '../entities/vessel.entity';
 import { VoyageCounterparty } from '../entities/voyage-counterparty.entity';
 import { Voyage } from '../entities/voyage.entity';
+import { normalizeCommercialTermsToClauses } from '../charter-party-terms';
 import { VoyagesService } from './voyages.service';
 
 const VOYAGE_ID = '11111111-1111-4111-8111-111111111111';
@@ -17,9 +18,9 @@ const VESSEL_ID = '22222222-2222-4222-8222-222222222222';
 function buildService(voyage: Partial<Voyage>) {
   const voyages = {
     findOne: jest.fn().mockResolvedValue(voyage),
-    save: jest.fn(),
+    save: jest.fn(async (value) => value),
     createQueryBuilder: jest.fn(),
-    merge: jest.fn(),
+    merge: jest.fn((target, source) => Object.assign(target, source)),
   };
   const vessels = {
     findOne: jest.fn().mockResolvedValue({ id: VESSEL_ID }),
@@ -200,6 +201,23 @@ describe('VoyagesService voyage persistence', () => {
         parameters: { rate: 12500 },
       }),
     );
+    expect(
+      manager.create.mock.calls
+        .filter(([entity]) => entity === CpClause)
+        .map(([, value]) => value),
+    ).toEqual(
+      normalizeCommercialTermsToClauses({
+        id: 'charter-party-1',
+        laytimeAllowed: 72,
+        demurrageRate: '25000.00',
+        dispatchRate: '12500.00',
+        timeCountingBasis: '6h SHINC',
+        norNoticePeriod: '12 hours',
+      }).map(({ id: _id, ...clause }) => ({
+        charterPartyId: 'charter-party-1',
+        ...clause,
+      })),
+    );
     expect(manager.update).toHaveBeenCalledWith(
       Voyage,
       VOYAGE_ID,
@@ -214,6 +232,79 @@ describe('VoyagesService voyage persistence', () => {
       },
     });
     expect(result).toBe(persistedVoyage);
+  });
+
+  it.each([
+    ['Loading', 'Loading'],
+    ['Discharge', 'Discharge'],
+  ] as const)(
+    'persists an explicit laytime operation of %s when creating a voyage',
+    async (operation) => {
+      const persistedVoyage = {
+        id: VOYAGE_ID,
+        vessel: { id: VESSEL_ID },
+        laytimeOperation: operation,
+        charterParty: null,
+        counterpartyLinks: [],
+      } as Voyage;
+      const { service, manager } = buildService(persistedVoyage);
+
+      const result = await service.create({
+        vesselId: VESSEL_ID,
+        cargoQuantity: 65000,
+        cargoType: 'LNG',
+        reference: 'VOY-20260815-014',
+        supplier: 'Vitol Asia',
+        receiver: 'PetroChina',
+        loadPort: 'USNOL',
+        dischargePort: 'SGSIN',
+        laycanStart: '2026-09-01',
+        laycanEnd: '2026-09-05',
+        laytimeOperation: operation,
+      });
+
+      expect(manager.create).toHaveBeenCalledWith(
+        Voyage,
+        expect.objectContaining({
+          vesselId: VESSEL_ID,
+          cargoQuantity: '65000.00',
+          reference: 'VOY-20260815-014',
+          laytimeOperation: operation,
+        }),
+      );
+      expect(result).toBe(persistedVoyage);
+    },
+  );
+
+  it('leaves the database default in place when laytime operation is omitted', async () => {
+    const persistedVoyage = {
+      id: VOYAGE_ID,
+      vessel: { id: VESSEL_ID },
+      laytimeOperation: 'Discharge',
+      charterParty: null,
+      counterpartyLinks: [],
+    } as Voyage;
+    const { service, manager } = buildService(persistedVoyage);
+
+    await service.create({
+      vesselId: VESSEL_ID,
+      cargoQuantity: 65000,
+      cargoType: 'LNG',
+      reference: 'VOY-20260815-015',
+      supplier: 'Vitol Asia',
+      receiver: 'PetroChina',
+      loadPort: 'USNOL',
+      dischargePort: 'SGSIN',
+      laycanStart: '2026-09-01',
+      laycanEnd: '2026-09-05',
+    });
+
+    const voyageCreate = manager.create.mock.calls.find(
+      ([entity]) => entity === Voyage,
+    )?.[1] as Record<string, unknown> | undefined;
+
+    expect(voyageCreate).toBeDefined();
+    expect(voyageCreate).not.toHaveProperty('laytimeOperation');
   });
 
   it('persists a SHEX basis clause when the submitted contract basis is SHEX', async () => {
@@ -261,6 +352,98 @@ describe('VoyagesService voyage persistence', () => {
         clauseType: 'shex_shinc',
         rawText: 'Time counting basis: SHEX',
         parameters: { shex: true },
+      }),
+    );
+    expect(
+      manager.create.mock.calls
+        .filter(([entity]) => entity === CpClause)
+        .map(([, value]) => value),
+    ).toEqual(
+      normalizeCommercialTermsToClauses({
+        id: 'charter-party-1',
+        laytimeAllowed: 72,
+        demurrageRate: '25000.00',
+        dispatchRate: null,
+        timeCountingBasis: 'SHEX',
+        norNoticePeriod: '6 hours',
+      }).map(({ id: _id, ...clause }) => ({
+        charterPartyId: 'charter-party-1',
+        ...clause,
+      })),
+    );
+  });
+
+  it('persists a changed laytime operation when updating a voyage', async () => {
+    const voyage = {
+      id: VOYAGE_ID,
+      vesselId: VESSEL_ID,
+      laytimeOperation: 'Discharge',
+      charterParty: null,
+      counterpartyLinks: [],
+    } as Voyage;
+    const { service, voyages } = buildService(voyage);
+
+    const result = await service.update(VOYAGE_ID, {
+      laytimeOperation: 'Loading',
+    });
+
+    expect(voyages.merge).toHaveBeenCalledWith(
+      voyage,
+      expect.objectContaining({ laytimeOperation: 'Loading' }),
+    );
+    expect(voyages.save).toHaveBeenCalledWith(
+      expect.objectContaining({ laytimeOperation: 'Loading' }),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({ laytimeOperation: 'Loading' }),
+    );
+  });
+
+  it('persists an explicit SHINC basis clause when the submitted contract basis is SHINC', async () => {
+    const persistedVoyage = {
+      id: VOYAGE_ID,
+      vessel: { id: VESSEL_ID },
+      charterParty: {
+        id: 'charter-party-1',
+        laytimeAllowed: 72,
+        demurrageRate: '25000.00',
+        dispatchRate: null,
+        timeCountingBasis: 'SHINC',
+        norNoticePeriod: '6 hours',
+        clauses: [
+          { id: 'clause-1', clauseType: 'laytime_rate' },
+          { id: 'clause-2', clauseType: 'demurrage_rate' },
+          { id: 'clause-3', clauseType: 'shex_shinc' },
+        ],
+      },
+      counterpartyLinks: [],
+    } as Voyage;
+    const { service, manager } = buildService(persistedVoyage);
+
+    await service.create({
+      vesselId: VESSEL_ID,
+      cargoQuantity: 65000,
+      cargoType: 'LNG',
+      reference: 'VOY-20260815-012',
+      supplier: 'Vitol Asia',
+      receiver: 'PetroChina',
+      loadPort: 'USNOL',
+      dischargePort: 'SGSIN',
+      laycanStart: '2026-09-01',
+      laycanEnd: '2026-09-05',
+      laytimeAllowed: 72,
+      demurrageRate: 25000,
+      timeCountingBasis: 'SHINC',
+      norNoticePeriod: '6 hours',
+    });
+
+    expect(manager.create).toHaveBeenCalledWith(
+      CpClause,
+      expect.objectContaining({
+        charterPartyId: 'charter-party-1',
+        clauseType: 'shex_shinc',
+        rawText: 'Time counting basis: SHINC',
+        parameters: { shex: false },
       }),
     );
   });
@@ -340,6 +523,10 @@ describe('VoyagesService voyage persistence', () => {
         charterParty: { clauses: true },
         counterpartyLinks: { counterparty: true },
       },
+    });
+    expect((service as any).laytimeCalculations.findOne).toHaveBeenCalledWith({
+      where: { voyageId: VOYAGE_ID, parentCalculationId: IsNull() },
+      order: { version: 'DESC' },
     });
     expect(summary.parties).toEqual({
       supplier: 'Vitol Asia',

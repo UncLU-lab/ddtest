@@ -2022,6 +2022,15 @@ export default function ShipmentDetail() {
             />
 
             <KVRow
+              label="Laytime operation"
+              value={formatValue(
+                voyage?.laytimeOperation ??
+                  shipment.laytimeOperation ??
+                  "Discharge"
+              )}
+            />
+
+            <KVRow
               label="Voyage"
               value={formatValue(
                 shipment.voyageRef ??

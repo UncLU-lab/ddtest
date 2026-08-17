@@ -164,18 +164,18 @@ describe('runLaytimeEngine', () => {
     },
   );
 
-  it('suspends the clock for stoppages recorded in the SOF', () => {
+  it('suspends the clock for non-weather stoppages recorded in the SOF', () => {
     const result = runLaytimeEngine(
       buildInput({
         sofEvents: [
           { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
           {
             eventTime: new Date('2026-03-05T00:00:00Z'),
-            eventType: 'RAIN_STOPPAGE',
+            eventType: 'BREAKDOWN',
           },
           {
             eventTime: new Date('2026-03-05T12:00:00Z'),
-            eventType: 'RAIN_STOPPED',
+            eventType: 'BREAKDOWN_REPAIRED',
           },
           {
             eventTime: new Date('2026-03-06T18:00:00Z'),
@@ -192,6 +192,362 @@ describe('runLaytimeEngine', () => {
       'laytime',
       'exception',
       'laytime',
+    ]);
+  });
+
+  it('deducts weather stoppages before demurrage when WWD is enabled', () => {
+    const weatherWorking: EngineClause = {
+      id: 'clause-weather-working',
+      clauseType: 'weather_working',
+      parameters: { enabled: true },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, weatherWorking],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-05T00:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-05T12:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-06T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(secondsToInterval(result.weatherDeductedSeconds)).toBe('0 days 12:00:00');
+    expect(secondsToInterval(result.usedSeconds)).toBe('1 days 12:00:00');
+    expect(result.periods.map((period) => period.periodType)).toEqual([
+      'laytime',
+      'exception',
+      'laytime',
+    ]);
+  });
+
+  it('counts the same rain interval as laytime when WWD is absent', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-05T00:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-05T12:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-06T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(secondsToInterval(result.weatherDeductedSeconds)).toBe('0 days 00:00:00');
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 00:00:00');
+    expect(result.periods.every((period) => period.periodType !== 'exception')).toBe(
+      true,
+    );
+  });
+
+  it('counts the same rain interval as laytime when WWD is disabled', () => {
+    const weatherWorking: EngineClause = {
+      id: 'clause-weather-working-disabled',
+      clauseType: 'weather_working',
+      parameters: { enabled: false },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, weatherWorking],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-05T00:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-05T12:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-06T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(secondsToInterval(result.weatherDeductedSeconds)).toBe('0 days 00:00:00');
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 00:00:00');
+    expect(result.periods.every((period) => period.periodType !== 'exception')).toBe(
+      true,
+    );
+  });
+
+  it('counts rain continuously after demurrage begins even when WWD is enabled', () => {
+    const weatherWorking: EngineClause = {
+      id: 'clause-weather-working',
+      clauseType: 'weather_working',
+      parameters: { enabled: true },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          {
+            id: 'clause-laytime-fixed',
+            clauseType: 'laytime_rate',
+            parameters: { hours: 6, noticeHours: 6 },
+          },
+          demurrageRate,
+          despatch,
+          weatherWorking,
+        ],
+        norDocuments: [
+          {
+            tenderTime: new Date('2026-03-04T00:00:00Z'),
+            acceptedTime: new Date('2026-03-04T00:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-04T12:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-04T18:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-05T00:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(result.demurrageStartedAt?.toISOString()).toBe(
+      '2026-03-04T12:00:00.000Z',
+    );
+    expect(secondsToInterval(result.weatherDeductedSeconds)).toBe('0 days 00:00:00');
+    expect(result.periods.every((period) => period.periodType !== 'exception')).toBe(
+      true,
+    );
+    expect(result.periods.some((period) => period.periodType === 'demurrage')).toBe(
+      true,
+    );
+  });
+
+  it('counts Sunday as demurrage once the allowance is exhausted before Sunday', () => {
+    const shex: EngineClause = {
+      id: 'clause-shex',
+      clauseType: 'shex_shinc',
+      parameters: { shex: true },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          {
+            id: 'clause-laytime-fixed',
+            clauseType: 'laytime_rate',
+            parameters: { hours: 30, noticeHours: 6 },
+          },
+          demurrageRate,
+          despatch,
+          shex,
+        ],
+        norDocuments: [
+          {
+            tenderTime: new Date('2026-03-06T00:00:00Z'),
+            acceptedTime: new Date('2026-03-06T00:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-09T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(result.demurrageStartedAt?.toISOString()).toBe(
+      '2026-03-07T12:00:00.000Z',
+    );
+    expect(result.ignoredExceptions).toEqual([
+      {
+        startTime: new Date('2026-03-08T00:00:00Z'),
+        endTime: new Date('2026-03-09T00:00:00Z'),
+        appliedClauseId: 'clause-shex',
+      },
+    ]);
+    expect(result.periods[0]).toEqual({
+      startTime: new Date('2026-03-06T06:00:00Z'),
+      endTime: new Date('2026-03-07T12:00:00Z'),
+      periodType: 'laytime',
+      appliedClauseId: null,
+    });
+    expect(result.periods.slice(1).every((period) => period.periodType === 'demurrage')).toBe(true);
+    expect(
+      result.periods.find(
+        (period) => period.startTime.toISOString() === '2026-03-08T00:00:00.000Z',
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        periodType: 'demurrage',
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('3 days 00:00:00');
+  });
+
+  it('keeps pre-demurrage rain deductible and counts post-demurrage rain continuously', () => {
+    const rainResult = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          {
+            id: 'clause-laytime-fixed',
+            clauseType: 'laytime_rate',
+            parameters: { hours: 12, noticeHours: 6 },
+          },
+          demurrageRate,
+          despatch,
+          {
+            id: 'clause-weather-working',
+            clauseType: 'weather_working',
+            parameters: { enabled: true },
+          },
+        ],
+        norDocuments: [
+          {
+            tenderTime: new Date('2026-03-06T00:00:00Z'),
+            acceptedTime: new Date('2026-03-06T00:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-06T12:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-06T18:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-07T00:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-07T06:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-07T12:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(rainResult.demurrageStartedAt?.toISOString()).toBe(
+      '2026-03-07T00:00:00.000Z',
+    );
+    expect(rainResult.ignoredExceptions).toEqual([
+      {
+        startTime: new Date('2026-03-07T00:00:00Z'),
+        endTime: new Date('2026-03-07T06:00:00Z'),
+        appliedClauseId: null,
+      },
+    ]);
+    expect(rainResult.periods.map((period) => period.periodType)).toEqual([
+      'laytime',
+      'exception',
+      'laytime',
+      'demurrage',
+      'demurrage',
+    ]);
+    expect(secondsToInterval(rainResult.usedSeconds)).toBe(
+      '1 days 00:00:00',
+    );
+  });
+
+  it('starts demurrage at the boundary of a later stoppage and counts that stoppage continuously', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          {
+            id: 'clause-laytime-fixed',
+            clauseType: 'laytime_rate',
+            parameters: { hours: 18, noticeHours: 6 },
+          },
+          demurrageRate,
+          despatch,
+          {
+            id: 'clause-weather-working',
+            clauseType: 'weather_working',
+            parameters: { enabled: true },
+          },
+        ],
+        norDocuments: [
+          {
+            tenderTime: new Date('2026-03-06T00:00:00Z'),
+            acceptedTime: new Date('2026-03-06T00:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-07T00:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-07T12:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-07T18:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(result.demurrageStartedAt?.toISOString()).toBe(
+      '2026-03-07T00:00:00.000Z',
+    );
+    expect(result.ignoredExceptions).toEqual([
+      {
+        startTime: new Date('2026-03-07T00:00:00Z'),
+        endTime: new Date('2026-03-07T12:00:00Z'),
+        appliedClauseId: null,
+      },
+    ]);
+    expect(result.periods).toEqual([
+      {
+        startTime: new Date('2026-03-06T06:00:00Z'),
+        endTime: new Date('2026-03-07T00:00:00Z'),
+        periodType: 'laytime',
+        appliedClauseId: null,
+      },
+      {
+        startTime: new Date('2026-03-07T00:00:00Z'),
+        endTime: new Date('2026-03-07T12:00:00Z'),
+        periodType: 'demurrage',
+        appliedClauseId: null,
+      },
+      {
+        startTime: new Date('2026-03-07T12:00:00Z'),
+        endTime: new Date('2026-03-07T18:00:00Z'),
+        periodType: 'demurrage',
+        appliedClauseId: null,
+      },
     ]);
   });
 
@@ -232,6 +588,137 @@ describe('runLaytimeEngine', () => {
     expect(secondsToInterval(result.usedSeconds)).toBe('2 days 00:00:00');
   });
 
+  it('recognizes enabled WIBON without emitting an unsupported-clause warning', () => {
+    const wibon: EngineClause = {
+      id: 'clause-wibon',
+      clauseType: 'wibon',
+      parameters: { enabled: true },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, wibon],
+      }),
+    );
+
+    expect(result.warnings).not.toContain(
+      'Clause type "wibon" is not yet supported by the laytime engine and was ignored.',
+    );
+    expect(result.commencedAt.toISOString()).toBe('2026-03-04T06:00:00.000Z');
+    expect(result.usedSeconds).toBe(172800);
+  });
+
+  it('recognizes enabled WIPON without emitting an unsupported-clause warning', () => {
+    const wipon: EngineClause = {
+      id: 'clause-wipon',
+      clauseType: 'wipon',
+      parameters: { enabled: true },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, wipon],
+      }),
+    );
+
+    expect(result.warnings).not.toContain(
+      'Clause type "wipon" is not yet supported by the laytime engine and was ignored.',
+    );
+    expect(result.commencedAt.toISOString()).toBe('2026-03-04T06:00:00.000Z');
+    expect(result.usedSeconds).toBe(172800);
+  });
+
+  it('treats disabled WIPON as a recognized no-op', () => {
+    const wipon: EngineClause = {
+      id: 'clause-wipon-disabled',
+      clauseType: 'wipon',
+      parameters: { enabled: false },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, wipon],
+      }),
+    );
+
+    expect(result.warnings).not.toContain(
+      'Clause type "wipon" is not yet supported by the laytime engine and was ignored.',
+    );
+    expect(result.usedSeconds).toBe(172800);
+  });
+
+  it('treats disabled WIBON as a no-op', () => {
+    const wibon: EngineClause = {
+      id: 'clause-wibon-disabled',
+      clauseType: 'wibon',
+      parameters: { enabled: false },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, wibon],
+      }),
+    );
+
+    expect(result.warnings).not.toContain(
+      'Clause type "wibon" is not yet supported by the laytime engine and was ignored.',
+    );
+    expect(result.usedSeconds).toBe(172800);
+  });
+
+  it('counts continuously through Sunday when SHINC is explicit', () => {
+    const shinc: EngineClause = {
+      id: 'clause-shinc',
+      clauseType: 'shex_shinc',
+      parameters: { shex: false },
+    };
+
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, shinc],
+        norDocuments: [
+          {
+            tenderTime: new Date('2026-03-06T00:00:00Z'),
+            acceptedTime: new Date('2026-03-06T00:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-09T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(result.periods.every((period) => period.periodType !== 'exception')).toBe(true);
+    expect(secondsToInterval(result.usedSeconds)).toBe('3 days 00:00:00');
+    expect(result.demurrageAmount).toBe(12000);
+  });
+
+  it('preserves continuous counting when no SHEX clause exists', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch],
+        norDocuments: [
+          {
+            tenderTime: new Date('2026-03-06T00:00:00Z'),
+            acceptedTime: new Date('2026-03-06T00:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            eventTime: new Date('2026-03-09T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(result.periods.every((period) => period.periodType !== 'exception')).toBe(true);
+    expect(secondsToInterval(result.usedSeconds)).toBe('3 days 00:00:00');
+  });
+
   it('reports clause types it does not understand instead of failing', () => {
     const result = runLaytimeEngine(
       buildInput({
@@ -239,13 +726,13 @@ describe('runLaytimeEngine', () => {
           laytimeRate,
           demurrageRate,
           despatch,
-          { id: 'clause-wibon', clauseType: 'wibon', parameters: {} },
+          { id: 'clause-wifpon', clauseType: 'wifpon', parameters: {} },
         ],
       }),
     );
 
     expect(result.warnings).toContain(
-      'Clause type "wibon" is not yet supported by the laytime engine and was ignored.',
+      'Clause type "wifpon" is not yet supported by the laytime engine and was ignored.',
     );
   });
 

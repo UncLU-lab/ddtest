@@ -17,6 +17,7 @@ export type Shipment = {
   status?: string;
   laycanStart?: string;
   laycanEnd?: string;
+  laytimeOperation?: string;
   laytimeAllowed?: string;
   demurrageRate?: string;
   dispatchRate?: string;

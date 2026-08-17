@@ -10,6 +10,7 @@
     "dev:api": "npm --prefix apps/api run start:dev",
     "build:web": "npm --prefix apps/web run build",
     "build:api": "npm --prefix apps/api run build",
+    "seed:test-shipments": "npm --prefix apps/api run seed:test-shipments",
     "test:api": "npm --prefix apps/api test",
     "test:e2e:api": "npm --prefix apps/api run test:e2e"
   }

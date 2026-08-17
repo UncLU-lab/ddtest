@@ -9,6 +9,9 @@ import {
 import { UuidEntity } from '../../../database/entities/base.entity';
 import { SofDocument } from './sof-document.entity';
 
+export const SOF_EVENT_OPERATIONS = ['Loading', 'Discharge'] as const;
+export type SofEventOperation = (typeof SOF_EVENT_OPERATIONS)[number];
+
 @Entity('sof_events')
 @Index('idx_sof_events_sof_time', ['sofId', 'eventTime'])
 @Index('idx_sof_events_type', ['eventType'])
@@ -25,6 +28,9 @@ export class SofEvent extends UuidEntity {
 
   @Column({ name: 'event_type', type: 'varchar', length: 50 })
   eventType!: string;
+
+  @Column({ name: 'operation', type: 'varchar', length: 20, nullable: true })
+  operation?: SofEventOperation | null;
 
   @Column({ type: 'text', nullable: true })
   remarks?: string | null;

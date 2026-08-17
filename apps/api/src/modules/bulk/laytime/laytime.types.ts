@@ -34,16 +34,28 @@ export interface EnginePeriod {
   appliedClauseId: string | null;
 }
 
+export interface EngineIgnoredException {
+  startTime: Date;
+  endTime: Date;
+  appliedClauseId: string | null;
+}
+
 export interface LaytimeEngineResult {
   /** When the laytime clock started counting. */
   commencedAt: Date;
   /** When cargo operations completed. */
   completedAt: Date;
+  /** When the voyage first entered demurrage, if it did. */
+  demurrageStartedAt: Date | null;
+  /** Weather stoppage time deducted before demurrage, in seconds. */
+  weatherDeductedSeconds: number;
   allowedSeconds: number;
   usedSeconds: number;
   demurrageAmount: number;
   despatchAmount: number;
   periods: EnginePeriod[];
+  /** Exceptions ignored because the vessel was already on demurrage. */
+  ignoredExceptions: EngineIgnoredException[];
   /** Non-fatal notes: unsupported clauses, missing rates, applied defaults. */
   warnings: string[];
 }

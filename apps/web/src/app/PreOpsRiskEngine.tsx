@@ -619,6 +619,10 @@ export default function PreOpsRiskEngine() {
               ""
           ),
 
+        laytimeOperation:
+          draft.laytimeOperation ||
+          "Discharge",
+
         eta:
           toIsoDateString(draft.eta),
 

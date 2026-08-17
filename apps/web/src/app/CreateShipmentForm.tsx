@@ -573,6 +573,16 @@ export default function CreateShipmentForm() {
               </FormField>
             </div>
 
+            <div className="grid grid-cols-2 gap-3 mt-3">
+              <FormField label="Laytime operation" required>
+                <Select
+                  value={draft.laytimeOperation}
+                  onChange={(v) => update("laytimeOperation", v as ShipmentDraft["laytimeOperation"])}
+                  options={["Discharge", "Loading"]}
+                />
+              </FormField>
+            </div>
+
             <Divider />
             <SubLabel badge="independent">Receiver clock</SubLabel>
 

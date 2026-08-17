@@ -89,6 +89,10 @@ function normalizeShipment(item: any, summary?: any): Shipment | null {
     status: item.status,
     laycanStart: item.laycanStart,
     laycanEnd: item.laycanEnd,
+    laytimeOperation:
+      item.laytimeOperation ??
+      item.laytime_operation ??
+      "Discharge",
     laytimeAllowed:
       commercialTerms.laytimeAllowed != null
         ? String(commercialTerms.laytimeAllowed)
@@ -133,6 +137,7 @@ export interface ShipmentDraft {
   intermediary: string;
   laycanOpen: string;
   laycanClose: string;
+  laytimeOperation: "Loading" | "Discharge";
   laytimeAllowed: string;
   demurrageRate: string;
   dispatchRate: string;
@@ -160,6 +165,7 @@ export const emptyDraft: ShipmentDraft = {
   intermediary: "",
   laycanOpen: "",
   laycanClose: "",
+  laytimeOperation: "Discharge",
   laytimeAllowed: "",
   demurrageRate: "",
   dispatchRate: "",
@@ -174,14 +180,14 @@ export const emptyDraft: ShipmentDraft = {
 
 export const REQUIRED_DRAFT_FIELDS: (keyof ShipmentDraft)[] = [
   "vessel", "voyageRef", "productType", "quantity", "eta", "loadPort", "dischargePort",
-  "supplier", "receiver", "laycanOpen", "laycanClose", "laytimeAllowed", "demurrageRate", "timeCountingBasis",
+  "supplier", "receiver", "laycanOpen", "laycanClose", "laytimeOperation", "laytimeAllowed", "demurrageRate", "timeCountingBasis",
 ];
 
 const FIELD_LABELS: Record<string, string> = {
   vessel: "Vessel name", voyageRef: "Voyage ref.", productType: "Product type",
   quantity: "Quantity", eta: "ETA", loadPort: "Load port", dischargePort: "Discharge port",
   supplier: "Supplier", receiver: "Receiver", laycanOpen: "Laycan open", laycanClose: "Laycan close",
-  laytimeAllowed: "Laytime allowed", demurrageRate: "Demurrage rate", timeCountingBasis: "Time counting basis",
+  laytimeOperation: "Laytime operation", laytimeAllowed: "Laytime allowed", demurrageRate: "Demurrage rate", timeCountingBasis: "Time counting basis",
 };
 
 export function missingDraftFields(draft: ShipmentDraft): string[] {

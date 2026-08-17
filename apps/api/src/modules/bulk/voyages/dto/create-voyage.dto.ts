@@ -89,6 +89,10 @@ export class CreateVoyageDto {
   norNoticePeriod?: string;
 
   @IsOptional()
+  @IsIn(['Loading', 'Discharge'])
+  laytimeOperation?: 'Loading' | 'Discharge';
+
+  @IsOptional()
   @IsIn(VOYAGE_STATUSES)
   status?: VoyageStatus;
 }

@@ -1,5 +1,6 @@
 import {
   EngineClause,
+  EngineIgnoredException,
   EnginePeriod,
   EngineSofEvent,
   LaytimeEngineError,
@@ -23,6 +24,9 @@ const SUPPORTED_CLAUSE_TYPES = new Set([
   'demurrage_rate',
   'despatch',
   'shex_shinc',
+  'weather_working',
+  'wibon',
+  'wipon',
 ]);
 
 /** SOF event marking NOR tender, used when no nor_documents row exists. */
@@ -39,9 +43,6 @@ const COMPLETION_EVENTS = new Set([
 
 /** SOF events that open a stoppage (laytime exception). */
 const STOPPAGE_START_EVENTS = new Set([
-  'RAIN_STOPPAGE',
-  'RAIN_COMMENCED',
-  'WEATHER_STOPPAGE',
   'BREAKDOWN',
   'STOPPAGE_START',
   'WORK_STOPPED',
@@ -49,8 +50,6 @@ const STOPPAGE_START_EVENTS = new Set([
 
 /** SOF events that close an open stoppage. */
 const STOPPAGE_END_EVENTS = new Set([
-  'RAIN_STOPPED',
-  'WEATHER_CLEARED',
   'BREAKDOWN_REPAIRED',
   'STOPPAGE_END',
   'WORK_RESUMED',
@@ -60,6 +59,7 @@ interface ExceptionInterval {
   start: Date;
   end: Date;
   clauseId: string | null;
+  kind: 'generic' | 'weather';
 }
 
 /**
@@ -97,32 +97,25 @@ export function runLaytimeEngine(
   const exceptions = collectExceptions(
     input.sofEvents,
     clauses.shex,
+    clauses.weatherWorking,
     commencedAt,
     completedAt,
     warnings,
   );
 
-  const { periods, usedSeconds } = buildPeriods(
-    commencedAt,
-    completedAt,
-    exceptions,
-    allowedSeconds,
-  );
-
-  if (periods.some((period) => period.periodType === 'demurrage')) {
-    const firstDemurrage = periods.findIndex(
-      (period) => period.periodType === 'demurrage',
+  const {
+    periods,
+    usedSeconds,
+    ignoredExceptions,
+    demurrageStartedAt,
+    weatherDeductedSeconds,
+  } =
+    buildPeriods(
+      commencedAt,
+      completedAt,
+      exceptions,
+      allowedSeconds,
     );
-    if (
-      periods
-        .slice(firstDemurrage)
-        .some((period) => period.periodType === 'exception')
-    ) {
-      warnings.push(
-        'Exceptions were applied after demurrage began; "once on demurrage, always on demurrage" is not modelled in this version.',
-      );
-    }
-  }
 
   const { demurrageAmount, despatchAmount } = priceResult(
     usedSeconds,
@@ -134,11 +127,14 @@ export function runLaytimeEngine(
   return {
     commencedAt,
     completedAt,
+    demurrageStartedAt,
+    weatherDeductedSeconds,
     allowedSeconds,
     usedSeconds,
     demurrageAmount,
     despatchAmount,
     periods,
+    ignoredExceptions,
     warnings,
   };
 }
@@ -148,6 +144,9 @@ interface IndexedClauses {
   demurrageRate?: EngineClause;
   despatch?: EngineClause;
   shex?: EngineClause;
+  weatherWorking?: EngineClause;
+  wibon?: EngineClause;
+  wipon?: EngineClause;
 }
 
 function indexClauses(
@@ -170,6 +169,15 @@ function indexClauses(
         break;
       case 'shex_shinc':
         indexed.shex ??= clause;
+        break;
+      case 'weather_working':
+        indexed.weatherWorking ??= clause;
+        break;
+      case 'wibon':
+        indexed.wibon ??= clause;
+        break;
+      case 'wipon':
+        indexed.wipon ??= clause;
         break;
       default:
         unsupported.add(clause.clauseType);
@@ -301,20 +309,27 @@ function resolveAllowedLaytime(
 function collectExceptions(
   sofEvents: EngineSofEvent[],
   shexClause: EngineClause | undefined,
+  weatherWorkingClause: EngineClause | undefined,
   commencedAt: Date,
   completedAt: Date,
   warnings: string[],
 ): ExceptionInterval[] {
+  const weatherWorkingEnabled =
+    readBoolean(weatherWorkingClause?.parameters, ['enabled']) === true;
   const raw: ExceptionInterval[] = [
-    ...collectStoppages(sofEvents, completedAt, warnings),
+    ...collectGenericStoppages(sofEvents, completedAt, warnings),
+    ...(weatherWorkingEnabled
+      ? collectWeatherStoppages(sofEvents, completedAt, warnings)
+      : []),
     ...collectExceptedDays(shexClause, commencedAt, completedAt),
   ];
 
   const clamped = raw
-    .map(({ start, end, clauseId }) => ({
+    .map(({ start, end, clauseId, kind }) => ({
       start: new Date(Math.max(start.getTime(), commencedAt.getTime())),
       end: new Date(Math.min(end.getTime(), completedAt.getTime())),
       clauseId,
+      kind,
     }))
     .filter((interval) => interval.end.getTime() > interval.start.getTime())
     .sort((a, b) => a.start.getTime() - b.start.getTime());
@@ -322,7 +337,7 @@ function collectExceptions(
   return mergeIntervals(clamped);
 }
 
-function collectStoppages(
+function collectGenericStoppages(
   sofEvents: EngineSofEvent[],
   completedAt: Date,
   warnings: string[],
@@ -338,7 +353,12 @@ function collectStoppages(
     if (STOPPAGE_START_EVENTS.has(event.eventType)) {
       openedAt ??= event.eventTime;
     } else if (STOPPAGE_END_EVENTS.has(event.eventType) && openedAt) {
-      stoppages.push({ start: openedAt, end: event.eventTime, clauseId: null });
+      stoppages.push({
+        start: openedAt,
+        end: event.eventTime,
+        clauseId: null,
+        kind: 'generic',
+      });
       openedAt = null;
     }
   }
@@ -347,7 +367,60 @@ function collectStoppages(
     warnings.push(
       'A stoppage recorded in the SOF was never closed; it was treated as lasting until cargo completion.',
     );
-    stoppages.push({ start: openedAt, end: completedAt, clauseId: null });
+    stoppages.push({
+      start: openedAt,
+      end: completedAt,
+      clauseId: null,
+      kind: 'generic',
+    });
+  }
+
+  return stoppages;
+}
+
+function collectWeatherStoppages(
+  sofEvents: EngineSofEvent[],
+  completedAt: Date,
+  warnings: string[],
+): ExceptionInterval[] {
+  const ordered = [...sofEvents].sort(
+    (a, b) => a.eventTime.getTime() - b.eventTime.getTime(),
+  );
+
+  const weatherStartEvents = new Set([
+    'RAIN_STOPPAGE',
+    'RAIN_COMMENCED',
+    'WEATHER_STOPPAGE',
+  ]);
+  const weatherEndEvents = new Set(['RAIN_STOPPED', 'WEATHER_CLEARED']);
+
+  const stoppages: ExceptionInterval[] = [];
+  let openedAt: Date | null = null;
+
+  for (const event of ordered) {
+    if (weatherStartEvents.has(event.eventType)) {
+      openedAt ??= event.eventTime;
+    } else if (weatherEndEvents.has(event.eventType) && openedAt) {
+      stoppages.push({
+        start: openedAt,
+        end: event.eventTime,
+        clauseId: null,
+        kind: 'weather',
+      });
+      openedAt = null;
+    }
+  }
+
+  if (openedAt) {
+    warnings.push(
+      'A weather stoppage recorded in the SOF was never closed; it was treated as lasting until cargo completion.',
+    );
+    stoppages.push({
+      start: openedAt,
+      end: completedAt,
+      clauseId: null,
+      kind: 'weather',
+    });
   }
 
   return stoppages;
@@ -359,7 +432,12 @@ function collectExceptedDays(
   commencedAt: Date,
   completedAt: Date,
 ): ExceptionInterval[] {
-  if (!shexClause || !readBoolean(shexClause.parameters, ['shex'])) {
+  if (!shexClause) {
+    return [];
+  }
+
+  const shexEnabled = readBoolean(shexClause.parameters, ['shex']);
+  if (shexEnabled !== true) {
     return [];
   }
 
@@ -386,6 +464,7 @@ function collectExceptedDays(
         start: new Date(cursor),
         end: new Date(cursor.getTime() + DAY_SECONDS * 1000),
         clauseId: shexClause.id,
+        kind: 'generic',
       });
     }
     cursor.setUTCDate(cursor.getUTCDate() + 1);
@@ -418,10 +497,19 @@ function buildPeriods(
   completedAt: Date,
   exceptions: ExceptionInterval[],
   allowedSeconds: number,
-): { periods: EnginePeriod[]; usedSeconds: number } {
+): {
+  periods: EnginePeriod[];
+  usedSeconds: number;
+  demurrageStartedAt: Date | null;
+  ignoredExceptions: EngineIgnoredException[];
+  weatherDeductedSeconds: number;
+} {
   const periods: EnginePeriod[] = [];
   let usedSeconds = 0;
   let cursor = commencedAt;
+  let demurrageStartedAt: Date | null = null;
+  const ignoredExceptions: EngineIgnoredException[] = [];
+  let weatherDeductedSeconds = 0;
 
   const pushCountable = (start: Date, end: Date): void => {
     const segmentSeconds = (end.getTime() - start.getTime()) / 1000;
@@ -429,7 +517,30 @@ function buildPeriods(
       return;
     }
 
+    if (demurrageStartedAt) {
+      periods.push({
+        startTime: start,
+        endTime: end,
+        periodType: 'demurrage',
+        appliedClauseId: null,
+      });
+      usedSeconds += segmentSeconds;
+      return;
+    }
+
     const remainingAllowed = Math.max(0, allowedSeconds - usedSeconds);
+    if (remainingAllowed === 0) {
+      demurrageStartedAt = start;
+      periods.push({
+        startTime: start,
+        endTime: end,
+        periodType: 'demurrage',
+        appliedClauseId: null,
+      });
+      usedSeconds += segmentSeconds;
+      return;
+    }
+
     const laytimeSeconds = Math.min(segmentSeconds, remainingAllowed);
     const splitAt = new Date(start.getTime() + laytimeSeconds * 1000);
 
@@ -442,6 +553,7 @@ function buildPeriods(
       });
     }
     if (segmentSeconds > laytimeSeconds) {
+      demurrageStartedAt = splitAt;
       periods.push({
         startTime: splitAt,
         endTime: end,
@@ -455,18 +567,46 @@ function buildPeriods(
 
   for (const exception of exceptions) {
     pushCountable(cursor, exception.start);
-    periods.push({
-      startTime: exception.start,
-      endTime: exception.end,
-      periodType: 'exception',
-      appliedClauseId: exception.clauseId,
-    });
+    if (!demurrageStartedAt && usedSeconds >= allowedSeconds) {
+      demurrageStartedAt = exception.start;
+    }
+    if (demurrageStartedAt) {
+      ignoredExceptions.push({
+        startTime: exception.start,
+        endTime: exception.end,
+        appliedClauseId: exception.clauseId,
+      });
+      periods.push({
+        startTime: exception.start,
+        endTime: exception.end,
+        periodType: 'demurrage',
+        appliedClauseId: null,
+      });
+      usedSeconds += (exception.end.getTime() - exception.start.getTime()) / 1000;
+    } else {
+      if (exception.kind === 'weather') {
+        weatherDeductedSeconds +=
+          (exception.end.getTime() - exception.start.getTime()) / 1000;
+      }
+      periods.push({
+        startTime: exception.start,
+        endTime: exception.end,
+        periodType: 'exception',
+        appliedClauseId: exception.clauseId,
+      });
+    }
     cursor = exception.end;
   }
 
   pushCountable(cursor, completedAt);
 
-  return { periods, usedSeconds };
+  return {
+    periods,
+    usedSeconds,
+    demurrageStartedAt,
+    ignoredExceptions,
+    weatherDeductedSeconds,
+  };
 }
 
 function priceResult(

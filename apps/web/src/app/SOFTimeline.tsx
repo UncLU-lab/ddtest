@@ -15,10 +15,13 @@ import {
   getSofEvents,
   runLaytimeCalculation,
   updateSofEvent,
+  type LaytimeDecisionSnapshot,
   type LaytimeCalculation,
   type SofDocument,
   type SofEvent,
 } from "../lib/api";
+
+type EventOperation = NonNullable<SofEvent["operation"]>;
 
 type CalcRowProps = {
   label: string;
@@ -67,6 +70,7 @@ type TimelineRow = {
   eventId?: string;
   eventTimeIso?: string;
   eventType?: string;
+  operation?: EventOperation | null;
   remarks?: string | null;
   isManualOverride?: boolean;
   n: string;
@@ -85,6 +89,7 @@ type TimelineRow = {
 type ManualEventForm = {
   eventTime: string;
   eventType: string;
+  operation: EventOperation;
   cause: string;
   duration: string;
   deductible: boolean;
@@ -252,8 +257,10 @@ function formatSecondsAsInterval(seconds?: number | null) {
   return `${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m`;
 }
 
-function getCalculationSnapshot(calc?: LaytimeCalculation | null): any {
-  return (calc as any)?.decisionSnapshot ?? null;
+function getCalculationSnapshot(
+  calc?: LaytimeCalculation | null,
+): LaytimeDecisionSnapshot | null {
+  return (calc?.decisionSnapshot as LaytimeDecisionSnapshot | null | undefined) ?? null;
 }
 
 function validateDurationHours(value?: string | null) {
@@ -284,6 +291,110 @@ function getCalculationPeriods(calc?: LaytimeCalculation | null): any[] {
   return Array.isArray(periods) ? periods : [];
 }
 
+function getInputSnapshot(calc?: LaytimeCalculation | null) {
+  return ((calc as any)?.inputSnapshot as
+    | LaytimeCalculation["inputSnapshot"]
+    | undefined
+    | null) ?? null;
+}
+
+function getSofDocumentSelectionAudit(calc?: LaytimeCalculation | null) {
+  const snapshot = getInputSnapshot(calc);
+  const documentSelection = snapshot?.sofDocumentSelection ?? null;
+
+  const candidateDocumentIds = Array.isArray(documentSelection?.candidateDocumentIds)
+    ? documentSelection.candidateDocumentIds
+    : [];
+  const includedDocumentIds = Array.isArray(documentSelection?.includedDocumentIds)
+    ? documentSelection.includedDocumentIds
+    : [];
+  const matchingDocumentIds = Array.isArray(documentSelection?.matchingDocumentIds)
+    ? documentSelection.matchingDocumentIds
+    : [];
+  const legacyNullDocumentIds = Array.isArray(documentSelection?.legacyNullDocumentIds)
+    ? documentSelection.legacyNullDocumentIds
+    : [];
+  const oppositeOperationDocumentIds = Array.isArray(
+    documentSelection?.oppositeOperationDocumentIds,
+  )
+    ? documentSelection.oppositeOperationDocumentIds
+    : [];
+
+  return {
+    available: Boolean(snapshot && documentSelection),
+    voyageLaytimeOperation: documentSelection?.voyageLaytimeOperation ?? null,
+    candidateDocumentCount: candidateDocumentIds.length,
+    includedDocumentCount: includedDocumentIds.length,
+    matchingDocumentCount: matchingDocumentIds.length,
+    legacyNullDocumentCount: legacyNullDocumentIds.length,
+    oppositeOperationDocumentCount: oppositeOperationDocumentIds.length,
+    hasLegacyNullDocuments: legacyNullDocumentIds.length > 0,
+    hasOppositeOperationDocuments: oppositeOperationDocumentIds.length > 0,
+  };
+}
+
+function getDemurrageAudit(calc?: LaytimeCalculation | null) {
+  const snapshot = getCalculationSnapshot(calc);
+  const demurrage = snapshot?.demurrage ?? null;
+
+  return {
+    startedAt: demurrage?.startedAt ?? null,
+    ignoredExceptions: Array.isArray(demurrage?.ignoredExceptions)
+      ? demurrage.ignoredExceptions
+      : [],
+  };
+}
+
+function getOperationSelectionAudit(calc?: LaytimeCalculation | null) {
+  const snapshot = getInputSnapshot(calc);
+  const operationSelection = snapshot?.operationSelection ?? null;
+
+  return {
+    available: Boolean(snapshot && operationSelection),
+    voyageLaytimeOperation: operationSelection?.voyageLaytimeOperation ?? null,
+    hasLoadingCompletion:
+      typeof operationSelection?.hasLoadingCompletion === "boolean"
+        ? operationSelection.hasLoadingCompletion
+        : null,
+    hasDischargeCompletion:
+      typeof operationSelection?.hasDischargeCompletion === "boolean"
+        ? operationSelection.hasDischargeCompletion
+        : null,
+    mixedOperationEvidence:
+      typeof operationSelection?.mixedOperationEvidence === "boolean"
+        ? operationSelection.mixedOperationEvidence
+        : null,
+    excludedCompletionCount: Array.isArray(
+      operationSelection?.excludedCompletionEventIds,
+    )
+      ? operationSelection.excludedCompletionEventIds.length
+      : null,
+  };
+}
+
+function getWeatherWorkingAudit(calc?: LaytimeCalculation | null) {
+  const snapshot = getCalculationSnapshot(calc);
+  const weatherWorking = snapshot?.weatherWorking ?? null;
+
+  return {
+    available: Boolean(snapshot && weatherWorking),
+    clauseId: weatherWorking?.clauseId ?? null,
+    clauseParameters: weatherWorking?.clauseParameters ?? null,
+    enabled:
+      typeof weatherWorking?.enabled === "boolean"
+        ? weatherWorking.enabled
+        : null,
+    applied:
+      typeof weatherWorking?.applied === "boolean"
+        ? weatherWorking.applied
+        : null,
+    totalWeatherTimeDeductedBeforeDemurrage:
+      typeof weatherWorking?.totalWeatherTimeDeductedBeforeDemurrage === "number"
+        ? weatherWorking.totalWeatherTimeDeductedBeforeDemurrage
+        : null,
+  };
+}
+
 function fileNameFromPath(filePath?: string | null) {
   if (!filePath) return "SOF document";
   const parts = filePath.split(/[\\/]/);
@@ -304,6 +415,11 @@ function humanizeLabel(value?: string | null) {
     .replace(/[_-]+/g, " ")
     .toLowerCase()
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function formatOperationLabel(value?: string | null) {
+  if (!value) return "Not set";
+  return value;
 }
 
 function normalizeEngineEventType(value: string) {
@@ -492,6 +608,7 @@ function toTimelineRow(event: SofEvent, index: number): TimelineRow {
     eventId: event.id,
     eventTimeIso: event.eventTime,
     eventType: event.eventType,
+    operation: event.operation ?? null,
     remarks: event.remarks,
     isManualOverride: event.isManualOverride,
     n: String(index + 1).padStart(2, "0"),
@@ -575,6 +692,224 @@ function LaytimeBar() {
   );
 }
 
+type AddEventModalProps = {
+  mode: "add" | "edit";
+  event: TimelineRow | null;
+  defaultOperation: EventOperation;
+  onClose: () => void;
+  onSave: (form: ManualEventForm) => void;
+  submitting: boolean;
+};
+
+function AddEventModal({
+  mode,
+  event,
+  defaultOperation,
+  onClose,
+  onSave,
+  submitting,
+}: AddEventModalProps) {
+  const getInitialForm = (): ManualEventForm => ({
+    eventTime: formatDateTimeInput(event?.eventTimeIso ?? new Date().toISOString()),
+    eventType: event?.eventType ?? ENGINE_EVENT_PRESETS[0].value,
+    operation: (event?.operation ?? defaultOperation) as EventOperation,
+    cause: event?.cause ?? "Vessel",
+    duration: event?.duration && event.duration !== "â€”" ? event.duration : "",
+    deductible: event?.state === "deductible",
+    notes: event?.detail ?? "",
+    overrideReason: "",
+  });
+
+  const [form, setForm] = useState<ManualEventForm>(getInitialForm);
+
+  useEffect(() => {
+    setForm(getInitialForm());
+    // The modal only mounts when opened, but syncing keeps edit flows predictable.
+  }, [event, defaultOperation, mode]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        className="w-full max-w-lg rounded-xl border bg-white shadow-xl"
+        style={{ borderColor: "#E5E7EB", borderWidth: "0.5px" }}
+      >
+        <div className="flex items-center justify-between border-b px-5 py-4" style={{ borderColor: "#E5E7EB" }}>
+          <div>
+            <h2 style={{ fontSize: "15px", fontWeight: 600, color: "#111827" }}>
+              {mode === "edit" ? "Edit SOF event" : "Add SOF event"}
+            </h2>
+            <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "2px" }}>
+              Manual SOF entry only. Calculation behavior is unchanged.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-sm"
+            style={{ color: "#6B7280" }}
+          >
+            Close
+          </button>
+        </div>
+
+        <form
+          className="space-y-4 px-5 py-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onSave(form);
+          }}
+        >
+          <div>
+            <label htmlFor="sof-event-time" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+              Event time
+            </label>
+            <input
+              id="sof-event-time"
+              type="datetime-local"
+              value={form.eventTime}
+              onChange={(e) => setForm((current) => ({ ...current, eventTime: e.target.value }))}
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              style={{ borderColor: "#D1D5DB" }}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="sof-event-type" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+              Event type
+            </label>
+            <input
+              id="sof-event-type"
+              type="text"
+              value={form.eventType}
+              onChange={(e) => setForm((current) => ({ ...current, eventType: e.target.value }))}
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              style={{ borderColor: "#D1D5DB" }}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="sof-event-operation" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+              Operation
+            </label>
+            <select
+              id="sof-event-operation"
+              value={form.operation}
+              onChange={(e) =>
+                setForm((current) => ({
+                  ...current,
+                  operation: e.target.value as EventOperation,
+                }))
+              }
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              style={{ borderColor: "#D1D5DB", backgroundColor: "#ffffff" }}
+            >
+              <option value="Loading">Loading</option>
+              <option value="Discharge">Discharge</option>
+            </select>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="sof-event-cause" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+                Cause
+              </label>
+              <input
+                id="sof-event-cause"
+                type="text"
+                value={form.cause}
+                onChange={(e) => setForm((current) => ({ ...current, cause: e.target.value }))}
+                className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                style={{ borderColor: "#D1D5DB" }}
+              />
+            </div>
+            <div>
+              <label htmlFor="sof-event-duration" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+                Duration (hours)
+              </label>
+              <input
+                id="sof-event-duration"
+                type="number"
+                min="0"
+                max="168"
+                step="0.01"
+                placeholder="e.g. 2.5"
+                value={form.duration}
+                onChange={(e) => setForm((current) => ({ ...current, duration: e.target.value }))}
+                className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                style={{ borderColor: "#D1D5DB" }}
+              />
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 text-sm" style={{ color: "#374151" }}>
+            <input
+              type="checkbox"
+              checked={form.deductible}
+              onChange={(e) => setForm((current) => ({ ...current, deductible: e.target.checked }))}
+            />
+            Mark as deductible
+          </label>
+
+          <div>
+            <label htmlFor="sof-event-notes" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+              Notes
+            </label>
+            <textarea
+              id="sof-event-notes"
+              value={form.notes}
+              onChange={(e) => setForm((current) => ({ ...current, notes: e.target.value }))}
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              style={{ borderColor: "#D1D5DB", minHeight: "84px" }}
+            />
+          </div>
+
+          {mode === "edit" && (
+            <div>
+              <label htmlFor="sof-event-override" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+                Override reason
+              </label>
+              <textarea
+                id="sof-event-override"
+                value={form.overrideReason ?? ""}
+                onChange={(e) => setForm((current) => ({ ...current, overrideReason: e.target.value }))}
+                className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                style={{ borderColor: "#D1D5DB", minHeight: "72px" }}
+              />
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 border-t pt-4" style={{ borderColor: "#E5E7EB" }}>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border px-3 py-2 text-sm"
+              style={{ borderColor: "#D1D5DB", color: "#374151", backgroundColor: "#ffffff" }}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="rounded-md px-3 py-2 text-sm text-white"
+              style={{ backgroundColor: "#1A4ED8", opacity: submitting ? 0.7 : 1 }}
+            >
+              {submitting ? "Saving..." : "Save event"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function SOFTimeline() {
   const { id } = useParams();
   const { getShipmentById } = useShipments();
@@ -596,6 +931,7 @@ export default function SOFTimeline() {
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimSuccess, setClaimSuccess] = useState<string | null>(null);
+  const [timelineSuccess, setTimelineSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -723,6 +1059,7 @@ export default function SOFTimeline() {
 
     setSavingEvent(true);
     setTimelineError(null);
+    setTimelineSuccess(null);
 
     const durationError = validateDurationHours(form.duration);
     if (durationError) {
@@ -744,6 +1081,7 @@ export default function SOFTimeline() {
       const payload = {
         eventTime: new Date(form.eventTime).toISOString(),
         eventType: form.eventType.trim(),
+        operation: form.operation,
         remarks: buildManualDetails({
           cause: form.cause,
           duration: form.duration || undefined,
@@ -771,6 +1109,9 @@ export default function SOFTimeline() {
         await createSofEvent(targetDocument.id, payload);
       }
 
+      setTimelineSuccess(
+        editTarget ? "SOF event updated successfully." : "SOF event created successfully.",
+      );
       setShowAddEvent(false);
       setEditingEvent(null);
       setRefreshKey((current) => current + 1);
@@ -785,9 +1126,11 @@ export default function SOFTimeline() {
   const sourceStatusBg = documentStatusBg(activeDocument);
   const sourceStatusText = documentStatusText(activeDocument);
   const sourceFileName = fileNameFromPath(activeDocument?.filePath);
+  const sourceOperation = activeDocument?.operation ?? null;
   const sourceSubtext = activeDocument
     ? `Uploaded ${formatDate(activeDocument.uploadDate)} · backend record`
     : "No persisted SOF document found for this voyage yet.";
+  const sourceOperationText = sourceOperation ? `Operation: ${formatOperationLabel(sourceOperation)}` : null;
 
   const warningText = eventCounts.deductible + eventCounts.pending > 0
     ? `Persisted SOF loaded from backend. ${eventCounts.deductible} deductible and ${eventCounts.pending} pending event(s) require review.`
@@ -802,6 +1145,9 @@ export default function SOFTimeline() {
 
   const calculationSnapshot = getCalculationSnapshot(laytimeCalculation);
   const calculationPeriods = getCalculationPeriods(laytimeCalculation);
+  const sofDocumentSelectionAudit = getSofDocumentSelectionAudit(laytimeCalculation);
+  const demurrageAudit = getDemurrageAudit(laytimeCalculation);
+  const weatherWorkingAudit = getWeatherWorkingAudit(laytimeCalculation);
   const allowedSeconds = intervalStringToSeconds(laytimeCalculation?.allowedLaytime);
   const grossUsedSeconds = intervalStringToSeconds(laytimeCalculation?.usedLaytime);
   const deductionSeconds = calculationPeriods.reduce((total, period) => {
@@ -834,6 +1180,10 @@ export default function SOFTimeline() {
           ? "$0.00"
           : "—";
   const supplierClockStart = formatDateTime(calculationSnapshot?.commencement?.commencedAt);
+  const demurrageAuditVisible = Boolean(demurrageAudit.startedAt);
+  const weatherWorkingAuditVisible = Boolean(laytimeCalculation);
+  const sofDocumentSelectionAuditVisible = Boolean(laytimeCalculation);
+  const operationSelectionAuditVisible = Boolean(laytimeCalculation);
   const demurrageAmountValue = Number((laytimeCalculation as any)?.demurrageAmount ?? 0);
   const despatchAmountValue = Number((laytimeCalculation as any)?.despatchAmount ?? 0);
   const hasClaimableAmount = Boolean(laytimeCalculation) && (demurrageAmountValue > 0 || despatchAmountValue > 0);
@@ -910,6 +1260,7 @@ export default function SOFTimeline() {
     : laytimeLoading
       ? "Loading latest backend calculation..."
       : "No persisted laytime calculation yet.";
+  const defaultManualEventOperation = activeDocument?.operation ?? shipment?.laytimeOperation ?? "Discharge";
   const laytimeBannerTitle = laytimeError
     ? "Laytime calculation failed"
     : laytimeLoading
@@ -933,6 +1284,7 @@ export default function SOFTimeline() {
         <AddEventModal
           mode={editingEvent ? "edit" : "add"}
           event={editingEvent}
+          defaultOperation={defaultManualEventOperation}
           onClose={() => {
             setShowAddEvent(false);
             setEditingEvent(null);
@@ -983,6 +1335,14 @@ export default function SOFTimeline() {
           <p style={{ fontSize: "11px", lineHeight: 1.4 }}>
             {laytimeBannerText}
           </p>
+        </div>
+      )}
+      {timelineSuccess && (
+        <div
+          className="mx-6 mt-3 rounded-lg border px-4 py-3"
+          style={{ borderColor: "#BBF7D0", backgroundColor: "#F0FDF4", color: "#166534" }}
+        >
+          <p style={{ fontSize: "12px", fontWeight: 500 }}>{timelineSuccess}</p>
         </div>
       )}
       {claimError && (
@@ -1060,6 +1420,9 @@ export default function SOFTimeline() {
               <div className="flex-1 min-w-0">
                 <p style={{ fontSize: "12px", fontWeight: 500, color: "#111827", marginBottom: "2px" }}>{sourceFileName}</p>
                 <p style={{ fontSize: "11px", color: "#9CA3AF" }}>{sourceSubtext}</p>
+                {sourceOperationText ? (
+                  <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "2px" }}>{sourceOperationText}</p>
+                ) : null}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">                <button
                   className="flex items-center gap-1 px-2.5 rounded-md border transition-colors cursor-pointer"
@@ -1202,6 +1565,19 @@ export default function SOFTimeline() {
                       <td className="py-2.5 pr-3" style={{ verticalAlign: "top" }}>
                         <p style={{ fontSize: "12px", fontWeight: 500, color: "#111827", marginBottom: "2px" }}>{ev.name}</p>
                         <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.4, marginBottom: "4px" }}>{ev.detail}</p>
+                        {ev.operation ? (
+                          <span
+                            className="inline-flex items-center rounded-full px-2 py-0.5 font-medium"
+                            style={{
+                              fontSize: "10px",
+                              backgroundColor: "#F3F4F6",
+                              color: "#374151",
+                              marginBottom: "4px",
+                            }}
+                          >
+                            Operation: {formatOperationLabel(ev.operation)}
+                          </span>
+                        ) : null}
                         <span
                           className="inline-block rounded-full px-2 py-0.5 font-medium"
                           style={{ fontSize: "10px", backgroundColor: ev.tagBg, color: ev.tagText }}
@@ -1229,11 +1605,19 @@ export default function SOFTimeline() {
                           {ev.cause}
                         </span>
                       </td>
-                      {/* Edit */}
+                    {/* Edit */}
                       <td className="py-2.5 pr-4" style={{ verticalAlign: "middle" }}>
                         <button
+                          type="button"
                           className="w-6 h-6 flex items-center justify-center rounded transition-colors cursor-pointer"
                           style={{ color: "#9CA3AF", border: "none", backgroundColor: "transparent" }}
+                          aria-label={`Edit ${ev.name}`}
+                          title={`Edit ${ev.name}`}
+                          onClick={() => {
+                            setTimelineSuccess(null);
+                            setShowAddEvent(false);
+                            setEditingEvent(ev);
+                          }}
                           onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F3F4F6")}
                           onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "transparent")}
                         >
@@ -1249,8 +1633,14 @@ export default function SOFTimeline() {
             {/* Add manual event */}
             <div style={{ borderTop: "0.5px solid #E5E7EB", padding: "10px 16px" }}>
               <button
+                type="button"
                 className="w-full flex items-center justify-center gap-1.5 rounded-lg transition-colors cursor-pointer"
                 style={{ height: "32px", fontSize: "12px", color: "#6B7280", border: "0.5px dashed #D1D5DB", backgroundColor: "transparent" }}
+                onClick={() => {
+                  setTimelineSuccess(null);
+                  setEditingEvent(null);
+                  setShowAddEvent(true);
+                }}
                 onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
                 onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "transparent")}
               >
@@ -1292,6 +1682,261 @@ export default function SOFTimeline() {
             <CalcRow label="Net used" value="44h 20m" valueColor="#B45309" bold />
             <CalcRow label="Remaining" value="3h 40m" valueColor="#22543D" bold />
           </div>
+
+          {demurrageAuditVisible && (
+            <div
+              className="rounded-xl border p-[14px_16px]"
+              style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <p
+                className="mb-3"
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                Demurrage transition
+              </p>
+
+              <CalcRow
+                label="Demurrage started"
+                value={formatDateTime(demurrageAudit.startedAt)}
+                valueColor="#B45309"
+                bold
+              />
+              <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45, marginTop: "8px" }}>
+                Once demurrage started, these later exceptions did not suspend the clock.
+              </p>
+              <CalcRow
+                label="Post-demurrage exceptions ignored"
+                value={String(demurrageAudit.ignoredExceptions.length)}
+                valueColor="#1E40AF"
+                bold
+              />
+
+              {demurrageAudit.ignoredExceptions.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {demurrageAudit.ignoredExceptions.map((exception, index) => (
+                    <div
+                      key={`${exception.startTime}-${exception.endTime}-${index}`}
+                      className="rounded-lg border px-3 py-2"
+                      style={{
+                        borderColor: "#E5E7EB",
+                        borderWidth: "0.5px",
+                        backgroundColor: "#F9FAFB",
+                      }}
+                    >
+                      <p style={{ fontSize: "11px", color: "#374151", fontWeight: 500, marginBottom: "2px" }}>
+                        Type / reason: {exception.reason}
+                      </p>
+                      <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.4 }}>
+                        Start: {formatDateTime(exception.startTime)}
+                        <br />
+                        End: {formatDateTime(exception.endTime)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {weatherWorkingAuditVisible && (
+            <div
+              className="rounded-xl border p-[14px_16px]"
+              style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <p
+                className="mb-3"
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                Weather working rule
+              </p>
+
+              {!weatherWorkingAudit.available ? (
+                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
+                  Not available for this calculation version.
+                </p>
+              ) : (
+                <>
+                  <CalcRow
+                    label="Status"
+                    value={
+                      weatherWorkingAudit.enabled === true
+                        ? "Enabled"
+                        : weatherWorkingAudit.enabled === false
+                          ? "Disabled"
+                          : "Not specified"
+                    }
+                    valueColor={
+                      weatherWorkingAudit.enabled === true ? "#22543D" : "#6B7280"
+                    }
+                    bold
+                  />
+                  <CalcRow
+                    label="Weather time deducted before demurrage"
+                    value={formatSecondsAsInterval(
+                      weatherWorkingAudit.totalWeatherTimeDeductedBeforeDemurrage,
+                    )}
+                    valueColor="#1E40AF"
+                    bold
+                  />
+                  <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45, marginTop: "8px" }}>
+                    {weatherWorkingAudit.enabled === true
+                      ? "Weather stoppages before demurrage were excluded from counted laytime."
+                      : "Weather stoppages were counted unless another applicable rule excluded them."}
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+
+          {sofDocumentSelectionAuditVisible && (
+            <div
+              className="rounded-xl border p-[14px_16px]"
+              style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <p
+                className="mb-3"
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                SOF document selection
+              </p>
+
+              {!sofDocumentSelectionAudit.available ? (
+                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
+                  Not available for this calculation version.
+                </p>
+              ) : (
+                <>
+                  <CalcRow
+                    label="Voyage laytime operation"
+                    value={sofDocumentSelectionAudit.voyageLaytimeOperation ?? "Not set"}
+                    valueColor="#1E40AF"
+                    bold
+                  />
+                  <CalcRow
+                    label="Documents considered"
+                    value={String(sofDocumentSelectionAudit.candidateDocumentCount)}
+                    valueColor="#374151"
+                  />
+                  <CalcRow
+                    label="Documents used"
+                    value={String(sofDocumentSelectionAudit.includedDocumentCount)}
+                    valueColor="#22543D"
+                    bold
+                  />
+                  <CalcRow
+                    label="Matching-operation documents"
+                    value={String(sofDocumentSelectionAudit.matchingDocumentCount)}
+                    valueColor="#374151"
+                  />
+                  <CalcRow
+                    label="Legacy unscoped documents"
+                    value={String(sofDocumentSelectionAudit.legacyNullDocumentCount)}
+                    valueColor="#374151"
+                  />
+                  <CalcRow
+                    label="Opposite-operation documents excluded"
+                    value={String(sofDocumentSelectionAudit.oppositeOperationDocumentCount)}
+                    valueColor="#9A3412"
+                  />
+                  {sofDocumentSelectionAudit.hasLegacyNullDocuments && (
+                    <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45, marginTop: "8px" }}>
+                      Legacy SOF documents without operation context were included for backward compatibility.
+                    </p>
+                  )}
+                  {sofDocumentSelectionAudit.hasOppositeOperationDocuments && (
+                    <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45, marginTop: "8px" }}>
+                      SOF documents explicitly assigned to the opposite laytime operation were excluded.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {operationSelectionAuditVisible && (
+            <div
+              className="rounded-xl border p-[14px_16px]"
+              style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <p
+                className="mb-3"
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                Operation selection
+              </p>
+
+              {!operationSelectionAudit.available ? (
+                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
+                  Not available for this calculation version.
+                </p>
+              ) : (
+                <>
+                  <CalcRow
+                    label="Voyage laytime operation"
+                    value={
+                      operationSelectionAudit.voyageLaytimeOperation ?? "Not set"
+                    }
+                    valueColor="#1E40AF"
+                    bold
+                  />
+                  <CalcRow
+                    label="Loading completion found"
+                    value={operationSelectionAudit.hasLoadingCompletion === true ? "Yes" : "No"}
+                    valueColor="#374151"
+                  />
+                  <CalcRow
+                    label="Discharge completion found"
+                    value={operationSelectionAudit.hasDischargeCompletion === true ? "Yes" : "No"}
+                    valueColor="#374151"
+                  />
+                  {operationSelectionAudit.mixedOperationEvidence === true && (
+                    <p
+                      style={{
+                        fontSize: "11px",
+                        color: "#7B341E",
+                        lineHeight: 1.45,
+                        marginTop: "8px",
+                        backgroundColor: "#FFFBEB",
+                        border: "0.5px solid #FCD34D",
+                        borderRadius: "8px",
+                        padding: "8px 10px",
+                      }}
+                    >
+                      Both Loading and Discharge completion evidence were present. The calculation used the voyage laytime operation to select the applicable completion event.
+                    </p>
+                  )}
+                  {(operationSelectionAudit.excludedCompletionCount ?? 0) > 0 && (
+                    <CalcRow
+                      label="Excluded mismatched completion events"
+                      value={String(operationSelectionAudit.excludedCompletionCount)}
+                      valueColor="#9A3412"
+                      bold
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {/* Component 2 — Annotation flags */}
           <div

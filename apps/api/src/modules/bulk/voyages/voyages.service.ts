@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import { Paginated, paginate } from '../../../common/dto/paginated';
 import { CpClause } from '../entities/cp-clause.entity';
 import { CharterParty } from '../entities/charter-party.entity';
@@ -19,6 +19,7 @@ import {
   VoyageCounterparty,
 } from '../entities/voyage-counterparty.entity';
 import { Voyage } from '../entities/voyage.entity';
+import { normalizeCommercialTermsToClauses } from '../charter-party-terms';
 import { CreateVoyageDto } from './dto/create-voyage.dto';
 import { ListVoyagesQueryDto } from './dto/list-voyages-query.dto';
 import { UpdateVoyageDto } from './dto/update-voyage.dto';
@@ -164,6 +165,7 @@ export class VoyagesService {
       dispatchRate,
       timeCountingBasis,
       norNoticePeriod,
+      laytimeOperation,
       ...voyageDto
     } = dto;
 
@@ -173,6 +175,9 @@ export class VoyagesService {
           ...voyageDto,
           eta: voyageDto.eta ? new Date(voyageDto.eta) : null,
           reference,
+          ...(laytimeOperation !== undefined
+            ? { laytimeOperation }
+            : {}),
           cargoQuantity: voyageDto.cargoQuantity.toFixed(2),
         }),
       );
@@ -270,6 +275,10 @@ export class VoyagesService {
 
     this.voyages.merge(voyage, rest as Partial<Voyage>);
 
+    if (dto.laytimeOperation !== undefined) {
+      voyage.laytimeOperation = dto.laytimeOperation;
+    }
+
     if (cargoQuantity !== undefined) {
       voyage.cargoQuantity = cargoQuantity.toFixed(2);
     }
@@ -301,7 +310,7 @@ export class VoyagesService {
       }),
 
       this.laytimeCalculations.findOne({
-        where: { voyageId: id },
+        where: { voyageId: id, parentCalculationId: IsNull() },
         order: { version: 'DESC' },
       }),
 
@@ -410,84 +419,19 @@ export class VoyagesService {
     dto: CreateVoyageDto,
     charterPartyId: string,
   ): Array<Pick<CpClause, 'charterPartyId' | 'clauseType' | 'rawText' | 'parameters'>> {
-    const clauses: Array<
-      Pick<CpClause, 'charterPartyId' | 'clauseType' | 'rawText' | 'parameters'>
-    > = [];
-
-    if (dto.laytimeAllowed !== undefined) {
-      const parameters: Record<string, unknown> = {
-        hours: dto.laytimeAllowed,
-      };
-      const noticeHours = this.parseNoticeHours(dto.norNoticePeriod);
-
-      if (noticeHours !== undefined) {
-        parameters.noticeHours = noticeHours;
-      }
-
-      clauses.push({
-        charterPartyId,
-        clauseType: 'laytime_rate',
-        rawText: [
-          `Laytime allowed: ${dto.laytimeAllowed}h`,
-          noticeHours !== undefined
-            ? `NOR notice: ${dto.norNoticePeriod}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join('\n'),
-        parameters,
-      });
-    }
-
-    if (dto.demurrageRate !== undefined) {
-      clauses.push({
-        charterPartyId,
-        clauseType: 'demurrage_rate',
-        rawText: `Demurrage: $${dto.demurrageRate.toLocaleString()}/day`,
-        parameters: { rate: dto.demurrageRate },
-      });
-    }
-
-    if (dto.dispatchRate !== undefined) {
-      clauses.push({
-        charterPartyId,
-        clauseType: 'despatch',
-        rawText: `Dispatch: $${dto.dispatchRate.toLocaleString()}/day`,
-        parameters: { rate: dto.dispatchRate },
-      });
-    }
-
-    if (dto.timeCountingBasis?.trim().toUpperCase() === 'SHEX') {
-      clauses.push({
-        charterPartyId,
-        clauseType: 'shex_shinc',
-        rawText: `Time counting basis: ${dto.timeCountingBasis}`,
-        parameters: { shex: true },
-      });
-    }
-
-    return clauses;
-  }
-
-  private parseNoticeHours(value?: string): number | undefined {
-    const trimmed = value?.trim();
-
-    if (!trimmed) {
-      return undefined;
-    }
-
-    if (trimmed.toLowerCase() === 'immediate') {
-      return 0;
-    }
-
-    const match = trimmed.match(/(\d+(?:\.\d+)?)/);
-
-    if (!match) {
-      return undefined;
-    }
-
-    const hours = Number(match[1]);
-    return Number.isFinite(hours) ? hours : undefined;
+    return normalizeCommercialTermsToClauses({
+      id: charterPartyId,
+      laytimeAllowed: dto.laytimeAllowed ?? null,
+      demurrageRate: dto.demurrageRate ?? null,
+      dispatchRate: dto.dispatchRate ?? null,
+      timeCountingBasis: dto.timeCountingBasis ?? null,
+      norNoticePeriod: dto.norNoticePeriod ?? null,
+    }).map((clause) => ({
+      charterPartyId,
+      clauseType: clause.clauseType,
+      rawText: clause.rawText,
+      parameters: clause.parameters,
+    }));
   }
 
   private async attachVoyageCounterparty(

@@ -34,6 +34,7 @@ export interface Voyage {
   reference?: string;
   loadPort: string;
   dischargePort: string;
+  laytimeOperation?: "Loading" | "Discharge";
   laycanStart: string;
   laycanEnd: string;
   eta?: string;
@@ -56,6 +57,7 @@ export interface SofDocument {
   filePath: string;
   uploadDate: string;
   status: "Draft" | "Final";
+  operation?: "Loading" | "Discharge" | null;
   [key: string]: unknown;
 }
 
@@ -64,6 +66,7 @@ export interface SofEvent {
   sofId: string;
   eventTime: string;
   eventType: string;
+  operation?: "Loading" | "Discharge" | null;
   remarks?: string | null;
   confidenceScore?: string | null;
   isManualOverride: boolean;
@@ -84,6 +87,62 @@ export interface LaytimeCalculation {
   calculatedAt: string;
   warnings?: string[] | null;
   engineVersion?: string | null;
+  inputSnapshot?: LaytimeCalculationInputSnapshot | null;
+  decisionSnapshot?: LaytimeDecisionSnapshot | null;
+  [key: string]: unknown;
+}
+
+export interface LaytimeCalculationOperationSelection {
+  voyageLaytimeOperation?: "Loading" | "Discharge";
+  hasLoadingCompletion?: boolean;
+  hasDischargeCompletion?: boolean;
+  mixedOperationEvidence?: boolean;
+  includedCompletionEventIds?: string[];
+  excludedCompletionEventIds?: string[];
+}
+
+export interface LaytimeCalculationInputSnapshot {
+  sofDocumentSelection?: LaytimeCalculationSofDocumentSelection | null;
+  operationSelection?: LaytimeCalculationOperationSelection | null;
+  [key: string]: unknown;
+}
+
+export interface LaytimeCalculationSofDocumentSelection {
+  voyageLaytimeOperation?: "Loading" | "Discharge";
+  candidateDocumentIds?: string[];
+  includedDocumentIds?: string[];
+  excludedDocumentIds?: string[];
+  matchingDocumentIds?: string[];
+  legacyNullDocumentIds?: string[];
+  oppositeOperationDocumentIds?: string[];
+  rule?: string;
+}
+
+export interface LaytimeDecisionIgnoredException {
+  startTime: string;
+  endTime: string;
+  appliedClauseId: string | null;
+  reason: string;
+}
+
+export interface LaytimeDecisionSnapshot {
+  commencement?: {
+    commencedAt?: string | null;
+    [key: string]: unknown;
+  };
+  weatherWorking?: {
+    clauseId?: string | null;
+    clauseParameters?: Record<string, unknown> | null;
+    enabled?: boolean | null;
+    applied?: boolean | null;
+    totalWeatherTimeDeductedBeforeDemurrage?: number | null;
+    [key: string]: unknown;
+  } | null;
+  demurrage?: {
+    startedAt?: string | null;
+    ignoredExceptions?: LaytimeDecisionIgnoredException[];
+    [key: string]: unknown;
+  } | null;
   [key: string]: unknown;
 }
 
@@ -161,11 +220,15 @@ export async function updateBulkDispute(
 export interface CreateSofDocumentDto {
   filePath: string;
   status?: "Draft" | "Final";
+  operation?: "Loading" | "Discharge";
 }
+
+export interface UpdateSofDocumentDto extends Partial<CreateSofDocumentDto> {}
 
 export interface CreateSofEventDto {
   eventTime: string;
   eventType: string;
+  operation?: "Loading" | "Discharge";
   remarks?: string;
   confidenceScore?: number;
 }
@@ -173,6 +236,7 @@ export interface CreateSofEventDto {
 export interface UpdateSofEventDto {
   eventTime?: string;
   eventType?: string;
+  operation?: "Loading" | "Discharge";
   remarks?: string;
   confidenceScore?: number;
   overrideReason?: string;
@@ -190,6 +254,7 @@ export interface CreateVoyageDto {
   laycanStart: string;
   laycanEnd: string;
   eta?: string;
+  laytimeOperation?: "Loading" | "Discharge";
   laytimeAllowed?: number;
   demurrageRate?: number;
   dispatchRate?: number;
@@ -197,6 +262,8 @@ export interface CreateVoyageDto {
   norNoticePeriod?: string;
   status?: "Planned" | "Active" | "Completed" | "Cancelled";
 }
+
+export interface UpdateVoyageDto extends Partial<CreateVoyageDto> {}
 
 export interface ApiError {
   message: string;

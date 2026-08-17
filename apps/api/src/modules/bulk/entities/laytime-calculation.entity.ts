@@ -11,6 +11,7 @@ import { UuidEntity } from '../../../database/entities/base.entity';
 import { intervalTransformer } from '../laytime/interval.util';
 import { CalculationPeriod } from './calculation-period.entity';
 import { Voyage } from './voyage.entity';
+import type { LaytimeOperation } from './voyage.entity';
 
 export const LAYTIME_CALCULATION_STATUSES = ['Draft', 'Final'] as const;
 export type LaytimeCalculationStatus =
@@ -18,6 +19,8 @@ export type LaytimeCalculationStatus =
 
 @Entity('laytime_calculations')
 @Index('idx_laytime_calc_voyage', ['voyageId'])
+@Index('idx_laytime_calc_voyage_parent_version', ['voyageId', 'parentCalculationId', 'version'])
+@Index('idx_laytime_calc_parent_operation', ['parentCalculationId', 'operation'])
 export class LaytimeCalculation extends UuidEntity {
   @Column({ name: 'voyage_id', type: 'uuid' })
   voyageId!: string;
@@ -25,6 +28,21 @@ export class LaytimeCalculation extends UuidEntity {
   @ManyToOne(() => Voyage, (voyage) => voyage.laytimeCalculations)
   @JoinColumn({ name: 'voyage_id' })
   voyage!: Voyage;
+
+  @Column({ name: 'parent_calculation_id', type: 'uuid', nullable: true })
+  parentCalculationId?: string | null;
+
+  @ManyToOne(() => LaytimeCalculation, (calculation) => calculation.childCalculations, {
+    nullable: true,
+  })
+  @JoinColumn({ name: 'parent_calculation_id' })
+  parentCalculation?: LaytimeCalculation | null;
+
+  @OneToMany(() => LaytimeCalculation, (calculation) => calculation.parentCalculation)
+  childCalculations?: LaytimeCalculation[];
+
+  @Column({ name: 'operation', type: 'varchar', length: 20, nullable: true })
+  operation?: LaytimeOperation | null;
 
   @Column({ type: 'integer', default: 1 })
   version!: number;
