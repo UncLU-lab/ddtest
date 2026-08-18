@@ -46,7 +46,9 @@ export default registerAs('database', (): AppDatabaseConfig => {
     type: 'postgres',
     ...connection,
     entities: [...databaseEntities],
-    migrations: [__dirname + '/../migrations/*{.ts,.js}'],
+    migrations: [
+      __dirname + '/../migrations/!(*.spec|*.test|*.d).{ts,js}',
+    ],
     synchronize: false,
     dropSchema: false,
     logging: readBoolean(process.env.DB_LOGGING),
