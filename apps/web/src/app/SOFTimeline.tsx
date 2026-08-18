@@ -11,12 +11,14 @@ import {
   createSofEvent,
   createBulkDispute,
   getLaytimeCalculations,
+  getLaytimeOperationResults,
   getSofDocuments,
   getSofEvents,
   runLaytimeCalculation,
   updateSofEvent,
   type LaytimeDecisionSnapshot,
   type LaytimeCalculation,
+  type LaytimeOperationResult,
   type SofDocument,
   type SofEvent,
 } from "../lib/api";
@@ -298,6 +300,19 @@ function getInputSnapshot(calc?: LaytimeCalculation | null) {
     | null) ?? null;
 }
 
+function getOperationResultSnapshot(
+  result?: LaytimeOperationResult | null,
+) {
+  return ((result as any)?.inputSnapshot?.operationResult as
+    | {
+        source?: string | null;
+        operation?: "Loading" | "Discharge" | null;
+        [key: string]: unknown;
+      }
+    | undefined
+    | null) ?? null;
+}
+
 function getSofDocumentSelectionAudit(calc?: LaytimeCalculation | null) {
   const snapshot = getInputSnapshot(calc);
   const documentSelection = snapshot?.sofDocumentSelection ?? null;
@@ -395,6 +410,54 @@ function getWeatherWorkingAudit(calc?: LaytimeCalculation | null) {
   };
 }
 
+function getReversibleLaytimeAudit(calc?: LaytimeCalculation | null) {
+  const snapshot = getCalculationSnapshot(calc);
+  const reversibleRule = snapshot?.reversibleLaytimeRule ?? null;
+  const reversibleAnalysis = snapshot?.reversibleLaytimeAnalysis ?? null;
+  const analysisAvailable = reversibleAnalysis?.status === "available";
+  const analysisNotAvailable = reversibleAnalysis?.status === "not-available";
+  const contractEnabled =
+    analysisAvailable &&
+    reversibleAnalysis?.mode === "contract-enabled" &&
+    reversibleAnalysis?.contractRuleApplied === true;
+  const ruleEnabled =
+    typeof reversibleRule?.enabled === "boolean" ? reversibleRule.enabled : null;
+
+  const loading = reversibleAnalysis?.loading ?? null;
+  const discharge = reversibleAnalysis?.discharge ?? null;
+  const pool = reversibleAnalysis?.pool ?? null;
+
+  return {
+    available: Boolean(snapshot && (reversibleRule || reversibleAnalysis)),
+    hasAnalysis: analysisAvailable || analysisNotAvailable,
+    statusLabel: analysisNotAvailable
+      ? "Not available"
+      : contractEnabled
+        ? "Contract enabled"
+        : analysisAvailable
+          ? "Audit only"
+          : "Not available",
+    contractRuleApplied:
+      typeof reversibleAnalysis?.contractRuleApplied === "boolean"
+        ? reversibleAnalysis.contractRuleApplied
+        : false,
+    ruleEnabled,
+    reason:
+      analysisNotAvailable && typeof reversibleAnalysis?.reason === "string"
+        ? reversibleAnalysis.reason
+        : null,
+    note: contractEnabled
+      ? "Reversible laytime is enabled by the persisted Charter Party rule. The pooled analysis is contract-supported, but authoritative pricing has not yet been adjusted."
+      : analysisAvailable
+        ? "Reversible laytime is not enabled by the persisted Charter Party rule. The pooled result below is audit-only and does not affect the authoritative calculation."
+        : null,
+    loading,
+    discharge,
+    pool,
+    warnings: Array.isArray(reversibleRule?.warnings) ? reversibleRule.warnings : [],
+  };
+}
+
 function fileNameFromPath(filePath?: string | null) {
   if (!filePath) return "SOF document";
   const parts = filePath.split(/[\\/]/);
@@ -437,6 +500,7 @@ function normalizeEngineEventType(value: string) {
 
   const aliases: Record<string, string> = {
     "nor tendered": "NOR_TENDERED",
+    "cargo started": "CARGO_STARTED",
     "cargo completed": "CARGO_COMPLETED",
     "loading completed": "LOADING_COMPLETED",
     "discharge completed": "DISCHARGE_COMPLETED",
@@ -529,6 +593,7 @@ function formatDurationValue(value?: string | null) {
 
 const ENGINE_EVENT_PRESETS = [
   { value: "NOR_TENDERED", label: "NOR tendered" },
+  { value: "CARGO_STARTED", label: "Cargo started" },
   { value: "CARGO_COMPLETED", label: "Cargo completed" },
   { value: "LOADING_COMPLETED", label: "Loading completed" },
   { value: "DISCHARGE_COMPLETED", label: "Discharge completed" },
@@ -928,6 +993,9 @@ export default function SOFTimeline() {
   const [laytimeError, setLaytimeError] = useState<string | null>(null);
   const [laytimeRunning, setLaytimeRunning] = useState(false);
   const [laytimeWarnings, setLaytimeWarnings] = useState<string[]>([]);
+  const [operationResults, setOperationResults] = useState<LaytimeOperationResult[]>([]);
+  const [operationResultsLoading, setOperationResultsLoading] = useState(false);
+  const [operationResultsError, setOperationResultsError] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimSuccess, setClaimSuccess] = useState<string | null>(null);
@@ -1037,6 +1105,48 @@ export default function SOFTimeline() {
       alive = false;
     };
   }, [id, refreshKey]);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function loadOperationResults() {
+      if (!laytimeCalculation?.id) {
+        if (alive) {
+          setOperationResults([]);
+          setOperationResultsError(null);
+          setOperationResultsLoading(false);
+        }
+        return;
+      }
+
+      setOperationResultsLoading(true);
+      setOperationResultsError(null);
+
+      try {
+        const results = await getLaytimeOperationResults(laytimeCalculation.id);
+        if (!alive) return;
+
+        setOperationResults(results);
+      } catch (error: any) {
+        if (!alive) return;
+
+        setOperationResults([]);
+        setOperationResultsError(
+          error?.message ?? "Unable to load operation results.",
+        );
+      } finally {
+        if (alive) {
+          setOperationResultsLoading(false);
+        }
+      }
+    }
+
+    void loadOperationResults();
+
+    return () => {
+      alive = false;
+    };
+  }, [laytimeCalculation?.id]);
 
   const activeDocument = documents[0] ?? null;
   const displayEvents = id ? timelineEvents : initialEvents;
@@ -1148,6 +1258,7 @@ export default function SOFTimeline() {
   const sofDocumentSelectionAudit = getSofDocumentSelectionAudit(laytimeCalculation);
   const demurrageAudit = getDemurrageAudit(laytimeCalculation);
   const weatherWorkingAudit = getWeatherWorkingAudit(laytimeCalculation);
+  const reversibleLaytimeAudit = getReversibleLaytimeAudit(laytimeCalculation);
   const allowedSeconds = intervalStringToSeconds(laytimeCalculation?.allowedLaytime);
   const grossUsedSeconds = intervalStringToSeconds(laytimeCalculation?.usedLaytime);
   const deductionSeconds = calculationPeriods.reduce((total, period) => {
@@ -1182,6 +1293,7 @@ export default function SOFTimeline() {
   const supplierClockStart = formatDateTime(calculationSnapshot?.commencement?.commencedAt);
   const demurrageAuditVisible = Boolean(demurrageAudit.startedAt);
   const weatherWorkingAuditVisible = Boolean(laytimeCalculation);
+  const reversibleLaytimeAuditVisible = Boolean(laytimeCalculation);
   const sofDocumentSelectionAuditVisible = Boolean(laytimeCalculation);
   const operationSelectionAuditVisible = Boolean(laytimeCalculation);
   const demurrageAmountValue = Number((laytimeCalculation as any)?.demurrageAmount ?? 0);
@@ -1192,6 +1304,7 @@ export default function SOFTimeline() {
     : hasClaimableAmount
       ? "Create a claim from the persisted laytime calculation."
       : "No claimable amount from this laytime calculation.";
+  const hasOperationResults = operationResults.length > 0;
 
   async function handleRunLaytimeCalculation() {
     if (!id) return;
@@ -1277,6 +1390,11 @@ export default function SOFTimeline() {
       : laytimeCalculation
         ? "Backend laytime calculation loaded."
         : "No persisted laytime calculation yet.";
+  const operationResultsSectionVisible =
+    Boolean(laytimeCalculation) ||
+    Boolean(operationResultsError) ||
+    hasOperationResults ||
+    (Boolean(laytimeCalculation) && operationResultsLoading);
 
   return (
     <div style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
@@ -1683,6 +1801,96 @@ export default function SOFTimeline() {
             <CalcRow label="Remaining" value="3h 40m" valueColor="#22543D" bold />
           </div>
 
+          {operationResultsSectionVisible && (
+            <div
+              className="rounded-xl border p-[14px_16px]"
+              style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <p
+                className="mb-2.5"
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                Operation result
+              </p>
+
+              {operationResultsError ? (
+                <p style={{ fontSize: "11px", color: "#991B1B", lineHeight: 1.45 }}>
+                  {operationResultsError}
+                </p>
+              ) : operationResultsLoading ? (
+                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
+                  Loading operation results...
+                </p>
+              ) : hasOperationResults ? (
+                <div className="space-y-3">
+                  {operationResults.map((result) => {
+                    const operationResultSnapshot = getOperationResultSnapshot(result);
+                    const operationLabel = formatOperationLabel(result.operation);
+                    const sourceLine =
+                      operationResultSnapshot?.source &&
+                      operationResultSnapshot?.operation
+                        ? `Source: ${operationResultSnapshot.source} · Operation: ${formatOperationLabel(operationResultSnapshot.operation)}`
+                        : operationResultSnapshot?.source
+                          ? `Source: ${operationResultSnapshot.source}`
+                          : operationResultSnapshot?.operation
+                            ? `Operation: ${formatOperationLabel(operationResultSnapshot.operation)}`
+                            : null;
+
+                    return (
+                      <div
+                        key={result.id}
+                        className="rounded-lg border px-3 py-2"
+                        style={{
+                          borderColor: "#E5E7EB",
+                          borderWidth: "0.5px",
+                          backgroundColor: "#F9FAFB",
+                        }}
+                      >
+                        <p
+                          style={{
+                            fontSize: "11px",
+                            color: "#374151",
+                            fontWeight: 500,
+                            marginBottom: "6px",
+                          }}
+                        >
+                          {operationLabel}
+                        </p>
+                        <CalcRow label="Allowed laytime" value={formatInterval(result.allowedLaytime)} />
+                        <CalcRow label="Used laytime" value={formatInterval(result.usedLaytime)} />
+                        <CalcRow label="Demurrage" value={formatMoney(result.demurrageAmount)} />
+                        <CalcRow label="Despatch" value={formatMoney(result.despatchAmount)} />
+                        <CalcRow label="Status" value={result.status} />
+                        <CalcRow label="Calculated at" value={formatDateTime(result.calculatedAt)} />
+                        {sourceLine ? (
+                          <p
+                            style={{
+                              fontSize: "10px",
+                              color: "#6B7280",
+                              lineHeight: 1.4,
+                              marginTop: "6px",
+                            }}
+                          >
+                            {sourceLine}
+                          </p>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
+                  No operation-specific child results available for this calculation.
+                </p>
+              )}
+            </div>
+          )}
+
           {demurrageAuditVisible && (
             <div
               className="rounded-xl border p-[14px_16px]"
@@ -1793,6 +2001,139 @@ export default function SOFTimeline() {
                       ? "Weather stoppages before demurrage were excluded from counted laytime."
                       : "Weather stoppages were counted unless another applicable rule excluded them."}
                   </p>
+                </>
+              )}
+            </div>
+          )}
+
+          {reversibleLaytimeAuditVisible && (
+            <div
+              className="rounded-xl border p-[14px_16px]"
+              style={{ borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <p
+                className="mb-3"
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                Reversible laytime
+              </p>
+
+              {!reversibleLaytimeAudit.hasAnalysis ? (
+                <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
+                  Not available for this calculation version.
+                </p>
+              ) : reversibleLaytimeAudit.statusLabel === "Not available" ? (
+                <>
+                  <CalcRow
+                    label="Status"
+                    value="Not available"
+                    valueColor="#6B7280"
+                    bold
+                  />
+                  <CalcRow
+                    label="Contract rule applied"
+                    value={reversibleLaytimeAudit.contractRuleApplied ? "Yes" : "No"}
+                    valueColor="#374151"
+                  />
+                  <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45, marginTop: "8px" }}>
+                    {reversibleLaytimeAudit.reason ?? "Not available for this calculation version."}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <CalcRow
+                    label="Status"
+                    value={reversibleLaytimeAudit.statusLabel}
+                    valueColor={reversibleLaytimeAudit.contractRuleApplied ? "#22543D" : "#6B7280"}
+                    bold
+                  />
+                  <CalcRow
+                    label="Contract rule applied"
+                    value={reversibleLaytimeAudit.contractRuleApplied ? "Yes" : "No"}
+                    valueColor="#374151"
+                  />
+                  <CalcRow
+                    label="Loading allowed"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.loading?.allowedSeconds)}
+                    valueColor="#1E40AF"
+                  />
+                  <CalcRow
+                    label="Loading used"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.loading?.usedSeconds)}
+                    valueColor="#374151"
+                  />
+                  <CalcRow
+                    label="Loading surplus"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.loading?.surplusSeconds)}
+                    valueColor="#22543D"
+                  />
+                  <CalcRow
+                    label="Loading overrun"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.loading?.overrunSeconds)}
+                    valueColor="#B45309"
+                  />
+                  <CalcRow
+                    label="Discharge allowed"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.discharge?.allowedSeconds)}
+                    valueColor="#1E40AF"
+                  />
+                  <CalcRow
+                    label="Discharge used"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.discharge?.usedSeconds)}
+                    valueColor="#374151"
+                  />
+                  <CalcRow
+                    label="Discharge surplus"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.discharge?.surplusSeconds)}
+                    valueColor="#22543D"
+                  />
+                  <CalcRow
+                    label="Discharge overrun"
+                    value={formatSecondsAsInterval(reversibleLaytimeAudit.discharge?.overrunSeconds)}
+                    valueColor="#B45309"
+                  />
+                  <div className="mt-2 rounded-lg border border-dashed px-3 py-2" style={{ borderColor: "#E5E7EB", backgroundColor: "#F9FAFB" }}>
+                    <CalcRow
+                      label="Total allowed"
+                      value={formatSecondsAsInterval(reversibleLaytimeAudit.pool?.totalAllowedSeconds)}
+                      valueColor="#1E40AF"
+                    />
+                    <CalcRow
+                      label="Total used"
+                      value={formatSecondsAsInterval(reversibleLaytimeAudit.pool?.totalUsedSeconds)}
+                      valueColor="#374151"
+                    />
+                    <CalcRow
+                      label="Transferable surplus"
+                      value={formatSecondsAsInterval(reversibleLaytimeAudit.pool?.transferableSurplusSeconds)}
+                      valueColor="#22543D"
+                    />
+                    <CalcRow
+                      label="Net pooled overrun"
+                      value={formatSecondsAsInterval(reversibleLaytimeAudit.pool?.netPooledOverrunSeconds)}
+                      valueColor="#B45309"
+                    />
+                    <CalcRow
+                      label="Net pooled surplus"
+                      value={formatSecondsAsInterval(reversibleLaytimeAudit.pool?.netPooledSurplusSeconds)}
+                      valueColor="#22543D"
+                    />
+                  </div>
+                  {reversibleLaytimeAudit.note ? (
+                    <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45, marginTop: "8px" }}>
+                      {reversibleLaytimeAudit.note}
+                    </p>
+                  ) : null}
+                  {reversibleLaytimeAudit.warnings.length > 0 ? (
+                    <p style={{ fontSize: "11px", color: "#7C2D12", lineHeight: 1.45, marginTop: "8px" }}>
+                      {reversibleLaytimeAudit.warnings[0]}
+                    </p>
+                  ) : null}
                 </>
               )}
             </div>

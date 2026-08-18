@@ -148,7 +148,31 @@ export interface ShipmentDraft {
   receiverLaytimeAllowed: string;
   receiverDemurrageRate: string;
   deductibleCategories: string[];
+  loadingTerms?: ShipmentCommercialTermsDraft;
+  dischargeTerms?: ShipmentCommercialTermsDraft;
 }
+
+export interface ShipmentCommercialTermsDraft {
+  laytimeAllowed: string;
+  demurrageRate: string;
+  dispatchRate: string;
+  timeCountingBasis: string;
+  norNoticePeriod: string;
+  weatherWorking: "" | "Enabled" | "Disabled";
+  wibon: "" | "Enabled" | "Disabled";
+  wipon: "" | "Enabled" | "Disabled";
+}
+
+export const emptyShipmentCommercialTermsDraft: ShipmentCommercialTermsDraft = {
+  laytimeAllowed: "",
+  demurrageRate: "",
+  dispatchRate: "",
+  timeCountingBasis: "",
+  norNoticePeriod: "",
+  weatherWorking: "",
+  wibon: "",
+  wipon: "",
+};
 
 export const emptyDraft: ShipmentDraft = {
   vessel: "",
@@ -176,6 +200,8 @@ export const emptyDraft: ShipmentDraft = {
   receiverLaytimeAllowed: "",
   receiverDemurrageRate: "",
   deductibleCategories: [],
+  loadingTerms: { ...emptyShipmentCommercialTermsDraft },
+  dischargeTerms: { ...emptyShipmentCommercialTermsDraft },
 };
 
 export const REQUIRED_DRAFT_FIELDS: (keyof ShipmentDraft)[] = [

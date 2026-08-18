@@ -4,11 +4,21 @@ import {
   Edit3,
   ArrowUpRight,
   AlertTriangle,
+  Plus,
 } from "lucide-react";
 import { PageHeader } from "./Layout";
 import { RISK_LABEL, RISK_BADGE } from "./data/shipments";
 import { useShipments } from "./data/ShipmentsContext";
-import { getVoyageSummary } from "../lib/api";
+import {
+  createCpClause,
+  getVoyageCharterParty,
+  getVoyageSummary,
+  updateCpClause,
+  type CharterParty,
+  type ClauseOperation,
+  type CpClause,
+  type CpClauseParameters,
+} from "../lib/api";
 
 type TabKey = "overview" | "sof" | "laytime" | "claims" | "documents";
 type DotState = "done" | "active" | "warn" | "pending";
@@ -88,6 +98,83 @@ function formatDateTime(value: any, fallback = "Not available"): string {
   }
 
   return date.toLocaleString();
+}
+
+type ClauseScope = "Global" | ClauseOperation;
+
+const OPERATION_SCOPED_CLAUSE_TYPES = new Set([
+  "laytime_rate",
+  "demurrage_rate",
+  "despatch",
+  "shex_shinc",
+  "weather_working",
+  "wibon",
+  "wipon",
+]);
+
+const CLAUSE_TYPE_LABELS: Record<string, string> = {
+  laytime_rate: "Laytime rate",
+  demurrage_rate: "Demurrage rate",
+  despatch: "Despatch",
+  shex_shinc: "SHEX / SHINC",
+  weather_working: "Weather working",
+  wibon: "WIBON",
+  wipon: "WIPON",
+};
+
+const CLAUSE_TYPE_OPTIONS = [
+  "laytime_rate",
+  "demurrage_rate",
+  "despatch",
+  "shex_shinc",
+  "weather_working",
+  "wibon",
+  "wipon",
+] as const;
+
+function formatClauseTypeLabel(value?: string | null) {
+  if (!value) return "Clause";
+  return CLAUSE_TYPE_LABELS[value] ?? value.replace(/[_-]+/g, " ");
+}
+
+function normalizeClauseScope(operation?: string | null): ClauseScope {
+  if (operation === "Loading" || operation === "Discharge") {
+    return operation;
+  }
+
+  return "Global";
+}
+
+function isOperationScopedClause(clauseType?: string | null) {
+  return Boolean(clauseType && OPERATION_SCOPED_CLAUSE_TYPES.has(clauseType));
+}
+
+function getClauseOperation(parameters?: CpClauseParameters | null): ClauseScope {
+  return normalizeClauseScope(parameters?.operation ?? null);
+}
+
+function buildClauseParameters(
+  parametersText: string,
+  scope: ClauseScope,
+): CpClauseParameters {
+  const parsed =
+    parametersText.trim() === ""
+      ? {}
+      : (JSON.parse(parametersText) as Record<string, unknown>);
+
+  const next = { ...parsed } as CpClauseParameters;
+
+  if (scope === "Global") {
+    delete next.operation;
+  } else {
+    next.operation = scope;
+  }
+
+  return next;
+}
+
+function stringifyClauseParameters(parameters: CpClauseParameters) {
+  return JSON.stringify(parameters ?? {}, null, 2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,6 +603,56 @@ export default function ShipmentDetail() {
     setVoyageError,
   ] = useState<string | null>(null);
 
+  const [
+    charterParty,
+    setCharterParty,
+  ] = useState<CharterParty | null>(null);
+
+  const [
+    charterPartyLoading,
+    setCharterPartyLoading,
+  ] = useState<boolean>(false);
+
+  const [
+    charterPartyError,
+    setCharterPartyError,
+  ] = useState<string | null>(null);
+
+  const [
+    clauseReloadKey,
+    setClauseReloadKey,
+  ] = useState(0);
+
+  const [
+    clauseSaving,
+    setClauseSaving,
+  ] = useState(false);
+
+  const [
+    clauseSaveError,
+    setClauseSaveError,
+  ] = useState<string | null>(null);
+
+  const [clauseForm, setClauseForm] =
+    useState<{
+      clauseId: string | null;
+      clauseType: string;
+      rawText: string;
+      parametersText: string;
+      operation: ClauseScope;
+    }>({
+      clauseId: null,
+      clauseType: CLAUSE_TYPE_OPTIONS[0],
+      rawText: "",
+      parametersText: "{}",
+      operation: "Global",
+    });
+
+  const [
+    clauseEditorOpen,
+    setClauseEditorOpen,
+  ] = useState(false);
+
   // ───────────────────────────────────────────────────────────────────────────
   // Load backend summary
   // ───────────────────────────────────────────────────────────────────────────
@@ -564,6 +701,55 @@ export default function ShipmentDetail() {
   // ───────────────────────────────────────────────────────────────────────────
   // Backend data
   // ───────────────────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    let mounted = true;
+    const voyageId = voyageSummary?.voyage?.id ?? null;
+
+    async function loadCharterParty() {
+      if (!voyageId) {
+        if (!mounted) return;
+
+        setCharterParty(null);
+        setCharterPartyError(null);
+        setCharterPartyLoading(false);
+        return;
+      }
+
+      setCharterPartyLoading(true);
+      setCharterPartyError(null);
+
+      try {
+        const result = await getVoyageCharterParty(voyageId);
+
+        if (!mounted) return;
+
+        setCharterParty(result ?? null);
+      } catch (error: any) {
+        if (!mounted) return;
+
+        if (error?.status === 404) {
+          setCharterParty(null);
+          setCharterPartyError(null);
+        } else {
+          setCharterParty(null);
+          setCharterPartyError(
+            error?.message ?? "Unable to load charter party clauses."
+          );
+        }
+      } finally {
+        if (mounted) {
+          setCharterPartyLoading(false);
+        }
+      }
+    }
+
+    void loadCharterParty();
+
+    return () => {
+      mounted = false;
+    };
+  }, [voyageSummary?.voyage?.id, clauseReloadKey]);
 
   const voyage =
     voyageSummary?.voyage ?? null;
@@ -834,6 +1020,119 @@ export default function ShipmentDetail() {
   // ───────────────────────────────────────────────────────────────────────────
   // Navigation
   // ───────────────────────────────────────────────────────────────────────────
+
+  const charterPartyClauses =
+    charterParty?.clauses ?? [];
+
+  const clauseGroups = {
+    Global: charterPartyClauses.filter(
+      (clause) => getClauseOperation(clause.parameters) === "Global"
+    ),
+    Loading: charterPartyClauses.filter(
+      (clause) => getClauseOperation(clause.parameters) === "Loading"
+    ),
+    Discharge: charterPartyClauses.filter(
+      (clause) => getClauseOperation(clause.parameters) === "Discharge"
+    ),
+  } as const;
+
+  function startNewClause() {
+    setClauseSaveError(null);
+    setClauseEditorOpen(true);
+    setClauseForm({
+      clauseId: null,
+      clauseType: CLAUSE_TYPE_OPTIONS[0],
+      rawText: "",
+      parametersText: "{}",
+      operation: "Global",
+    });
+  }
+
+  function startEditClause(clause: CpClause) {
+    const parameters = (clause.parameters ?? {}) as CpClauseParameters;
+    const scope = getClauseOperation(parameters);
+
+    setClauseSaveError(null);
+    setClauseEditorOpen(true);
+    setClauseForm({
+      clauseId: clause.id,
+      clauseType: clause.clauseType,
+      rawText: clause.rawText ?? "",
+      parametersText: stringifyClauseParameters(parameters),
+      operation: scope,
+    });
+  }
+
+  async function saveClause() {
+    if (!charterParty) {
+      setClauseSaveError(
+        "Load a charter party before creating or editing clauses."
+      );
+      return;
+    }
+
+    if (!clauseForm.rawText.trim()) {
+      setClauseSaveError("Clause text is required.");
+      return;
+    }
+
+    let parameters: CpClauseParameters;
+
+    try {
+      parameters = buildClauseParameters(
+        clauseForm.parametersText,
+        clauseForm.operation
+      );
+    } catch {
+      setClauseSaveError("Clause parameters must be valid JSON.");
+      return;
+    }
+
+    setClauseSaving(true);
+    setClauseSaveError(null);
+
+    try {
+      const payload = {
+        clauseType: clauseForm.clauseType,
+        rawText: clauseForm.rawText.trim(),
+        parameters,
+      };
+
+      if (clauseForm.clauseId) {
+        await updateCpClause(clauseForm.clauseId, payload);
+      } else {
+        await createCpClause(charterParty.id, payload);
+      }
+
+      setClauseForm({
+        clauseId: null,
+        clauseType: CLAUSE_TYPE_OPTIONS[0],
+        rawText: "",
+        parametersText: "{}",
+        operation: "Global",
+      });
+      setClauseEditorOpen(false);
+      setClauseReloadKey((value) => value + 1);
+    } catch (error: any) {
+      setClauseSaveError(
+        error?.message ?? "Unable to save clause."
+      );
+    } finally {
+      setClauseSaving(false);
+    }
+  }
+
+  function cancelClauseEdit() {
+    setClauseSaveError(null);
+    setClauseEditorOpen(false);
+    setClauseForm({
+      clauseId: null,
+      clauseType: CLAUSE_TYPE_OPTIONS[0],
+      rawText: "",
+      parametersText: "{}",
+      operation: "Global",
+    });
+  }
 
   const onOpenClaim = () => {
     navigate("/claims/new");
@@ -1824,6 +2123,356 @@ export default function ShipmentDetail() {
               last
             />
           </div>
+
+          <div
+            className="rounded-xl border p-[16px_18px]"
+            style={{
+              borderColor: "#E5E7EB",
+              borderWidth: "0.5px",
+              backgroundColor: "#ffffff",
+            }}
+          >
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <span
+                style={{
+                  fontSize: "11px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                Charter party clauses
+              </span>
+
+              <button
+                type="button"
+                onClick={startNewClause}
+                disabled={!charterParty || charterPartyLoading}
+                className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 transition-colors cursor-pointer disabled:cursor-not-allowed"
+                style={{
+                  fontSize: "11px",
+                  color:
+                    !charterParty || charterPartyLoading
+                      ? "#9CA3AF"
+                      : "#374151",
+                  borderColor: "#E5E7EB",
+                  borderWidth: "0.5px",
+                  backgroundColor: "#ffffff",
+                }}
+              >
+                <Plus size={11} />
+                Add clause
+              </button>
+            </div>
+
+            {charterPartyLoading ? (
+              <p style={{ fontSize: "12px", color: "#6B7280" }}>
+                Loading charter party clauses...
+              </p>
+            ) : charterPartyError ? (
+              <p style={{ fontSize: "12px", color: "#B45309", lineHeight: 1.4 }}>
+                Unable to load charter party clauses: {charterPartyError}
+              </p>
+            ) : !charterParty ? (
+              <p style={{ fontSize: "12px", color: "#6B7280", lineHeight: 1.4 }}>
+                No charter party is attached to this voyage yet.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {clauseEditorOpen && (
+                  <div
+                    className="rounded-lg border p-3"
+                    style={{
+                      borderColor: "#E5E7EB",
+                      borderWidth: "0.5px",
+                      backgroundColor: "#F9FAFB",
+                    }}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span
+                        style={{
+                          fontSize: "12px",
+                          fontWeight: 500,
+                          color: "#111827",
+                        }}
+                      >
+                        {clauseForm.clauseId ? "Edit clause" : "New clause"}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="flex flex-col gap-1">
+                        <span style={{ fontSize: "10px", color: "#6B7280" }}>
+                          Clause type
+                        </span>
+                        <select
+                          value={clauseForm.clauseType}
+                          onChange={(event) =>
+                            setClauseForm((current) => ({
+                              ...current,
+                              clauseType: event.target.value,
+                            }))
+                          }
+                          className="w-full appearance-none outline-none cursor-pointer"
+                          style={{
+                            height: "32px",
+                            border: "0.5px solid #E5E7EB",
+                            borderRadius: "8px",
+                            padding: "0 10px",
+                            fontSize: "12px",
+                            color: "#111827",
+                            backgroundColor: "#ffffff",
+                          }}
+                        >
+                          {Array.from(
+                            new Set([
+                              ...CLAUSE_TYPE_OPTIONS,
+                              clauseForm.clauseType,
+                            ]),
+                          ).map((option) => (
+                            <option key={option} value={option}>
+                              {formatClauseTypeLabel(option)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="flex flex-col gap-1">
+                        <span style={{ fontSize: "10px", color: "#6B7280" }}>
+                          Operation
+                        </span>
+                        <select
+                          value={clauseForm.operation}
+                          onChange={(event) => {
+                            const nextOperation = event.target.value as ClauseScope;
+
+                            setClauseForm((current) => {
+                              try {
+                                const nextParameters = buildClauseParameters(
+                                  current.parametersText,
+                                  nextOperation,
+                                );
+
+                                return {
+                                  ...current,
+                                  operation: nextOperation,
+                                  parametersText: stringifyClauseParameters(nextParameters),
+                                };
+                              } catch {
+                                return {
+                                  ...current,
+                                  operation: nextOperation,
+                                };
+                              }
+                            });
+                          }}
+                          className="w-full appearance-none outline-none cursor-pointer"
+                          style={{
+                            height: "32px",
+                            border: "0.5px solid #E5E7EB",
+                            borderRadius: "8px",
+                            padding: "0 10px",
+                            fontSize: "12px",
+                            color: "#111827",
+                            backgroundColor: "#ffffff",
+                          }}
+                        >
+                          <option value="Global">Global</option>
+                          <option value="Loading">Loading</option>
+                          <option value="Discharge">Discharge</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    {isOperationScopedClause(clauseForm.clauseType) ? (
+                      <p style={{ fontSize: "10px", color: "#6B7280", marginTop: "6px" }}>
+                        Global removes <code>parameters.operation</code>.
+                      </p>
+                    ) : (
+                      <p style={{ fontSize: "10px", color: "#6B7280", marginTop: "6px" }}>
+                        Scope is only used for the supported laytime and rate clauses.
+                      </p>
+                    )}
+
+                    <label className="flex flex-col gap-1 mt-3">
+                      <span style={{ fontSize: "10px", color: "#6B7280" }}>
+                        Raw text
+                      </span>
+                      <textarea
+                        value={clauseForm.rawText}
+                        onChange={(event) =>
+                          setClauseForm((current) => ({
+                            ...current,
+                            rawText: event.target.value,
+                          }))
+                        }
+                        rows={3}
+                        className="w-full outline-none"
+                        style={{
+                          border: "0.5px solid #E5E7EB",
+                          borderRadius: "8px",
+                          padding: "8px 10px",
+                          fontSize: "12px",
+                          color: "#111827",
+                          backgroundColor: "#ffffff",
+                          resize: "vertical",
+                        }}
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 mt-3">
+                      <span style={{ fontSize: "10px", color: "#6B7280" }}>
+                        Parameters JSON
+                      </span>
+                      <textarea
+                        value={clauseForm.parametersText}
+                        onChange={(event) =>
+                          setClauseForm((current) => ({
+                            ...current,
+                            parametersText: event.target.value,
+                          }))
+                        }
+                        rows={5}
+                        className="w-full outline-none"
+                        style={{
+                          border: "0.5px solid #E5E7EB",
+                          borderRadius: "8px",
+                          padding: "8px 10px",
+                          fontSize: "12px",
+                          color: "#111827",
+                          backgroundColor: "#ffffff",
+                          resize: "vertical",
+                          fontFamily: "monospace",
+                        }}
+                      />
+                    </label>
+
+                    {clauseSaveError && (
+                      <p style={{ marginTop: "8px", fontSize: "12px", color: "#B45309" }}>
+                        {clauseSaveError}
+                      </p>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2 mt-3">
+                      <button
+                        type="button"
+                        onClick={cancelClauseEdit}
+                        className="rounded-md border px-3 py-1.5 text-xs cursor-pointer"
+                        style={{
+                          color: "#374151",
+                          borderColor: "#E5E7EB",
+                          borderWidth: "0.5px",
+                          backgroundColor: "#ffffff",
+                        }}
+                      >
+                        Cancel
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void saveClause()}
+                        disabled={clauseSaving}
+                        className="rounded-md px-3 py-1.5 text-xs cursor-pointer disabled:cursor-not-allowed"
+                        style={{
+                          color: "#ffffff",
+                          backgroundColor: clauseSaving ? "#93C5FD" : "#1A4ED8",
+                          border: "none",
+                        }}
+                      >
+                        {clauseSaving ? "Saving..." : "Save clause"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {(["Global", "Loading", "Discharge"] as ClauseScope[]).map((scope) => {
+                  const groupedClauses = clauseGroups[scope];
+
+                  if (groupedClauses.length === 0) {
+                    return null;
+                  }
+
+                  return (
+                    <div key={scope}>
+                      <p
+                        style={{
+                          fontSize: "10px",
+                          color: "#9CA3AF",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.05em",
+                          marginBottom: "6px",
+                        }}
+                      >
+                        {scope}
+                      </p>
+
+                      <div className="flex flex-col gap-2">
+                        {groupedClauses.map((clause) => {
+                          const clauseScope = getClauseOperation(clause.parameters);
+                          return (
+                            <div
+                              key={clause.id}
+                              className="rounded-lg border p-3"
+                              style={{
+                                borderColor: "#E5E7EB",
+                                borderWidth: "0.5px",
+                                backgroundColor: "#F9FAFB",
+                              }}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p
+                                    style={{
+                                      fontSize: "12px",
+                                      fontWeight: 500,
+                                      color: "#111827",
+                                      marginBottom: "2px",
+                                    }}
+                                  >
+                                    {formatClauseTypeLabel(clause.clauseType)} — {clauseScope}
+                                  </p>
+                                  <p
+                                    style={{
+                                      fontSize: "11px",
+                                      color: "#6B7280",
+                                      lineHeight: 1.45,
+                                    }}
+                                  >
+                                    {clause.rawText}
+                                  </p>
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => startEditClause(clause)}
+                                  className="rounded-md border px-2 py-1 text-xs cursor-pointer flex-shrink-0"
+                                  style={{
+                                    color: "#374151",
+                                    borderColor: "#E5E7EB",
+                                    borderWidth: "0.5px",
+                                    backgroundColor: "#ffffff",
+                                  }}
+                                >
+                                  Edit
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {charterPartyClauses.length === 0 && !clauseEditorOpen && (
+                  <p style={{ fontSize: "12px", color: "#6B7280", lineHeight: 1.4 }}>
+                    No charter party clauses have been added yet.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
         </div>
 
         {/* RIGHT SIDEBAR */}

@@ -25,6 +25,8 @@ export interface LaytimeEngineInput {
   clauses: EngineClause[];
   norDocuments: EngineNor[];
   sofEvents: EngineSofEvent[];
+  /** Voyage operation already selected for this calculation stream. */
+  operation?: 'Loading' | 'Discharge';
 }
 
 export interface EnginePeriod {
@@ -56,6 +58,19 @@ export interface LaytimeEngineResult {
   periods: EnginePeriod[];
   /** Exceptions ignored because the vessel was already on demurrage. */
   ignoredExceptions: EngineIgnoredException[];
+  /** ATUTC state and restored SHEX overlap audit. */
+  atutc: {
+    clauseId: string | null;
+    clauseParameters: Record<string, unknown> | null;
+    enabled: boolean;
+    applied: boolean;
+    restoredSeconds: number;
+    restoredIntervals: Array<{
+      startTime: Date;
+      endTime: Date;
+    }>;
+    limitation: string;
+  };
   /** Non-fatal notes: unsupported clauses, missing rates, applied defaults. */
   warnings: string[];
 }

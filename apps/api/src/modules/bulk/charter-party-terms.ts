@@ -1,5 +1,21 @@
 import { EngineClause } from './laytime/laytime.types';
 
+export const COMMERCIAL_CLAUSE_OPERATIONS = ['Loading', 'Discharge'] as const;
+export type CommercialClauseOperation =
+  (typeof COMMERCIAL_CLAUSE_OPERATIONS)[number];
+
+export const SUPPORTED_COMMERCIAL_CLAUSE_TYPES = [
+  'laytime_rate',
+  'demurrage_rate',
+  'despatch',
+  'shex_shinc',
+  'weather_working',
+  'wibon',
+  'wipon',
+  'reversible_laytime',
+  'atutc',
+] as const;
+
 export interface CommercialTermsSource {
   id: string;
   laytimeAllowed?: number | string | null;
@@ -11,6 +27,23 @@ export interface CommercialTermsSource {
 
 export interface NormalizedCommercialClause extends EngineClause {
   rawText: string;
+}
+
+function isCommercialClauseOperation(
+  value: unknown,
+): value is CommercialClauseOperation {
+  return (
+    typeof value === 'string' &&
+    (COMMERCIAL_CLAUSE_OPERATIONS as readonly string[]).includes(value)
+  );
+}
+
+function getClauseOperation(
+  clause: EngineClause,
+): CommercialClauseOperation | undefined {
+  const operation = clause.parameters.operation;
+
+  return isCommercialClauseOperation(operation) ? operation : undefined;
 }
 
 export function normalizeCommercialTermsToClauses(
@@ -73,6 +106,54 @@ export function normalizeCommercialTermsToClauses(
   }
 
   return clauses;
+}
+
+export function resolveClausesForOperation(
+  clauses: EngineClause[],
+  operation: CommercialClauseOperation,
+  warnings: string[] = [],
+): EngineClause[] {
+  const clauseTypes: string[] = [];
+  const seenTypes = new Set<string>();
+
+  for (const clause of clauses) {
+    if (seenTypes.has(clause.clauseType)) {
+      continue;
+    }
+
+    seenTypes.add(clause.clauseType);
+    clauseTypes.push(clause.clauseType);
+  }
+
+  return clauseTypes.flatMap((clauseType) => {
+    const sameTypeClauses = clauses.filter(
+      (clause) => clause.clauseType === clauseType,
+    );
+    const matchingOperationClauses = sameTypeClauses.filter(
+      (clause) => getClauseOperation(clause) === operation,
+    );
+    const globalClauses = sameTypeClauses.filter(
+      (clause) => getClauseOperation(clause) === undefined,
+    );
+
+    if (matchingOperationClauses.length > 1) {
+      warnings.push(
+        `Multiple "${clauseType}" clauses found for operation "${operation}"; the first one was used.`,
+      );
+    }
+
+    if (matchingOperationClauses.length > 0) {
+      return [matchingOperationClauses[0]];
+    }
+
+    if (globalClauses.length > 1) {
+      warnings.push(
+        `Multiple "${clauseType}" clauses found; the first one was used.`,
+      );
+    }
+
+    return globalClauses.length > 0 ? [globalClauses[0]] : [];
+  });
 }
 
 export function parseNoticeHours(value?: string | null): number | undefined {

@@ -13,6 +13,12 @@ const laytimeRate: EngineClause = {
   parameters: { rate: 10_000, unit: 'MT', noticeHours: 6 },
 };
 
+const extendedLaytimeRate: EngineClause = {
+  id: 'clause-laytime-fixed',
+  clauseType: 'laytime_rate',
+  parameters: { hours: 120, noticeHours: 6 },
+};
+
 const demurrageRate: EngineClause = {
   id: 'clause-demurrage',
   clauseType: 'demurrage_rate',
@@ -25,14 +31,55 @@ const despatch: EngineClause = {
   parameters: { halfDemurrage: true },
 };
 
+const atutcEnabled: EngineClause = {
+  id: 'clause-atutc',
+  clauseType: 'atutc',
+  parameters: { enabled: true },
+};
+
+const atutcDisabled: EngineClause = {
+  id: 'clause-atutc-disabled',
+  clauseType: 'atutc',
+  parameters: { enabled: false },
+};
+
+const shexEnabled: EngineClause = {
+  id: 'clause-shex',
+  clauseType: 'shex_shinc',
+  parameters: { shex: true },
+};
+
+const shinc: EngineClause = {
+  id: 'clause-shinc',
+  clauseType: 'shex_shinc',
+  parameters: { shex: false },
+};
+
+const weatherWorking: EngineClause = {
+  id: 'clause-weather-working',
+  clauseType: 'weather_working',
+  parameters: { enabled: true },
+};
+
 /** Wednesday, so the default window never crosses a weekend. */
 const NOR_TENDERED = new Date('2026-03-04T00:00:00Z');
+const FRIDAY_NOR = new Date('2026-03-06T00:00:00Z');
+const SATURDAY_20 = new Date('2026-03-07T20:00:00Z');
+const SUNDAY_00 = new Date('2026-03-08T00:00:00Z');
+const SUNDAY_08 = new Date('2026-03-08T08:00:00Z');
+const SUNDAY_10 = new Date('2026-03-08T10:00:00Z');
+const SUNDAY_12 = new Date('2026-03-08T12:00:00Z');
+const SUNDAY_14 = new Date('2026-03-08T14:00:00Z');
+const SUNDAY_END = new Date('2026-03-09T00:00:00Z');
+const MONDAY_00 = new Date('2026-03-09T00:00:00Z');
+const MONDAY_06 = new Date('2026-03-09T06:00:00Z');
 
 function buildInput(overrides: Partial<LaytimeEngineInput> = {}) {
   return {
     cargoQuantity: 20_000,
     clauses: [laytimeRate, demurrageRate, despatch],
     norDocuments: [{ tenderTime: NOR_TENDERED, acceptedTime: NOR_TENDERED }],
+    operation: 'Loading' as const,
     sofEvents: [
       { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
       {
@@ -626,6 +673,412 @@ describe('runLaytimeEngine', () => {
     );
     expect(result.commencedAt.toISOString()).toBe('2026-03-04T06:00:00.000Z');
     expect(result.usedSeconds).toBe(172800);
+  });
+
+  it('recognizes enabled ATUTC and exposes it in the audit output without applying it', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, atutcEnabled],
+      }),
+    );
+
+    expect(result.warnings).not.toContain(
+      'Clause type "atutc" is not yet supported by the laytime engine and was ignored.',
+    );
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        clauseId: 'clause-atutc',
+        enabled: true,
+        applied: false,
+        limitation:
+          'ATUTC is applied only to SHEX-excepted periods in this engine version.',
+      }),
+    );
+  });
+
+  it('reports a disabled ATUTC clause without applying it', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, atutcDisabled],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        clauseId: 'clause-atutc-disabled',
+        enabled: false,
+        applied: false,
+      }),
+    );
+  });
+
+  it('reports ATUTC as disabled when no clause exists', () => {
+    const result = runLaytimeEngine(buildInput());
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        clauseId: null,
+        enabled: false,
+        applied: false,
+      }),
+    );
+  });
+
+  it('keeps the same numerical result with or without ATUTC', () => {
+    const baseline = runLaytimeEngine(buildInput());
+    const withAtutc = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, atutcEnabled],
+      }),
+    );
+
+    expect(withAtutc.usedSeconds).toBe(baseline.usedSeconds);
+    expect(withAtutc.demurrageAmount).toBe(baseline.demurrageAmount);
+    expect(withAtutc.despatchAmount).toBe(baseline.despatchAmount);
+    expect(withAtutc.periods).toEqual(baseline.periods);
+  });
+
+  it('preserves the SHEX exclusion when ATUTC is absent', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [extendedLaytimeRate, demurrageRate, despatch, shexEnabled],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        applied: false,
+        restoredSeconds: 0,
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 00:00:00');
+    expect(result.periods.map((period) => period.periodType)).toEqual([
+      'laytime',
+      'exception',
+      'laytime',
+    ]);
+  });
+
+  it('preserves the SHEX exclusion when ATUTC is explicitly disabled', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          atutcDisabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        applied: false,
+        restoredSeconds: 0,
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 00:00:00');
+  });
+
+  it('leaves Sunday fully excluded when ATUTC is enabled but no Sunday work is present', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: MONDAY_00, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        applied: false,
+        restoredSeconds: 0,
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 00:00:00');
+    expect(result.periods.map((period) => period.periodType)).toEqual([
+      'laytime',
+      'exception',
+      'laytime',
+    ]);
+  });
+
+  it('restores only the actual cargo-working overlap inside a partial Sunday SHEX period', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        applied: true,
+        restoredSeconds: 57_600,
+      }),
+    );
+    expect(result.atutc.restoredIntervals).toEqual([
+      {
+        startTime: SUNDAY_08,
+        endTime: SUNDAY_END,
+      },
+    ]);
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 16:00:00');
+    expect(result.periods.map((period) => period.periodType)).toEqual([
+      'laytime',
+      'exception',
+      'laytime',
+    ]);
+  });
+
+  it('restores the entire Sunday work interval when cargo work spans the full SHEX day', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_00, eventType: 'CARGO_STARTED' },
+          { eventTime: SUNDAY_END, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        applied: true,
+        restoredSeconds: 86_400,
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 18:00:00');
+    expect(result.periods.every((period) => period.periodType === 'laytime')).toBe(
+      true,
+    );
+  });
+
+  it('restores only the Sunday portion of a work interval that crosses into and out of Sunday', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SATURDAY_20, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        applied: true,
+        restoredSeconds: 86_400,
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('3 days 00:00:00');
+    expect(result.periods.every((period) => period.periodType === 'laytime')).toBe(
+      true,
+    );
+  });
+
+  it('keeps weather deductions separate from ATUTC-restored SHEX time', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          weatherWorking,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: SUNDAY_10, eventType: 'RAIN_STOPPAGE' },
+          { eventTime: SUNDAY_12, eventType: 'RAIN_STOPPED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(secondsToInterval(result.weatherDeductedSeconds)).toBe('0 days 02:00:00');
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        applied: true,
+        restoredSeconds: 57_600,
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 14:00:00');
+    expect(result.periods.map((period) => period.periodType)).toEqual([
+      'laytime',
+      'exception',
+      'laytime',
+      'exception',
+      'laytime',
+    ]);
+  });
+
+  it('keeps generic stoppages separate from ATUTC-restored SHEX time', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: SUNDAY_10, eventType: 'BREAKDOWN' },
+          { eventTime: SUNDAY_12, eventType: 'BREAKDOWN_REPAIRED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        applied: true,
+        restoredSeconds: 7_200,
+      }),
+    );
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 02:00:00');
+    expect(result.periods.map((period) => period.periodType)).toEqual([
+      'laytime',
+      'exception',
+      'laytime',
+      'exception',
+      'laytime',
+    ]);
+  });
+
+  it('leaves SHINC unaffected by ATUTC', () => {
+    const baseline = runLaytimeEngine(
+      buildInput({
+        clauses: [extendedLaytimeRate, demurrageRate, despatch, shinc],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+    const withAtutc = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shinc,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(withAtutc.usedSeconds).toBe(baseline.usedSeconds);
+    expect(withAtutc.demurrageAmount).toBe(baseline.demurrageAmount);
+    expect(withAtutc.despatchAmount).toBe(baseline.despatchAmount);
+    expect(withAtutc.periods).toEqual(baseline.periods);
+  });
+
+  it('records the restored ATUTC overlap in the audit output', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          extendedLaytimeRate,
+          demurrageRate,
+          despatch,
+          shexEnabled,
+          atutcEnabled,
+        ],
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [
+          { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+          { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+          { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        ],
+      }),
+    );
+
+    expect(result.atutc).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        applied: true,
+        restoredSeconds: 57_600,
+      }),
+    );
+    expect(result.atutc.restoredIntervals).toEqual([
+      {
+        startTime: SUNDAY_08,
+        endTime: SUNDAY_END,
+      },
+    ]);
   });
 
   it('treats disabled WIPON as a recognized no-op', () => {

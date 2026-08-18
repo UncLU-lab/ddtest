@@ -7,6 +7,14 @@ import {
   LaytimeEngineInput,
   LaytimeEngineResult,
 } from './laytime.types';
+import {
+  deriveCargoWorkingIntervals,
+  type CargoWorkingInterval,
+} from './cargo-working-intervals';
+import {
+  intersectWorkingWithExceptedIntervals,
+  type TimeInterval,
+} from './interval-overlap';
 import { secondsToDays } from './interval.util';
 
 const HOUR_SECONDS = 3600;
@@ -27,6 +35,7 @@ const SUPPORTED_CLAUSE_TYPES = new Set([
   'weather_working',
   'wibon',
   'wipon',
+  'atutc',
 ]);
 
 /** SOF event marking NOR tender, used when no nor_documents row exists. */
@@ -59,7 +68,7 @@ interface ExceptionInterval {
   start: Date;
   end: Date;
   clauseId: string | null;
-  kind: 'generic' | 'weather';
+  kind: 'generic' | 'weather' | 'shex';
 }
 
 /**
@@ -79,6 +88,8 @@ export function runLaytimeEngine(
 ): LaytimeEngineResult {
   const warnings: string[] = [];
   const clauses = indexClauses(input.clauses, warnings);
+  const atutc = resolveAtutcState(clauses.atutc);
+  const operation = input.operation ?? 'Loading';
 
   const commencedAt = resolveCommencement(input, clauses.laytimeRate, warnings);
   const completedAt = resolveCompletion(input.sofEvents);
@@ -94,7 +105,7 @@ export function runLaytimeEngine(
     input.cargoQuantity,
   );
 
-  const exceptions = collectExceptions(
+  const collectedExceptions = collectExceptions(
     input.sofEvents,
     clauses.shex,
     clauses.weatherWorking,
@@ -102,6 +113,49 @@ export function runLaytimeEngine(
     completedAt,
     warnings,
   );
+
+  let exceptions = sortExceptionIntervals(collectedExceptions.intervals);
+
+  if (atutc.enabled) {
+    const workingIntervals = deriveCargoWorkingIntervals(
+      input.sofEvents.map((event) => ({
+        ...event,
+        operation,
+      })),
+      {
+        operation,
+        laytimeCommencement: commencedAt,
+        cargoCompletion: completedAt,
+      },
+    );
+    warnings.push(...workingIntervals.warnings);
+
+    const shexIntervals = exceptions.filter((interval) => interval.kind === 'shex');
+    const restoredOverlap = intersectWorkingWithExceptedIntervals(
+      workingIntervals.intervals as CargoWorkingInterval[],
+      shexIntervals as TimeInterval[],
+    );
+    const adjustedShexIntervals = subtractIntervals(
+      shexIntervals,
+      restoredOverlap.intervals,
+    );
+
+    exceptions = mergeIntervals(
+      sortExceptionIntervals([
+        ...exceptions.filter((interval) => interval.kind !== 'shex'),
+        ...adjustedShexIntervals,
+      ]),
+    );
+
+    atutc.applied = restoredOverlap.totalOverlapSeconds > 0;
+    atutc.restoredSeconds = restoredOverlap.totalOverlapSeconds;
+    atutc.restoredIntervals = restoredOverlap.intervals.map((interval) => ({
+      startTime: interval.start,
+      endTime: interval.end,
+    }));
+  } else {
+    exceptions = mergeIntervals(exceptions);
+  }
 
   const {
     periods,
@@ -115,6 +169,7 @@ export function runLaytimeEngine(
       completedAt,
       exceptions,
       allowedSeconds,
+      collectedExceptions.weatherDeductedSeconds,
     );
 
   const { demurrageAmount, despatchAmount } = priceResult(
@@ -136,6 +191,7 @@ export function runLaytimeEngine(
     periods,
     ignoredExceptions,
     warnings,
+    atutc,
   };
 }
 
@@ -147,6 +203,7 @@ interface IndexedClauses {
   weatherWorking?: EngineClause;
   wibon?: EngineClause;
   wipon?: EngineClause;
+  atutc?: EngineClause;
 }
 
 function indexClauses(
@@ -179,6 +236,9 @@ function indexClauses(
       case 'wipon':
         indexed.wipon ??= clause;
         break;
+      case 'atutc':
+        indexed.atutc ??= clause;
+        break;
       default:
         unsupported.add(clause.clauseType);
     }
@@ -203,6 +263,24 @@ function indexClauses(
   }
 
   return indexed;
+}
+
+function resolveAtutcState(
+  atutcClause: EngineClause | undefined,
+): LaytimeEngineResult['atutc'] {
+  const enabled = readBoolean(atutcClause?.parameters, ['enabled']) === true;
+
+  return {
+    clauseId: atutcClause?.id ?? null,
+    clauseParameters: atutcClause ? atutcClause.parameters : null,
+    enabled,
+    applied: false,
+    restoredSeconds: 0,
+    restoredIntervals: [],
+    limitation: enabled
+      ? 'ATUTC is applied only to SHEX-excepted periods in this engine version.'
+      : 'ATUTC is not enabled by the persisted Charter Party rule.',
+  };
 }
 
 function resolveCommencement(
@@ -306,6 +384,11 @@ function resolveAllowedLaytime(
   );
 }
 
+interface CollectedExceptions {
+  intervals: ExceptionInterval[];
+  weatherDeductedSeconds: number;
+}
+
 function collectExceptions(
   sofEvents: EngineSofEvent[],
   shexClause: EngineClause | undefined,
@@ -313,7 +396,7 @@ function collectExceptions(
   commencedAt: Date,
   completedAt: Date,
   warnings: string[],
-): ExceptionInterval[] {
+): CollectedExceptions {
   const weatherWorkingEnabled =
     readBoolean(weatherWorkingClause?.parameters, ['enabled']) === true;
   const raw: ExceptionInterval[] = [
@@ -334,7 +417,16 @@ function collectExceptions(
     .filter((interval) => interval.end.getTime() > interval.start.getTime())
     .sort((a, b) => a.start.getTime() - b.start.getTime());
 
-  return mergeIntervals(clamped);
+  return {
+    intervals: clamped,
+    weatherDeductedSeconds: clamped
+      .filter((interval) => interval.kind === 'weather')
+      .reduce(
+        (sum, interval) =>
+          sum + (interval.end.getTime() - interval.start.getTime()) / 1000,
+        0,
+      ),
+  };
 }
 
 function collectGenericStoppages(
@@ -464,7 +556,7 @@ function collectExceptedDays(
         start: new Date(cursor),
         end: new Date(cursor.getTime() + DAY_SECONDS * 1000),
         clauseId: shexClause.id,
-        kind: 'generic',
+        kind: 'shex',
       });
     }
     cursor.setUTCDate(cursor.getUTCDate() + 1);
@@ -492,11 +584,98 @@ function mergeIntervals(sorted: ExceptionInterval[]): ExceptionInterval[] {
   return merged;
 }
 
+function sortExceptionIntervals(intervals: ExceptionInterval[]): ExceptionInterval[] {
+  return [...intervals].sort(
+    (left, right) =>
+      left.start.getTime() - right.start.getTime() ||
+      left.end.getTime() - right.end.getTime(),
+  );
+}
+
+function subtractIntervals(
+  source: ExceptionInterval[],
+  removals: TimeInterval[],
+): ExceptionInterval[] {
+  if (source.length === 0 || removals.length === 0) {
+    return source.map((interval) => ({ ...interval }));
+  }
+
+  const result: ExceptionInterval[] = [];
+  const orderedSource = sortExceptionIntervals(source);
+  const orderedRemovals = [...removals].sort(
+    (left, right) =>
+      left.start.getTime() - right.start.getTime() ||
+      left.end.getTime() - right.end.getTime(),
+  );
+
+  let removalIndex = 0;
+
+  for (const interval of orderedSource) {
+    if (interval.kind !== 'shex') {
+      result.push({ ...interval });
+      continue;
+    }
+
+    while (
+      removalIndex < orderedRemovals.length &&
+      orderedRemovals[removalIndex].end.getTime() <= interval.start.getTime()
+    ) {
+      removalIndex += 1;
+    }
+
+    let cursor = interval.start;
+    let currentRemovalIndex = removalIndex;
+
+    while (currentRemovalIndex < orderedRemovals.length) {
+      const removal = orderedRemovals[currentRemovalIndex];
+      if (removal.start.getTime() >= interval.end.getTime()) {
+        break;
+      }
+
+      const fragmentEnd = new Date(
+        Math.min(removal.start.getTime(), interval.end.getTime()),
+      );
+      if (fragmentEnd.getTime() > cursor.getTime()) {
+        result.push({
+          start: new Date(cursor),
+          end: fragmentEnd,
+          clauseId: interval.clauseId,
+          kind: interval.kind,
+        });
+      }
+
+      if (removal.end.getTime() > cursor.getTime()) {
+        cursor = new Date(Math.max(cursor.getTime(), removal.end.getTime()));
+      }
+
+      if (cursor.getTime() >= interval.end.getTime()) {
+        break;
+      }
+
+      currentRemovalIndex += 1;
+    }
+
+    if (cursor.getTime() < interval.end.getTime()) {
+      result.push({
+        start: new Date(cursor),
+        end: new Date(interval.end),
+        clauseId: interval.clauseId,
+        kind: interval.kind,
+      });
+    }
+  }
+
+  return result.filter(
+    (interval) => interval.end.getTime() > interval.start.getTime(),
+  );
+}
+
 function buildPeriods(
   commencedAt: Date,
   completedAt: Date,
   exceptions: ExceptionInterval[],
   allowedSeconds: number,
+  _weatherDeductedSeconds: number,
 ): {
   periods: EnginePeriod[];
   usedSeconds: number;
@@ -584,16 +763,16 @@ function buildPeriods(
       });
       usedSeconds += (exception.end.getTime() - exception.start.getTime()) / 1000;
     } else {
-      if (exception.kind === 'weather') {
-        weatherDeductedSeconds +=
-          (exception.end.getTime() - exception.start.getTime()) / 1000;
-      }
       periods.push({
         startTime: exception.start,
         endTime: exception.end,
         periodType: 'exception',
         appliedClauseId: exception.clauseId,
       });
+      if (exception.kind === 'weather') {
+        weatherDeductedSeconds +=
+          (exception.end.getTime() - exception.start.getTime()) / 1000;
+      }
     }
     cursor = exception.end;
   }

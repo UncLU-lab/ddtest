@@ -65,6 +65,7 @@ const EXPECTED_ROUTES = [
   'GET /voyages/:voyageId/laytime-calculations',
   'POST /voyages/:voyageId/laytime-calculations',
   'GET /laytime-calculations/:calculationId',
+  'GET /laytime-calculations/:calculationId/operation-results',
   'GET /laytime-calculations/:calculationId/audit',
   'GET /laytime-calculations/:calculationId/periods',
   'POST /laytime-calculations/:calculationId/finalize',

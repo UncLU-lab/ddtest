@@ -46,6 +46,13 @@ export class LaytimeCalculationsController {
     return this.calculationsService.findOne(calculationId);
   }
 
+  @Get('laytime-calculations/:calculationId/operation-results')
+  findOperationChildren(
+    @Param('calculationId', ParseUUIDPipe) calculationId: string,
+  ): Promise<LaytimeCalculation[]> {
+    return this.calculationsService.findOperationChildren(calculationId);
+  }
+
   @Get('laytime-calculations/:calculationId/audit')
   getAudit(
     @Param('calculationId', ParseUUIDPipe) calculationId: string,

@@ -21,6 +21,10 @@ export type LaytimeCalculationStatus =
 @Index('idx_laytime_calc_voyage', ['voyageId'])
 @Index('idx_laytime_calc_voyage_parent_version', ['voyageId', 'parentCalculationId', 'version'])
 @Index('idx_laytime_calc_parent_operation', ['parentCalculationId', 'operation'])
+@Index('uq_laytime_calc_parent_operation_child', ['parentCalculationId', 'operation'], {
+  unique: true,
+  where: '"parent_calculation_id" IS NOT NULL',
+})
 export class LaytimeCalculation extends UuidEntity {
   @Column({ name: 'voyage_id', type: 'uuid' })
   voyageId!: string;
@@ -32,14 +36,14 @@ export class LaytimeCalculation extends UuidEntity {
   @Column({ name: 'parent_calculation_id', type: 'uuid', nullable: true })
   parentCalculationId?: string | null;
 
-  @ManyToOne(() => LaytimeCalculation, (calculation) => calculation.childCalculations, {
+  @ManyToOne(() => LaytimeCalculation, (calculation) => calculation.children, {
     nullable: true,
   })
   @JoinColumn({ name: 'parent_calculation_id' })
   parentCalculation?: LaytimeCalculation | null;
 
   @OneToMany(() => LaytimeCalculation, (calculation) => calculation.parentCalculation)
-  childCalculations?: LaytimeCalculation[];
+  children?: LaytimeCalculation[];
 
   @Column({ name: 'operation', type: 'varchar', length: 20, nullable: true })
   operation?: LaytimeOperation | null;

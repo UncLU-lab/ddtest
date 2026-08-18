@@ -1,11 +1,12 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
 import { Paginated, paginate } from '../../../common/dto/paginated';
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 import { CalculationPeriod } from '../entities/calculation-period.entity';
@@ -14,12 +15,25 @@ import { LaytimeCalculation } from '../entities/laytime-calculation.entity';
 import { NorDocument } from '../entities/nor-document.entity';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
-import { normalizeCommercialTermsToClauses } from '../charter-party-terms';
+import {
+  normalizeCommercialTermsToClauses,
+  resolveClausesForOperation,
+} from '../charter-party-terms';
 import { LAYTIME_ENGINE_VERSION, runLaytimeEngine } from '../laytime/laytime.engine';
-import { EngineClause, LaytimeEngineError } from '../laytime/laytime.types';
+import {
+  EngineClause,
+  LaytimeEngineError,
+  type LaytimeEngineResult,
+} from '../laytime/laytime.types';
 import { secondsToInterval } from '../laytime/interval.util';
 import { type LaytimeOperation } from '../entities/voyage.entity';
 import { VoyagesService } from '../voyages/voyages.service';
+import {
+  analyzeReversibleLaytime,
+  resolveReversibleLaytimeRule,
+  type ReversibleLaytimeAnalysis,
+  type ReversibleLaytimeRuleEvidence,
+} from './reversible-laytime-analysis';
 
 /** A calculation plus the engine notes that produced it. */
 export interface CalculationResult {
@@ -63,6 +77,81 @@ type OperationSelectionAudit = {
   excludedCompletionEventIds: string[];
 };
 
+type OperationSpecificSelectionAudit = {
+  operation: LaytimeOperation;
+  source: 'operation-specific-child-calculation';
+  clauseSelection: {
+    selectedClauseIds: string[];
+    selectedClauseTypes: string[];
+    selectedClauses: Array<{
+      id: string;
+      clauseType: string;
+      source: 'operation-specific' | 'global-fallback';
+    }>;
+    duplicateWarnings: string[];
+  };
+  documentSelection: {
+    candidateDocumentIds: string[];
+    includedDocumentIds: string[];
+    excludedDocumentIds: string[];
+    matchingDocumentIds: string[];
+    legacyNullDocumentIds: string[];
+    oppositeOperationDocumentIds: string[];
+    usedLegacyFallback: boolean;
+  };
+  eventSelection: {
+    candidateEventIds: string[];
+    includedEventIds: string[];
+    excludedEventIds: string[];
+    matchingEventIds: string[];
+    legacyNullEventIds: string[];
+    oppositeOperationEventIds: string[];
+    usedLegacyFallback: boolean;
+    matchingCompletionEventId: string | null;
+    selectedCompletionEventId: string | null;
+  };
+};
+
+type OperationChildAudit = {
+  requestedOperations: LaytimeOperation[];
+  createdOperations: LaytimeOperation[];
+  skippedOperations: Array<{
+    operation: LaytimeOperation;
+    reason: string;
+  }>;
+};
+
+type PreparedOperationChildCalculation = {
+  operation: LaytimeOperation;
+  childClauses: ResolvedClause[];
+  childClauseWarnings: string[];
+  childDocumentSelection: OperationSpecificSelectionAudit['documentSelection'];
+  childEventSelection: OperationSpecificSelectionAudit['eventSelection'];
+  childSofEvents: SofEvent[];
+  childResult: ReturnType<typeof runLaytimeEngine>;
+  childWarnings: string[];
+};
+
+type CreateOperationChildResultInput = {
+  parentCalculation: Pick<LaytimeCalculation, 'id' | 'voyageId' | 'version' | 'status'>;
+  operation: Exclude<LaytimeOperation, null>;
+  allowedLaytime: string;
+  usedLaytime: string;
+  demurrageAmount: string;
+  despatchAmount: string;
+  inputSnapshot: Record<string, unknown>;
+  decisionSnapshot: Record<string, unknown>;
+  warnings: string[];
+  engineVersion: string | null;
+  periods: Array<{
+    startTime: Date;
+    endTime: Date;
+    periodType: string;
+    appliedClauseId: string | null;
+  }>;
+  calculatedAt?: Date;
+};
+
 const GLOBAL_SOF_EVENT_TYPES = new Set([
   'NOR_TENDERED',
   'RAIN_STOPPAGE',
@@ -76,7 +165,16 @@ const GLOBAL_SOF_EVENT_TYPES = new Set([
   'BREAKDOWN_REPAIRED',
   'STOPPAGE_END',
   'WORK_RESUMED',
+  'CARGO_STARTED',
   'CARGO_COMPLETED',
+  'COMPLETION_OF_CARGO',
+  'HOSES_DISCONNECTED',
+]);
+
+const COMPLETION_EVENT_TYPES = new Set([
+  'CARGO_COMPLETED',
+  'LOADING_COMPLETED',
+  'DISCHARGE_COMPLETED',
   'COMPLETION_OF_CARGO',
   'HOSES_DISCONNECTED',
 ]);
@@ -165,6 +263,42 @@ export class LaytimeCalculationsService {
     return paginate(result, query);
   }
 
+  async findOperationChildren(
+    parentCalculationId: string,
+  ): Promise<LaytimeCalculation[]> {
+    const parentCalculation = await this.findOne(parentCalculationId);
+
+    if (
+      parentCalculation.parentCalculationId !== null &&
+      parentCalculation.parentCalculationId !== undefined
+    ) {
+      throw new BadRequestException(
+        `Laytime calculation ${parentCalculationId} is a child result and cannot be used as a parent`,
+      );
+    }
+
+    const children = await this.calculations.find({
+      where: { parentCalculationId },
+    });
+
+    return children.sort((left, right) => {
+      const rank = (operation: LaytimeCalculation['operation']) =>
+        operation === 'Loading' ? 0 : operation === 'Discharge' ? 1 : 2;
+      const operationDifference = rank(left.operation) - rank(right.operation);
+      if (operationDifference !== 0) {
+        return operationDifference;
+      }
+
+      const calculatedAtDifference =
+        left.calculatedAt.getTime() - right.calculatedAt.getTime();
+      if (calculatedAtDifference !== 0) {
+        return calculatedAtDifference;
+      }
+
+      return left.id.localeCompare(right.id);
+    });
+  }
+
   /**
    * Returns persisted calculation evidence only. It deliberately does not load
    * current voyage, charter-party, NOR, SOF, or clause rows.
@@ -245,6 +379,11 @@ export class LaytimeCalculationsService {
       documentSelection.includedDocumentIds.includes(event.sofId),
     );
     const clauses = this.resolveClauses(charterParty);
+    const reversibleLaytimeRule = resolveReversibleLaytimeRule(clauses);
+    if (reversibleLaytimeRule.warnings.length > 0) {
+      warnings.push(...reversibleLaytimeRule.warnings);
+    }
+    const engineClauses = this.filterEngineClauses(clauses);
     const eventSelection = this.selectSofEventsForEngine(
       voyage.laytimeOperation,
       loadedSofEvents,
@@ -266,9 +405,10 @@ export class LaytimeCalculationsService {
     try {
       result = runLaytimeEngine({
         cargoQuantity: Number(voyage.cargoQuantity),
-        clauses,
+        clauses: engineClauses,
         norDocuments,
         sofEvents,
+        operation: voyage.laytimeOperation,
       });
     } catch (error) {
       if (error instanceof LaytimeEngineError) {
@@ -278,6 +418,44 @@ export class LaytimeCalculationsService {
     }
 
     const calculationWarnings = [...warnings, ...result.warnings];
+    const childPlans = await this.buildOperationChildCalculations(
+      voyage,
+      charterParty,
+      engineClauses,
+      norDocuments,
+      sofSource.documents,
+      sofSource.events,
+    );
+    const operationChildren: OperationChildAudit = {
+      requestedOperations: this.sortOperations(childPlans.requestedOperations),
+      createdOperations: this.sortOperations(
+        childPlans.created.map((plan) => plan.operation),
+      ),
+      skippedOperations: childPlans.skippedOperations,
+    };
+    const loadingChild = childPlans.created.find(
+      (plan) => plan.operation === 'Loading',
+    );
+    const dischargeChild = childPlans.created.find(
+      (plan) => plan.operation === 'Discharge',
+    );
+    const reversibleLaytimeAnalysis = analyzeReversibleLaytime(
+      loadingChild
+        ? {
+            operation: 'Loading',
+            allowedSeconds: loadingChild.childResult.allowedSeconds,
+            usedSeconds: loadingChild.childResult.usedSeconds,
+          }
+        : null,
+      dischargeChild
+        ? {
+            operation: 'Discharge',
+            allowedSeconds: dischargeChild.childResult.allowedSeconds,
+            usedSeconds: dischargeChild.childResult.usedSeconds,
+          }
+        : null,
+      reversibleLaytimeRule.enabled === true,
+    );
     const inputSnapshot = this.buildInputSnapshot(
       voyage,
       charterParty,
@@ -288,14 +466,62 @@ export class LaytimeCalculationsService {
       documentSelection,
       eventSelection.selection,
       operationSelection,
+      operationChildren,
     );
     const decisionSnapshot = this.buildDecisionSnapshot(
       charterParty,
-      clauses,
+      engineClauses,
       norDocuments,
       sofEvents,
       result,
+      reversibleLaytimeRule,
+      reversibleLaytimeAnalysis,
     );
+    const preparedChildCalculations = childPlans.created.map((plan) => {
+      const childCalculationWarnings = [...plan.childWarnings, ...plan.childResult.warnings];
+      const childInputSnapshot = this.buildChildInputSnapshot(
+        voyage,
+        inputSnapshot,
+        plan.operation,
+        plan.childClauses,
+        plan.childClauseWarnings,
+        plan.childDocumentSelection,
+        plan.childEventSelection,
+      );
+      const childDecisionSnapshot = {
+        ...this.buildDecisionSnapshot(
+          charterParty,
+          plan.childClauses,
+          norDocuments,
+          plan.childSofEvents,
+          plan.childResult,
+          reversibleLaytimeRule,
+        ),
+        operationResult: {
+          operation: plan.operation,
+          source: 'operation-specific-child-calculation',
+          clauseSelection: this.buildClauseSelectionAudit(
+            plan.childClauses,
+            plan.childClauseWarnings,
+          ),
+          warnings: [...plan.childWarnings],
+        },
+      };
+
+      return {
+        operation: plan.operation,
+        allowedLaytime: secondsToInterval(plan.childResult.allowedSeconds),
+        usedLaytime: secondsToInterval(plan.childResult.usedSeconds),
+        demurrageAmount: plan.childResult.demurrageAmount.toFixed(2),
+        despatchAmount: plan.childResult.despatchAmount.toFixed(2),
+        inputSnapshot: childInputSnapshot,
+        decisionSnapshot: childDecisionSnapshot,
+        warnings: childCalculationWarnings,
+        engineVersion: LAYTIME_ENGINE_VERSION,
+        periods: plan.childResult.periods,
+        calculatedAt: new Date(),
+      };
+    });
 
     const calculation = await this.dataSource.transaction(async (manager) => {
       const { maximum } = (await manager
@@ -329,11 +555,21 @@ export class LaytimeCalculationsService {
             calculationId: saved.id,
             startTime: period.startTime,
             endTime: period.endTime,
-            periodType: period.periodType,
+            periodType: period.periodType as CalculationPeriod['periodType'],
             appliedClauseId: period.appliedClauseId,
           }),
         ),
       );
+
+      for (const childCalculation of preparedChildCalculations) {
+        await this.createOperationChildResult(
+          {
+            parentCalculation: saved,
+            ...childCalculation,
+          },
+          manager,
+        );
+      }
 
       return manager.findOneOrFail(LaytimeCalculation, {
         where: { id: saved.id },
@@ -404,6 +640,7 @@ export class LaytimeCalculationsService {
     sofDocumentSelection: SofDocumentSelection,
     calculationEventSelection: CalculationEventSelection,
     operationSelection: OperationSelectionAudit,
+    operationChildren?: OperationChildAudit,
   ): Record<string, unknown> {
     return {
       voyage: {
@@ -440,6 +677,18 @@ export class LaytimeCalculationsService {
           ...operationSelection.excludedCompletionEventIds,
         ],
       },
+      operationChildren: operationChildren
+        ? {
+            requestedOperations: [...operationChildren.requestedOperations],
+            createdOperations: [...operationChildren.createdOperations],
+            skippedOperations: operationChildren.skippedOperations.map(
+              (operation) => ({
+                operation: operation.operation,
+                reason: operation.reason,
+              }),
+            ),
+          }
+        : null,
       charterParty: {
         id: charterParty.id,
         clauses: clauses.map((clause) => ({
@@ -477,6 +726,242 @@ export class LaytimeCalculationsService {
     };
   }
 
+  private buildChildInputSnapshot(
+    voyage: { id: string; laytimeOperation: LaytimeOperation },
+    parentSnapshot: Record<string, unknown>,
+    operation: LaytimeOperation,
+    clauses: ResolvedClause[],
+    duplicateWarnings: string[],
+    documentSelection: OperationSpecificSelectionAudit['documentSelection'],
+    eventSelection: OperationSpecificSelectionAudit['eventSelection'],
+  ): Record<string, unknown> {
+    return {
+      ...this.cloneJson(parentSnapshot),
+      operationResult: {
+        operation,
+        source: 'operation-specific-child-calculation',
+        clauseSelection: this.buildClauseSelectionAudit(
+          clauses,
+          duplicateWarnings,
+        ),
+        documentSelection: {
+          candidateDocumentIds: [...documentSelection.candidateDocumentIds],
+          includedDocumentIds: [...documentSelection.includedDocumentIds],
+          excludedDocumentIds: [...documentSelection.excludedDocumentIds],
+          matchingDocumentIds: [...documentSelection.matchingDocumentIds],
+          legacyNullDocumentIds: [...documentSelection.legacyNullDocumentIds],
+          oppositeOperationDocumentIds: [
+            ...documentSelection.oppositeOperationDocumentIds,
+          ],
+          usedLegacyFallback: documentSelection.usedLegacyFallback,
+        },
+        eventSelection: {
+          candidateEventIds: [...eventSelection.candidateEventIds],
+          includedEventIds: [...eventSelection.includedEventIds],
+          excludedEventIds: [...eventSelection.excludedEventIds],
+          matchingEventIds: [...eventSelection.matchingEventIds],
+          legacyNullEventIds: [...eventSelection.legacyNullEventIds],
+          oppositeOperationEventIds: [...eventSelection.oppositeOperationEventIds],
+          usedLegacyFallback: eventSelection.usedLegacyFallback,
+          matchingCompletionEventId: eventSelection.matchingCompletionEventId,
+          selectedCompletionEventId: eventSelection.selectedCompletionEventId,
+        },
+      },
+    };
+  }
+
+  private async buildOperationChildCalculations(
+    voyage: { id: string; cargoQuantity: string; laytimeOperation: LaytimeOperation },
+    charterParty: CharterParty,
+    parentClauses: ResolvedClause[],
+    norDocuments: NorDocument[],
+    sofDocuments: SofDocument[],
+    sofEvents: SofEvent[],
+  ): Promise<{
+    requestedOperations: LaytimeOperation[];
+    created: PreparedOperationChildCalculation[];
+    skippedOperations: Array<{ operation: LaytimeOperation; reason: string }>;
+  }> {
+    const requestedOperations: LaytimeOperation[] = [];
+    const created: PreparedOperationChildCalculation[] = [];
+    const skippedOperations: Array<{ operation: LaytimeOperation; reason: string }> = [];
+
+    for (const operation of ['Loading', 'Discharge'] as const) {
+      requestedOperations.push(operation);
+      const plan = this.buildOperationChildCalculation(
+        voyage,
+        charterParty,
+        parentClauses,
+        norDocuments,
+        sofDocuments,
+        sofEvents,
+        operation,
+      );
+
+      if ('skipReason' in plan) {
+        skippedOperations.push({
+          operation,
+          reason: plan.skipReason,
+        });
+        continue;
+      }
+
+      created.push(plan);
+    }
+
+    if (created.length === 0) {
+      const fallbackOperation = voyage.laytimeOperation;
+      if (!requestedOperations.includes(fallbackOperation)) {
+        requestedOperations.push(fallbackOperation);
+      }
+
+      const fallbackPlan = this.buildOperationChildCalculation(
+        voyage,
+        charterParty,
+        parentClauses,
+        norDocuments,
+        sofDocuments,
+        sofEvents,
+        fallbackOperation,
+        { allowLegacyFallback: true },
+      );
+
+      if ('skipReason' in fallbackPlan) {
+        skippedOperations.push({
+          operation: fallbackOperation,
+          reason: fallbackPlan.skipReason,
+        });
+      } else {
+        created.push(fallbackPlan);
+      }
+    }
+
+    return {
+      requestedOperations,
+      created,
+      skippedOperations,
+    };
+  }
+
+  private buildOperationChildCalculation(
+    voyage: { id: string; cargoQuantity: string; laytimeOperation: LaytimeOperation },
+    charterParty: CharterParty,
+    parentClauses: ResolvedClause[],
+    norDocuments: NorDocument[],
+    sofDocuments: SofDocument[],
+    sofEvents: SofEvent[],
+    operation: LaytimeOperation,
+    options?: { allowLegacyFallback?: boolean },
+  ):
+    | PreparedOperationChildCalculation
+    | { skipReason: string } {
+    const childWarnings: string[] = [];
+
+    let childDocumentSelection: OperationSpecificSelectionAudit['documentSelection'];
+    try {
+      childDocumentSelection = this.selectOperationSpecificSofDocumentsForEngine(
+        operation,
+        sofDocuments,
+        childWarnings,
+      );
+    } catch (error) {
+      if (error instanceof UnprocessableEntityException) {
+        return {
+          skipReason:
+            options?.allowLegacyFallback === true
+              ? `No applicable SOF document exists for the ${operation} child calculation.`
+              : `No explicit ${operation} SOF document exists for a child calculation.`,
+        };
+      }
+      throw error;
+    }
+
+    if (
+      options?.allowLegacyFallback !== true &&
+      childDocumentSelection.matchingDocumentIds.length === 0
+    ) {
+      return {
+        skipReason: `No explicit ${operation} SOF document exists for a child calculation.`,
+      };
+    }
+
+    const childLoadedSofEvents = sofEvents.filter((event) =>
+      childDocumentSelection.includedDocumentIds.includes(event.sofId),
+    );
+    const childEventSelection = this.selectOperationSpecificSofEventsForEngine(
+      operation,
+      childLoadedSofEvents,
+      childWarnings,
+    );
+
+    if (childEventSelection.selection.selectedCompletionEventId === null) {
+      return {
+        skipReason: `No cargo completion event exists for the ${operation} child calculation.`,
+      };
+    }
+
+    const sourceClauses = this.filterEngineClauses(this.resolveClauses(charterParty));
+    const childClauses = resolveClausesForOperation(
+      sourceClauses.length > 0 ? sourceClauses : parentClauses,
+      operation,
+      childWarnings,
+    ).map((clause) => ({
+      id: clause.id,
+      clauseType: clause.clauseType,
+      rawText: 'rawText' in clause ? (clause as ResolvedClause).rawText : undefined,
+      parameters: this.cloneJson(clause.parameters),
+    })) as ResolvedClause[];
+
+    let childResult: ReturnType<typeof runLaytimeEngine>;
+    try {
+      childResult = runLaytimeEngine({
+        cargoQuantity: Number(voyage.cargoQuantity),
+        clauses: childClauses,
+        norDocuments,
+        sofEvents: childEventSelection.events,
+        operation,
+      });
+    } catch (error) {
+      if (error instanceof LaytimeEngineError) {
+        return {
+          skipReason: error.message,
+        };
+      }
+      throw error;
+    }
+
+    return {
+      operation,
+      childClauses,
+      childClauseWarnings: [...childWarnings],
+      childDocumentSelection,
+      childEventSelection: childEventSelection.selection,
+      childSofEvents: childEventSelection.events,
+      childResult,
+      childWarnings: [...childWarnings],
+    };
+  }
+
+  private buildClauseSelectionAudit(
+    clauses: ResolvedClause[],
+    duplicateWarnings: string[],
+  ): OperationSpecificSelectionAudit['clauseSelection'] {
+    return {
+      selectedClauseIds: clauses.map((clause) => clause.id),
+      selectedClauseTypes: clauses.map((clause) => clause.clauseType),
+      selectedClauses: clauses.map((clause) => ({
+        id: clause.id,
+        clauseType: clause.clauseType,
+        source:
+          clause.parameters.operation === 'Loading' ||
+          clause.parameters.operation === 'Discharge'
+            ? 'operation-specific'
+          : 'global-fallback',
+      })),
+      duplicateWarnings: [...duplicateWarnings],
+    };
+  }
+
   private buildDecisionSnapshot(
     charterParty: CharterParty,
     clauses: ResolvedClause[],
@@ -491,6 +976,7 @@ export class LaytimeCalculationsService {
       usedSeconds: number;
       demurrageAmount: number;
       despatchAmount: number;
+      atutc: LaytimeEngineResult['atutc'];
       periods: Array<{
         startTime: Date;
         endTime: Date;
@@ -503,6 +989,8 @@ export class LaytimeCalculationsService {
         appliedClauseId: string | null;
       }>;
     },
+    reversibleLaytimeRule?: ReversibleLaytimeRuleEvidence,
+    reversibleLaytimeAnalysis?: ReversibleLaytimeAnalysis,
   ): Record<string, unknown> {
     const firstClause = (type: string) =>
       clauses.find((clause) => clause.clauseType === type);
@@ -519,15 +1007,7 @@ export class LaytimeCalculationsService {
       .filter((event) => event.eventType === 'NOR_TENDERED')
       .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime())[0];
     const completion = [...sofEvents]
-      .filter((event) =>
-        [
-          'CARGO_COMPLETED',
-          'LOADING_COMPLETED',
-          'DISCHARGE_COMPLETED',
-          'COMPLETION_OF_CARGO',
-          'HOSES_DISCONNECTED',
-        ].includes(event.eventType),
-      )
+      .filter((event) => COMPLETION_EVENT_TYPES.has(event.eventType))
       .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime())
       .at(-1);
     const noticeHours = this.readNumber(laytimeClause?.parameters, [
@@ -681,6 +1161,20 @@ export class LaytimeCalculationsService {
               'Port-limit status is not currently modeled; timing is unchanged.',
           }
         : null,
+      atutc: this.cloneJson(result.atutc),
+      reversibleLaytimeRule: reversibleLaytimeRule
+        ? {
+            clauseId: reversibleLaytimeRule.clauseId,
+            clauseType: reversibleLaytimeRule.clauseType,
+            enabled: reversibleLaytimeRule.enabled,
+            clauseParameters: this.cloneJson(reversibleLaytimeRule.clauseParameters),
+            rawText: reversibleLaytimeRule.rawText,
+            warnings: [...reversibleLaytimeRule.warnings],
+          }
+        : null,
+      reversibleLaytimeAnalysis: reversibleLaytimeAnalysis
+        ? this.cloneJson(reversibleLaytimeAnalysis)
+        : null,
     };
   }
 
@@ -733,6 +1227,12 @@ export class LaytimeCalculationsService {
     }
 
     return normalizeCommercialTermsToClauses(charterParty);
+  }
+
+  private filterEngineClauses(clauses: ResolvedClause[]): ResolvedClause[] {
+    return clauses.filter(
+      (clause) => clause.clauseType !== 'reversible_laytime',
+    );
   }
 
   private classifySofEventOperation(
@@ -840,6 +1340,210 @@ export class LaytimeCalculationsService {
     };
   }
 
+  private selectOperationSpecificSofDocumentsForEngine(
+    voyageOperation: LaytimeOperation,
+    sofDocuments: SofDocument[],
+    warnings: string[],
+  ): OperationSpecificSelectionAudit['documentSelection'] {
+    const candidateDocumentIds = sofDocuments.map((document) => document.id);
+    const matchingDocuments = sofDocuments.filter(
+      (document) => document.operation === voyageOperation,
+    );
+    const legacyNullDocuments = sofDocuments.filter(
+      (document) =>
+        document.operation === null || document.operation === undefined,
+    );
+    const oppositeOperationDocuments = sofDocuments.filter(
+      (document) =>
+        document.operation !== null &&
+        document.operation !== undefined &&
+        document.operation !== voyageOperation,
+    );
+
+    if (matchingDocuments.length === 0 && legacyNullDocuments.length === 0) {
+      throw new UnprocessableEntityException(
+        `No applicable SOF document exists for voyage laytime operation ${voyageOperation}`,
+      );
+    }
+
+    const includedDocuments =
+      matchingDocuments.length > 0
+        ? [...matchingDocuments, ...legacyNullDocuments]
+        : [...legacyNullDocuments];
+
+    const usedLegacyFallback =
+      matchingDocuments.length === 0 && legacyNullDocuments.length > 0;
+
+    if (usedLegacyFallback) {
+      warnings.push(
+        'Legacy unscoped SOF evidence was used because no operation-matching child SOF document existed for the voyage laytime operation.',
+      );
+    }
+
+    return {
+      candidateDocumentIds,
+      includedDocumentIds: includedDocuments.map((document) => document.id),
+      excludedDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      matchingDocumentIds: matchingDocuments.map((document) => document.id),
+      legacyNullDocumentIds: legacyNullDocuments.map((document) => document.id),
+      oppositeOperationDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      usedLegacyFallback,
+    };
+  }
+
+  private selectOperationSpecificSofEventsForEngine(
+    voyageOperation: LaytimeOperation,
+    sofEvents: SofEvent[],
+    warnings: string[],
+  ): {
+    events: SofEvent[];
+    selection: OperationSpecificSelectionAudit['eventSelection'];
+  } {
+    const candidateEventIds = sofEvents.map((event) => event.id);
+    const matchingEvents = sofEvents.filter(
+      (event) =>
+        event.operation === voyageOperation &&
+        event.operation !== null &&
+        event.operation !== undefined,
+    );
+    const legacyNullEvents = sofEvents.filter(
+      (event) => event.operation === null || event.operation === undefined,
+    );
+    const oppositeOperationEvents = sofEvents.filter(
+      (event) =>
+        event.operation !== null &&
+        event.operation !== undefined &&
+        event.operation !== voyageOperation,
+    );
+
+    const matchingCompletionEvents = matchingEvents.filter((event) =>
+      COMPLETION_EVENT_TYPES.has(event.eventType),
+    );
+    const explicitMatchingCompletionExists =
+      matchingCompletionEvents.length > 0;
+    const usedLegacyFallback =
+      !explicitMatchingCompletionExists && legacyNullEvents.length > 0;
+
+    if (usedLegacyFallback) {
+      warnings.push(
+        'Legacy unscoped SOF evidence was used because no operation-matching child completion event existed for the voyage laytime operation.',
+      );
+    }
+
+    const excludedEventIds = new Set<string>([
+      ...oppositeOperationEvents.map((event) => event.id),
+    ]);
+    if (explicitMatchingCompletionExists) {
+      for (const event of sofEvents) {
+        if (
+          COMPLETION_EVENT_TYPES.has(event.eventType) &&
+          !matchingCompletionEvents.some((matching) => matching.id === event.id)
+        ) {
+          excludedEventIds.add(event.id);
+        }
+      }
+    }
+
+    const includedEvents = sofEvents.filter(
+      (event) => !excludedEventIds.has(event.id),
+    );
+
+    const selectedCompletionEventId = [
+      ...includedEvents
+        .filter((event) => COMPLETION_EVENT_TYPES.has(event.eventType))
+        .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime()),
+    ].at(-1)?.id ?? null;
+
+    const matchingCompletionEventId =
+      matchingCompletionEvents
+        .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime())
+        .at(-1)?.id ?? null;
+
+    return {
+      events: includedEvents,
+      selection: {
+        candidateEventIds,
+        includedEventIds: includedEvents.map((event) => event.id),
+        excludedEventIds: [...excludedEventIds],
+        matchingEventIds: matchingEvents.map((event) => event.id),
+        legacyNullEventIds: legacyNullEvents.map((event) => event.id),
+        oppositeOperationEventIds: oppositeOperationEvents.map((event) => event.id),
+        usedLegacyFallback,
+        matchingCompletionEventId,
+        selectedCompletionEventId,
+      },
+    };
+  }
+
+  private async createOperationChildResult(
+    input: CreateOperationChildResultInput,
+    manager?: EntityManager,
+  ): Promise<LaytimeCalculation> {
+    const persist = async (entityManager: EntityManager) => {
+      const existingChild = await entityManager.findOne(LaytimeCalculation, {
+        where: {
+          parentCalculationId: input.parentCalculation.id,
+          operation: input.operation,
+        },
+      });
+
+      if (existingChild) {
+        throw new ConflictException(
+          `Laytime calculation ${input.parentCalculation.id} already has a ${input.operation} child result`,
+        );
+      }
+
+      const saved = await entityManager.save(
+        entityManager.create(LaytimeCalculation, {
+          voyageId: input.parentCalculation.voyageId,
+          parentCalculationId: input.parentCalculation.id,
+          operation: input.operation,
+          version: input.parentCalculation.version,
+          status: input.parentCalculation.status,
+          allowedLaytime: input.allowedLaytime,
+          usedLaytime: input.usedLaytime,
+          demurrageAmount: input.demurrageAmount,
+          despatchAmount: input.despatchAmount,
+          inputSnapshot: input.inputSnapshot,
+          decisionSnapshot: input.decisionSnapshot,
+          warnings: input.warnings,
+          engineVersion: input.engineVersion,
+          calculatedAt: input.calculatedAt ?? new Date(),
+        }),
+      );
+
+      const savedPeriods = await entityManager.save(
+        input.periods.map((period) =>
+          entityManager.create(
+            CalculationPeriod,
+            {
+              calculationId: saved.id,
+              startTime: period.startTime,
+              endTime: period.endTime,
+              periodType: period.periodType,
+              appliedClauseId: period.appliedClauseId,
+            } as any,
+          ),
+        ),
+      );
+
+      return {
+        ...saved,
+        periods: Array.isArray(savedPeriods)
+          ? savedPeriods
+          : savedPeriods
+            ? [savedPeriods]
+            : [],
+      };
+    };
+
+    if (manager) {
+      return persist(manager);
+    }
+
+    return this.dataSource.transaction(persist);
+  }
+
   private buildOperationSelectionAudit(
     voyageOperation: LaytimeOperation,
     loadedSofEvents: SofEvent[],
@@ -879,6 +1583,13 @@ export class LaytimeCalculationsService {
         )
         .map((event) => event.id),
     };
+  }
+
+  private sortOperations(operations: LaytimeOperation[]): LaytimeOperation[] {
+    const rank = (operation: LaytimeOperation) =>
+      operation === 'Loading' ? 0 : operation === 'Discharge' ? 1 : 2;
+
+    return [...new Set(operations)].sort((left, right) => rank(left) - rank(right));
   }
 
   private cloneJson<T>(value: T): T {

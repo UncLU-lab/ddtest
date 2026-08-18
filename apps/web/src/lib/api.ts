@@ -104,6 +104,11 @@ export interface LaytimeCalculationOperationSelection {
 export interface LaytimeCalculationInputSnapshot {
   sofDocumentSelection?: LaytimeCalculationSofDocumentSelection | null;
   operationSelection?: LaytimeCalculationOperationSelection | null;
+  operationResult?: {
+    source?: string | null;
+    operation?: "Loading" | "Discharge" | null;
+    [key: string]: unknown;
+  } | null;
   [key: string]: unknown;
 }
 
@@ -125,6 +130,44 @@ export interface LaytimeDecisionIgnoredException {
   reason: string;
 }
 
+export interface ReversibleLaytimeRuleSnapshot {
+  clauseId?: string | null;
+  clauseType?: "reversible_laytime";
+  enabled?: boolean | null;
+  clauseParameters?: Record<string, unknown> | null;
+  rawText?: string | null;
+  warnings?: string[] | null;
+}
+
+export interface ReversibleLaytimeOperationAnalysis {
+  allowedSeconds?: number | null;
+  usedSeconds?: number | null;
+  surplusSeconds?: number | null;
+  overrunSeconds?: number | null;
+}
+
+export interface ReversibleLaytimePoolAnalysis {
+  totalAllowedSeconds?: number | null;
+  totalUsedSeconds?: number | null;
+  totalSurplusBeforeTransferSeconds?: number | null;
+  totalOverrunBeforeTransferSeconds?: number | null;
+  loadingSurplusAvailableToOffsetDischargeOverrunSeconds?: number | null;
+  dischargeSurplusAvailableToOffsetLoadingOverrunSeconds?: number | null;
+  transferableSurplusSeconds?: number | null;
+  netPooledOverrunSeconds?: number | null;
+  netPooledSurplusSeconds?: number | null;
+}
+
+export interface ReversibleLaytimeAnalysisSnapshot {
+  status?: "available" | "not-available";
+  reason?: string;
+  mode?: "contract-enabled" | "audit-only";
+  contractRuleApplied?: boolean;
+  loading?: ReversibleLaytimeOperationAnalysis | null;
+  discharge?: ReversibleLaytimeOperationAnalysis | null;
+  pool?: ReversibleLaytimePoolAnalysis | null;
+}
+
 export interface LaytimeDecisionSnapshot {
   commencement?: {
     commencedAt?: string | null;
@@ -143,12 +186,136 @@ export interface LaytimeDecisionSnapshot {
     ignoredExceptions?: LaytimeDecisionIgnoredException[];
     [key: string]: unknown;
   } | null;
+  reversibleLaytimeRule?: ReversibleLaytimeRuleSnapshot | null;
+  reversibleLaytimeAnalysis?: ReversibleLaytimeAnalysisSnapshot | null;
   [key: string]: unknown;
 }
 
 export interface LaytimeCalculationResult {
   calculation: LaytimeCalculation;
   warnings: string[];
+}
+
+export interface LaytimeOperationResult {
+  id: string;
+  parentCalculationId: string;
+  operation: "Loading" | "Discharge";
+  voyageId: string;
+  version: number;
+  allowedLaytime: string;
+  usedLaytime: string;
+  demurrageAmount: string;
+  despatchAmount: string;
+  status: "Draft" | "Final";
+  calculatedAt: string;
+  engineVersion?: string | null;
+  inputSnapshot?: LaytimeCalculationInputSnapshot | null;
+  decisionSnapshot?: LaytimeDecisionSnapshot | null;
+  warnings?: string[] | null;
+}
+
+export type ClauseOperation = "Loading" | "Discharge";
+
+export interface CpClauseParameters extends Record<string, unknown> {
+  operation?: ClauseOperation;
+}
+
+export interface CpClause {
+  id: string;
+  charterPartyId: string;
+  clauseType: string;
+  rawText: string;
+  parameters: CpClauseParameters;
+  [key: string]: unknown;
+}
+
+export interface CharterParty {
+  id: string;
+  voyageId: string;
+  clauses?: CpClause[] | null;
+  [key: string]: unknown;
+}
+
+export interface CreateCpClauseDto {
+  clauseType: string;
+  rawText: string;
+  parameters: CpClauseParameters;
+}
+
+export interface UpdateCpClauseDto extends Partial<CreateCpClauseDto> {}
+
+export async function getVoyageCharterParty(voyageId: string): Promise<CharterParty> {
+  if (!voyageId) {
+    const error: ApiError = {
+      message: "Voyage ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/charter-party`
+  );
+
+  const result = await parseResponse(response);
+  return unwrapData<CharterParty>(result);
+}
+
+export async function createCpClause(
+  charterPartyId: string,
+  dto: CreateCpClauseDto
+): Promise<CpClause> {
+  if (!charterPartyId) {
+    const error: ApiError = {
+      message: "Charter party ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/charter-parties/${encodeURIComponent(charterPartyId)}/clauses`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(dto),
+    }
+  );
+
+  const result = await parseResponse(response);
+  return unwrapData<CpClause>(result);
+}
+
+export async function updateCpClause(
+  clauseId: string,
+  dto: UpdateCpClauseDto
+): Promise<CpClause> {
+  if (!clauseId) {
+    const error: ApiError = {
+      message: "Clause ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/cp-clauses/${encodeURIComponent(clauseId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(dto),
+    }
+  );
+
+  const result = await parseResponse(response);
+  return unwrapData<CpClause>(result);
 }
 
 export interface CreateBulkDisputeDto {
@@ -719,6 +886,31 @@ export async function getLaytimeCalculations(
 
   const result = await parseResponse(response);
   return result as Paginated<LaytimeCalculation>;
+}
+
+export async function getLaytimeOperationResults(
+  parentCalculationId: string
+): Promise<LaytimeOperationResult[]> {
+  if (!parentCalculationId) {
+    const error: ApiError = {
+      message: "Calculation ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/laytime-calculations/${encodeURIComponent(parentCalculationId)}/operation-results`
+  );
+
+  const result = await parseResponse(response);
+
+  if (Array.isArray(result)) {
+    return result as LaytimeOperationResult[];
+  }
+
+  return (result?.data ?? []) as LaytimeOperationResult[];
 }
 
 export async function runLaytimeCalculation(

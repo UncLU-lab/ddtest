@@ -12,7 +12,13 @@ import {
   Upload,
   AlertTriangle,
 } from "lucide-react";
-import { useShipments, ShipmentDraft, missingDraftFields } from "./data/ShipmentsContext";
+import {
+  useShipments,
+  ShipmentDraft,
+  ShipmentCommercialTermsDraft,
+  emptyShipmentCommercialTermsDraft,
+  missingDraftFields,
+} from "./data/ShipmentsContext";
 import { getVessels } from "../lib/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -178,6 +184,100 @@ function Divider() {
   );
 }
 
+function OperationTermsSection({
+  title,
+  terms,
+  onChange,
+}: {
+  title: string;
+  terms: ShipmentCommercialTermsDraft;
+  onChange: <K extends keyof ShipmentCommercialTermsDraft>(
+    key: K,
+    value: ShipmentCommercialTermsDraft[K],
+  ) => void;
+}) {
+  return (
+    <div
+      className="rounded-lg border p-[12px_12px] mt-3"
+      style={{
+        borderColor: "#E5E7EB",
+        borderWidth: "0.5px",
+        backgroundColor: "#F9FAFB",
+      }}
+    >
+      <SubLabel>{title}</SubLabel>
+      <p style={{ fontSize: "10px", color: "#9CA3AF", marginTop: "-2px", marginBottom: "10px" }}>
+        Leave fields blank to fall back to Global terms.
+      </p>
+
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <FormField label="Laytime allowed (hrs)">
+          <Input
+            value={terms.laytimeAllowed}
+            onChange={(v) => onChange("laytimeAllowed", v)}
+            placeholder="Optional"
+          />
+        </FormField>
+        <FormField label="Demurrage rate ($/day)">
+          <Input
+            value={terms.demurrageRate}
+            onChange={(v) => onChange("demurrageRate", v)}
+            placeholder="Optional"
+          />
+        </FormField>
+        <FormField label="Despatch rate ($/day)">
+          <Input
+            value={terms.dispatchRate}
+            onChange={(v) => onChange("dispatchRate", v)}
+            placeholder="Optional"
+          />
+        </FormField>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <FormField label="Time counting basis">
+          <Select
+            value={terms.timeCountingBasis}
+            onChange={(v) => onChange("timeCountingBasis", v)}
+            options={["", "SHEX", "SHINC"]}
+          />
+        </FormField>
+        <FormField label="NOR notice period">
+          <Input
+            value={terms.norNoticePeriod}
+            onChange={(v) => onChange("norNoticePeriod", v)}
+            placeholder="Optional"
+          />
+        </FormField>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <FormField label="Weather working">
+          <Select
+            value={terms.weatherWorking}
+            onChange={(v) => onChange("weatherWorking", v as ShipmentCommercialTermsDraft["weatherWorking"])}
+            options={["", "Enabled", "Disabled"]}
+          />
+        </FormField>
+        <FormField label="WIBON">
+          <Select
+            value={terms.wibon}
+            onChange={(v) => onChange("wibon", v as ShipmentCommercialTermsDraft["wibon"])}
+            options={["", "Enabled", "Disabled"]}
+          />
+        </FormField>
+        <FormField label="WIPON">
+          <Select
+            value={terms.wipon}
+            onChange={(v) => onChange("wipon", v as ShipmentCommercialTermsDraft["wipon"])}
+            options={["", "Enabled", "Disabled"]}
+          />
+        </FormField>
+      </div>
+    </div>
+  );
+}
+
 function RiskBarRow({
   label,
   pct,
@@ -233,6 +333,22 @@ export default function CreateShipmentForm() {
       "deductibleCategories",
       has ? draft.deductibleCategories.filter((t) => t !== tag) : [...draft.deductibleCategories, tag]
     );
+  }
+
+  function updateCommercialTerms(
+    section: "loadingTerms" | "dischargeTerms",
+    key: keyof ShipmentCommercialTermsDraft,
+    value: string,
+  ) {
+    const current = draft[section] ?? emptyShipmentCommercialTermsDraft;
+
+    setDraft({
+      ...draft,
+      [section]: {
+        ...current,
+        [key]: value,
+      },
+    });
   }
 
   const missing = missingDraftFields(draft);
@@ -582,6 +698,18 @@ export default function CreateShipmentForm() {
                 />
               </FormField>
             </div>
+
+            <OperationTermsSection
+              title="Loading-specific terms"
+              terms={draft.loadingTerms ?? emptyShipmentCommercialTermsDraft}
+              onChange={(key, value) => updateCommercialTerms("loadingTerms", key, value)}
+            />
+
+            <OperationTermsSection
+              title="Discharge-specific terms"
+              terms={draft.dischargeTerms ?? emptyShipmentCommercialTermsDraft}
+              onChange={(key, value) => updateCommercialTerms("dischargeTerms", key, value)}
+            />
 
             <Divider />
             <SubLabel badge="independent">Receiver clock</SubLabel>

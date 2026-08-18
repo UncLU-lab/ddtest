@@ -158,6 +158,30 @@ describe('SofDocumentsService events', () => {
     },
   );
 
+  it.each(['Loading', 'Discharge'] as const)(
+    'persists CARGO_STARTED with operation = %s when adding a manual event',
+    async (operation) => {
+      const { service, events } = buildService();
+
+      const result = await service.addEvent(SOF_ID, {
+        eventTime: '2026-08-17T10:00:00.000Z',
+        eventType: 'CARGO_STARTED',
+        operation,
+      });
+
+      expect(events.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sofId: SOF_ID,
+          eventType: 'CARGO_STARTED',
+          operation,
+          isManualOverride: true,
+        }),
+      );
+      expect(result.eventType).toBe('CARGO_STARTED');
+      expect(result.operation).toBe(operation);
+    },
+  );
+
   it('stores null operation when it is omitted on create', async () => {
     const { service, events } = buildService();
 
