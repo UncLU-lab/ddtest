@@ -1,11 +1,26 @@
+# Demurrage Defender
 
-  # demurrage dashboard
+Demurrage Defender is organized as a single repository with two independently installable applications.
 
-  This is a code bundle for demurrage dashboard. The original project is available at https://www.figma.com/design/IGKqEk74cpe7ShlAI7rnFs/demurrage-dashboard.
+- `apps/web` — Vite and React frontend
+- `apps/api` — NestJS and TypeORM API
+- `infra/docker-compose.yml` — local PostgreSQL service
+- `docs` — project guidance and documentation
 
-  ## Running the code
+## Development
 
-  Run `npm i` to install the dependencies.
+Install dependencies in each application:
 
-  Run `npm run dev` to start the development server.
-  
+```powershell
+npm --prefix apps/web install
+npm --prefix apps/api ci
+```
+
+Run the applications:
+
+```powershell
+npm run dev:web
+npm run dev:api
+```
+
+The web development server proxies `/api` to `http://localhost:3000`.
