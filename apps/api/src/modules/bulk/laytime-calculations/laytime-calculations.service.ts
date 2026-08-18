@@ -977,6 +977,7 @@ export class LaytimeCalculationsService {
       demurrageAmount: number;
       despatchAmount: number;
       atutc: LaytimeEngineResult['atutc'];
+      despatchTimeBasis: LaytimeEngineResult['despatchTimeBasis'];
       periods: Array<{
         startTime: Date;
         endTime: Date;
@@ -1139,6 +1140,7 @@ export class LaytimeCalculationsService {
             ? 0.5
             : null,
         savedSeconds: Math.max(0, result.allowedSeconds - result.usedSeconds),
+        timeBasis: result.despatchTimeBasis,
         amount: result.despatchAmount,
       },
       wibon: wibonClause

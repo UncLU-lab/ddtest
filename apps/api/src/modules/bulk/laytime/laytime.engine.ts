@@ -16,6 +16,7 @@ import {
   type TimeInterval,
 } from './interval-overlap';
 import { secondsToDays } from './interval.util';
+import { projectLaytimeExpiry } from './laytime-expiry-projection';
 
 const HOUR_SECONDS = 3600;
 const DAY_SECONDS = 86_400;
@@ -172,9 +173,17 @@ export function runLaytimeEngine(
       collectedExceptions.weatherDeductedSeconds,
     );
 
+  const despatchTimeBasis = resolveDespatchTimeBasis(
+    clauses.despatch,
+    clauses.shex,
+    completedAt,
+    allowedSeconds,
+    usedSeconds,
+  );
   const { demurrageAmount, despatchAmount } = priceResult(
     usedSeconds,
     allowedSeconds,
+    despatchTimeBasis.selectedSavedSeconds,
     clauses,
     warnings,
   );
@@ -192,6 +201,66 @@ export function runLaytimeEngine(
     ignoredExceptions,
     warnings,
     atutc,
+    despatchTimeBasis,
+  };
+}
+
+function resolveDespatchTimeBasis(
+  clause: EngineClause | undefined,
+  shexClause: EngineClause | undefined,
+  completedAt: Date,
+  allowedSeconds: number,
+  usedSeconds: number,
+): LaytimeEngineResult['despatchTimeBasis'] {
+  const persistedTimeBasis = clause?.parameters.timeBasis;
+  const requestedTimeBasis =
+    persistedTimeBasis === 'all_time_saved' ||
+    persistedTimeBasis === 'working_time_saved'
+      ? persistedTimeBasis
+      : null;
+  const effectiveTimeBasis = requestedTimeBasis ?? 'all_time_saved';
+  const source = requestedTimeBasis ? 'explicit' : 'legacy-default';
+  const workingTimeSavedSeconds = Math.max(allowedSeconds - usedSeconds, 0);
+
+  if (effectiveTimeBasis === 'working_time_saved') {
+    return {
+      requestedTimeBasis,
+      effectiveTimeBasis,
+      source,
+      workingTimeSavedSeconds,
+      selectedSavedSeconds: workingTimeSavedSeconds,
+      theoreticalExpiry: null,
+      projectedExceptedIntervals: [],
+    };
+  }
+
+  const projection = projectLaytimeExpiry({
+    completionTime: completedAt,
+    remainingCountableSeconds: workingTimeSavedSeconds,
+    calendarRules: {
+      shex: readBoolean(shexClause?.parameters, ['shex']) === true,
+      saturdayExcepted:
+        readBoolean(shexClause?.parameters, [
+          'saturdayExcepted',
+          'saturday_excepted',
+          'satShex',
+        ]) === true,
+    },
+  });
+
+  return {
+    requestedTimeBasis,
+    effectiveTimeBasis,
+    source,
+    workingTimeSavedSeconds,
+    selectedSavedSeconds: projection.calendarSecondsSaved,
+    theoreticalExpiry: projection.theoreticalExpiry,
+    projectedExceptedIntervals: projection.projectedExceptedIntervals.map(
+      (interval) => ({
+        startTime: interval.start,
+        endTime: interval.end,
+      }),
+    ),
   };
 }
 
@@ -791,6 +860,7 @@ function buildPeriods(
 function priceResult(
   usedSeconds: number,
   allowedSeconds: number,
+  selectedSavedSeconds: number,
   clauses: IndexedClauses,
   warnings: string[],
 ): { demurrageAmount: number; despatchAmount: number } {
@@ -816,7 +886,7 @@ function priceResult(
     };
   }
 
-  const savedDays = secondsToDays(allowedSeconds - usedSeconds);
+  const savedDays = secondsToDays(selectedSavedSeconds);
   if (savedDays === 0) {
     return { demurrageAmount: 0, despatchAmount: 0 };
   }

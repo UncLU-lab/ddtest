@@ -9,7 +9,89 @@ const baseDto = {
   parameters: { hours: 72 },
 };
 
+const despatchDto = {
+  clauseType: 'despatch',
+  rawText: 'Dispatch: $7,500/day',
+  parameters: { rate: 7500 },
+};
+
 describe('CreateCpClauseDto', () => {
+  it.each(['all_time_saved', 'working_time_saved'] as const)(
+    'accepts despatch clauses with timeBasis=%s',
+    (timeBasis) => {
+      const errors = validateSync(
+        plainToInstance(CreateCpClauseDto, {
+          ...despatchDto,
+          parameters: { ...despatchDto.parameters, timeBasis },
+        }),
+      );
+
+      expect(errors).toHaveLength(0);
+    },
+  );
+
+  it.each(['invalid', '', 'half_time_saved'] as const)(
+    'rejects despatch clauses with invalid timeBasis=%s',
+    (timeBasis) => {
+      const errors = validateSync(
+        plainToInstance(CreateCpClauseDto, {
+          ...despatchDto,
+          parameters: { ...despatchDto.parameters, timeBasis },
+        }),
+      );
+
+      expect(errors.find((error) => error.property === 'parameters')).toBeDefined();
+    },
+  );
+
+  it.each([1, true] as const)(
+    'rejects despatch clauses with non-string timeBasis=%s',
+    (timeBasis) => {
+      const errors = validateSync(
+        plainToInstance(CreateCpClauseDto, {
+          ...despatchDto,
+          parameters: { ...despatchDto.parameters, timeBasis },
+        }),
+      );
+
+      expect(errors.find((error) => error.property === 'parameters')).toBeDefined();
+    },
+  );
+
+  it('accepts a despatch clause without a timeBasis', () => {
+    const errors = validateSync(
+      plainToInstance(CreateCpClauseDto, despatchDto),
+    );
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('accepts a despatch clause with operation scope and timeBasis', () => {
+    const errors = validateSync(
+      plainToInstance(CreateCpClauseDto, {
+        ...despatchDto,
+        parameters: {
+          ...despatchDto.parameters,
+          operation: 'Loading',
+          timeBasis: 'working_time_saved',
+        },
+      }),
+    );
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('keeps existing despatch multiplier validation working', () => {
+    const errors = validateSync(
+      plainToInstance(CreateCpClauseDto, {
+        ...despatchDto,
+        parameters: { multiplier: 0.5 },
+      }),
+    );
+
+    expect(errors).toHaveLength(0);
+  });
+
   it('accepts reversible_laytime clauses with a boolean enabled flag', () => {
     const errors = validateSync(
       plainToInstance(CreateCpClauseDto, {

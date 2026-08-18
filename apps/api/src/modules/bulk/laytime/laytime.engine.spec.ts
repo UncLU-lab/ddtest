@@ -181,6 +181,340 @@ describe('runLaytimeEngine', () => {
     );
   });
 
+  it('audits explicit all-time-saved without changing the despatch result', () => {
+    const explicitAllTimeSaved: EngineClause = {
+      ...despatch,
+      parameters: { ...despatch.parameters, timeBasis: 'all_time_saved' },
+    };
+    const input = buildInput({
+      sofEvents: [
+        { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
+        {
+          eventTime: new Date('2026-03-05T06:00:00Z'),
+          eventType: 'CARGO_COMPLETED',
+        },
+      ],
+    });
+    const baseline = runLaytimeEngine(input);
+    const result = runLaytimeEngine({
+      ...input,
+      clauses: [laytimeRate, demurrageRate, explicitAllTimeSaved],
+    });
+
+    expect(result.despatchTimeBasis).toEqual({
+      requestedTimeBasis: 'all_time_saved',
+      effectiveTimeBasis: 'all_time_saved',
+      source: 'explicit',
+      workingTimeSavedSeconds: 86_400,
+      selectedSavedSeconds: 86_400,
+      theoreticalExpiry: new Date('2026-03-06T06:00:00Z'),
+      projectedExceptedIntervals: [],
+    });
+    expect(result.despatchAmount).toBe(baseline.despatchAmount);
+  });
+
+  it('recognizes working-time-saved without applying different despatch math', () => {
+    const explicitWorkingTimeSaved: EngineClause = {
+      ...despatch,
+      parameters: { ...despatch.parameters, timeBasis: 'working_time_saved' },
+    };
+    const input = buildInput({
+      sofEvents: [
+        { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
+        {
+          eventTime: new Date('2026-03-05T06:00:00Z'),
+          eventType: 'CARGO_COMPLETED',
+        },
+      ],
+    });
+    const baseline = runLaytimeEngine(input);
+    const result = runLaytimeEngine({
+      ...input,
+      clauses: [laytimeRate, demurrageRate, explicitWorkingTimeSaved],
+    });
+
+    expect(result.despatchTimeBasis).toEqual({
+      requestedTimeBasis: 'working_time_saved',
+      effectiveTimeBasis: 'working_time_saved',
+      source: 'explicit',
+      workingTimeSavedSeconds: 86_400,
+      selectedSavedSeconds: 86_400,
+      theoreticalExpiry: null,
+      projectedExceptedIntervals: [],
+    });
+    expect(result.despatchAmount).toBe(baseline.despatchAmount);
+  });
+
+  it('defaults legacy despatch clauses to all-time-saved in the audit', () => {
+    const result = runLaytimeEngine(buildInput());
+
+    expect(result.despatchTimeBasis).toEqual({
+      requestedTimeBasis: null,
+      effectiveTimeBasis: 'all_time_saved',
+      source: 'legacy-default',
+      workingTimeSavedSeconds: 0,
+      selectedSavedSeconds: 0,
+      theoreticalExpiry: new Date('2026-03-06T06:00:00Z'),
+      projectedExceptedIntervals: [],
+    });
+  });
+
+  describe('despatch time-basis semantics', () => {
+    const completion = new Date('2026-03-07T18:00:00Z');
+    const fixedFortyEightHours: EngineClause = {
+      id: 'clause-laytime-48-hours',
+      clauseType: 'laytime_rate',
+      parameters: { hours: 48, noticeHours: 6 },
+    };
+    const workingTimeSavedDespatch: EngineClause = {
+      ...despatch,
+      parameters: {
+        ...despatch.parameters,
+        timeBasis: 'working_time_saved',
+      },
+    };
+
+    it('defines working-time-saved as the unused countable laytime allowance', () => {
+      const result = runLaytimeEngine(
+        buildInput({
+          clauses: [
+            fixedFortyEightHours,
+            demurrageRate,
+            workingTimeSavedDespatch,
+          ],
+          norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+          sofEvents: [{ eventTime: completion, eventType: 'CARGO_COMPLETED' }],
+        }),
+      );
+      const savedSeconds = Math.max(
+        result.allowedSeconds - result.usedSeconds,
+        0,
+      );
+
+      expect(result.allowedSeconds).toBe(48 * 60 * 60);
+      expect(result.usedSeconds).toBe(36 * 60 * 60);
+      expect(savedSeconds).toBe(12 * 60 * 60);
+    });
+
+    it('locks the future SHEX projection contract for all-time-saved', () => {
+      const allTimeSavedDespatch: EngineClause = {
+        ...despatch,
+        parameters: { ...despatch.parameters, timeBasis: 'all_time_saved' },
+      };
+      const commonInput = {
+        norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+        sofEvents: [{ eventTime: completion, eventType: 'CARGO_COMPLETED' }],
+      };
+      const workingResult = runLaytimeEngine(
+        buildInput({
+          ...commonInput,
+          clauses: [
+            fixedFortyEightHours,
+            demurrageRate,
+            workingTimeSavedDespatch,
+            shexEnabled,
+          ],
+        }),
+      );
+      const allTimeResult = runLaytimeEngine(
+        buildInput({
+          ...commonInput,
+          clauses: [
+            fixedFortyEightHours,
+            demurrageRate,
+            allTimeSavedDespatch,
+            shexEnabled,
+          ],
+        }),
+      );
+
+      expect(workingResult.despatchTimeBasis).toEqual({
+        requestedTimeBasis: 'working_time_saved',
+        effectiveTimeBasis: 'working_time_saved',
+        source: 'explicit',
+        workingTimeSavedSeconds: 12 * 60 * 60,
+        selectedSavedSeconds: 12 * 60 * 60,
+        theoreticalExpiry: null,
+        projectedExceptedIntervals: [],
+      });
+      expect(allTimeResult.despatchTimeBasis).toEqual({
+        requestedTimeBasis: 'all_time_saved',
+        effectiveTimeBasis: 'all_time_saved',
+        source: 'explicit',
+        workingTimeSavedSeconds: 12 * 60 * 60,
+        selectedSavedSeconds: 36 * 60 * 60,
+        theoreticalExpiry: new Date('2026-03-09T06:00:00Z'),
+        projectedExceptedIntervals: [
+          {
+            startTime: new Date('2026-03-08T00:00:00Z'),
+            endTime: new Date('2026-03-09T00:00:00Z'),
+          },
+        ],
+      });
+      expect(workingResult.despatchAmount).toBe(3_000);
+      expect(allTimeResult.despatchAmount).toBe(9_000);
+    });
+
+    it('defines SHINC all-time-saved and working-time-saved as equal', () => {
+      const allTimeSavedDespatch: EngineClause = {
+        ...despatch,
+        parameters: { ...despatch.parameters, timeBasis: 'all_time_saved' },
+      };
+      const result = runLaytimeEngine(
+        buildInput({
+          clauses: [
+            fixedFortyEightHours,
+            demurrageRate,
+            allTimeSavedDespatch,
+            shinc,
+          ],
+          norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+          sofEvents: [{ eventTime: completion, eventType: 'CARGO_COMPLETED' }],
+        }),
+      );
+      const workingTimeSavedSeconds = Math.max(
+        result.allowedSeconds - result.usedSeconds,
+        0,
+      );
+      const expectedAllTimeSavedSeconds = 12 * 60 * 60;
+
+      expect(workingTimeSavedSeconds).toBe(12 * 60 * 60);
+      expect(expectedAllTimeSavedSeconds).toBe(workingTimeSavedSeconds);
+      expect(result.despatchTimeBasis.effectiveTimeBasis).toBe(
+        'all_time_saved',
+      );
+      expect(result.despatchTimeBasis.selectedSavedSeconds).toBe(
+        workingTimeSavedSeconds,
+      );
+      const workingResult = runLaytimeEngine(
+        buildInput({
+          clauses: [
+            fixedFortyEightHours,
+            demurrageRate,
+            workingTimeSavedDespatch,
+            shinc,
+          ],
+          norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+          sofEvents: [{ eventTime: completion, eventType: 'CARGO_COMPLETED' }],
+        }),
+      );
+      expect(result.despatchAmount).toBe(workingResult.despatchAmount);
+    });
+
+    it.each([
+      ['explicit rate', { rate: 6_000 }],
+      ['multiplier', { multiplier: 0.5 }],
+      ['half-demurrage fallback', {}],
+    ])(
+      'prices both SHEX bases using the existing %s behavior',
+      (_rateMode, rateParameters) => {
+        const runForBasis = (
+          timeBasis: 'all_time_saved' | 'working_time_saved',
+        ) =>
+          runLaytimeEngine(
+            buildInput({
+              clauses: [
+                fixedFortyEightHours,
+                demurrageRate,
+                {
+                  id: `despatch-${timeBasis}`,
+                  clauseType: 'despatch',
+                  parameters: { ...rateParameters, timeBasis },
+                },
+                shexEnabled,
+              ],
+              norDocuments: [
+                { tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR },
+              ],
+              sofEvents: [
+                { eventTime: completion, eventType: 'CARGO_COMPLETED' },
+              ],
+            }),
+          );
+
+        expect(runForBasis('working_time_saved').despatchAmount).toBe(3_000);
+        expect(runForBasis('all_time_saved').despatchAmount).toBe(9_000);
+      },
+    );
+
+    it('prices a legacy despatch clause using corrected all-time-saved', () => {
+      const result = runLaytimeEngine(
+        buildInput({
+          clauses: [
+            fixedFortyEightHours,
+            demurrageRate,
+            { ...despatch, parameters: { rate: 6_000 } },
+            shexEnabled,
+          ],
+          norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+          sofEvents: [{ eventTime: completion, eventType: 'CARGO_COMPLETED' }],
+        }),
+      );
+
+      expect(result.despatchTimeBasis).toEqual(
+        expect.objectContaining({
+          requestedTimeBasis: null,
+          effectiveTimeBasis: 'all_time_saved',
+          selectedSavedSeconds: 36 * 60 * 60,
+        }),
+      );
+      expect(result.despatchAmount).toBe(9_000);
+    });
+
+    it('lets ATUTC change historical remaining working time without projecting post-completion evidence', () => {
+      const clauses = [
+        extendedLaytimeRate,
+        demurrageRate,
+        workingTimeSavedDespatch,
+        shexEnabled,
+      ];
+      const sofEvents = [
+        { eventTime: FRIDAY_NOR, eventType: 'NOR_TENDERED' },
+        { eventTime: SUNDAY_08, eventType: 'CARGO_STARTED' },
+        { eventTime: MONDAY_06, eventType: 'CARGO_COMPLETED' },
+        // Future weather and stoppage evidence is outside the completed calculation.
+        {
+          eventTime: new Date('2026-03-09T08:00:00Z'),
+          eventType: 'RAIN_STOPPAGE',
+        },
+        {
+          eventTime: new Date('2026-03-09T10:00:00Z'),
+          eventType: 'WORK_STOPPED',
+        },
+      ];
+      const withoutAtutc = runLaytimeEngine(
+        buildInput({
+          clauses,
+          norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+          sofEvents,
+        }),
+      );
+      const withAtutc = runLaytimeEngine(
+        buildInput({
+          clauses: [...clauses, atutcEnabled],
+          norDocuments: [{ tenderTime: FRIDAY_NOR, acceptedTime: FRIDAY_NOR }],
+          sofEvents,
+        }),
+      );
+
+      const remainingWithoutAtutc =
+        withoutAtutc.allowedSeconds - withoutAtutc.usedSeconds;
+      const remainingWithAtutc = withAtutc.allowedSeconds - withAtutc.usedSeconds;
+
+      expect(withAtutc.atutc.restoredSeconds).toBe(16 * 60 * 60);
+      expect(withAtutc.usedSeconds - withoutAtutc.usedSeconds).toBe(
+        16 * 60 * 60,
+      );
+      expect(remainingWithoutAtutc - remainingWithAtutc).toBe(16 * 60 * 60);
+      expect(withAtutc.completedAt).toEqual(MONDAY_06);
+      expect(
+        withAtutc.periods.every(
+          (period) => period.endTime.getTime() <= MONDAY_06.getTime(),
+        ),
+      ).toBe(true);
+    });
+  });
+
   it.each([
     [0.5, 6_000],
     [0.25, 3_000],

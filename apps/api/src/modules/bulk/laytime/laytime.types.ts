@@ -71,6 +71,19 @@ export interface LaytimeEngineResult {
     }>;
     limitation: string;
   };
+  /** Contractual despatch time basis and selected saved-time audit. */
+  despatchTimeBasis: {
+    requestedTimeBasis: 'all_time_saved' | 'working_time_saved' | null;
+    effectiveTimeBasis: 'all_time_saved' | 'working_time_saved';
+    source: 'explicit' | 'legacy-default';
+    workingTimeSavedSeconds: number;
+    selectedSavedSeconds: number;
+    theoreticalExpiry: Date | null;
+    projectedExceptedIntervals: Array<{
+      startTime: Date;
+      endTime: Date;
+    }>;
+  };
   /** Non-fatal notes: unsupported clauses, missing rates, applied defaults. */
   warnings: string[];
 }

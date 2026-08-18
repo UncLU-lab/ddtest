@@ -711,6 +711,7 @@ describe('LaytimeCalculationsService lifecycle', () => {
       cpClause('loading-despatch', 'despatch', {
         rate: 7_500,
         operation: 'Loading',
+        timeBasis: 'working_time_saved',
       }),
       cpClause('global-shex', 'shex_shinc', { shex: false }),
       cpClause('loading-shex', 'shex_shinc', {
@@ -764,6 +765,15 @@ describe('LaytimeCalculationsService lifecycle', () => {
           }),
           despatch: expect.objectContaining({
             clauseId: 'global-despatch',
+            timeBasis: {
+              requestedTimeBasis: null,
+              effectiveTimeBasis: 'all_time_saved',
+              source: 'legacy-default',
+              workingTimeSavedSeconds: 64_800,
+              selectedSavedSeconds: 64_800,
+              theoreticalExpiry: new Date('2026-03-06T06:00:00Z'),
+              projectedExceptedIntervals: [],
+            },
           }),
         }),
       }),
@@ -782,6 +792,15 @@ describe('LaytimeCalculationsService lifecycle', () => {
           }),
           despatch: expect.objectContaining({
             clauseId: 'loading-despatch',
+            timeBasis: {
+              requestedTimeBasis: 'working_time_saved',
+              effectiveTimeBasis: 'working_time_saved',
+              source: 'explicit',
+              workingTimeSavedSeconds: 0,
+              selectedSavedSeconds: 0,
+              theoreticalExpiry: null,
+              projectedExceptedIntervals: [],
+            },
           }),
           operationResult: expect.objectContaining({
             operation: 'Loading',
@@ -1032,6 +1051,7 @@ describe('LaytimeCalculationsService lifecycle', () => {
       cpClause('discharge-despatch', 'despatch', {
         rate: 10_000,
         operation: 'Discharge',
+        timeBasis: 'working_time_saved',
       }),
     ];
     const { service, manager } = buildServiceWithCharterParty(
@@ -1065,6 +1085,15 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     expect(parentCalculation.despatchAmount).toBe('2500.00');
     expect(childCalculation.despatchAmount).toBe('5000.00');
+    expect(
+      (childCalculation.decisionSnapshot as Record<string, any>).despatch
+        .timeBasis,
+    ).toEqual(
+      expect.objectContaining({
+        effectiveTimeBasis: 'working_time_saved',
+        selectedSavedSeconds: 43_200,
+      }),
+    );
     expect(
       (childCalculation.decisionSnapshot as Record<string, any>).operationResult
         .clauseSelection.selectedClauses,
