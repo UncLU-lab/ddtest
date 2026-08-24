@@ -1,6 +1,8 @@
-import { ReactNode } from "react";
+import { ReactNode, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 import { Anchor } from "lucide-react";
+
+import { useAuth } from "./AuthProvider";
 
 // ─── Primary nav config ─────────────────────────────────────────────────────
 // Route (not label) drives active-state highlighting, so it stays correct
@@ -25,6 +27,18 @@ function pillStyle(isActive: boolean): React.CSSProperties {
 
 export default function Layout() {
   const navigate = useNavigate();
+  const { mode, signOut } = useAuth();
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  async function handleSignOut() {
+    setIsSigningOut(true);
+
+    try {
+      await signOut();
+    } finally {
+      setIsSigningOut(false);
+    }
+  }
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: "#F9FAFB", fontFamily: "'Inter', sans-serif" }}>
@@ -61,6 +75,17 @@ export default function Layout() {
         </div>
 
         <div className="flex items-center gap-2">
+          {mode === "firebase" ? (
+            <button
+              className="rounded-full px-3 py-1.5"
+              disabled={isSigningOut}
+              onClick={() => void handleSignOut()}
+              style={{ fontSize: "12px", fontWeight: 500, color: "#334155", backgroundColor: "#E2E8F0" }}
+              type="button"
+            >
+              {isSigningOut ? "Signing out..." : "Sign out"}
+            </button>
+          ) : null}
           <div
             onClick={() => navigate("/settings")}
             className="ml-1 w-8 h-8 rounded-full flex items-center justify-center text-white cursor-pointer"

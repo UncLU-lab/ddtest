@@ -1,12 +1,11 @@
-import { getApps, initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { getAuthMode, getFirebaseAuth } from "./auth";
 
 // API client for the Demurrage Defender backend
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000/api/v1";
 
 async function getAccessToken(): Promise<string> {
-  const authMode = import.meta.env.VITE_AUTH_MODE;
+  const authMode = getAuthMode();
 
   if (authMode === "development") {
     const token = import.meta.env.VITE_DEVELOPMENT_AUTH_TOKEN;
@@ -20,25 +19,7 @@ async function getAccessToken(): Promise<string> {
     return token;
   }
 
-  if (authMode !== "firebase") {
-    throw new Error(
-      'VITE_AUTH_MODE must be either "firebase" or "development".',
-    );
-  }
-
-  const firebaseConfig = {
-    apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-    appId: import.meta.env.VITE_FIREBASE_APP_ID,
-  };
-
-  if (Object.values(firebaseConfig).some((value) => !value)) {
-    throw new Error("Firebase web authentication configuration is incomplete.");
-  }
-
-  const app = getApps()[0] ?? initializeApp(firebaseConfig);
-  const auth = getAuth(app);
+  const auth = getFirebaseAuth();
   await auth.authStateReady();
 
   if (!auth.currentUser) {
