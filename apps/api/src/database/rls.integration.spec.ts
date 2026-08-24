@@ -52,6 +52,19 @@ const PROTECTED_TABLES = [
   'dispute_cases_bulk',
 ] as const;
 
+const AUTHENTICATOR_POLICY_TABLES = [
+  'users',
+  'voyages',
+  'vessels',
+  'counterparties',
+  'charter_parties',
+  'cp_clauses',
+  'sof_documents',
+  'sof_events',
+  'nor_documents',
+  'laytime_calculations',
+] as const;
+
 function createOwnerDataSource(): DataSource {
   return new DataSource({
     type: 'postgres',
@@ -143,12 +156,23 @@ describeWithPostgres('PostgreSQL bulk row-level security', () => {
     await owner?.destroy();
   });
 
-  it('runs as a non-owner, non-superuser role with RLS forced on every protected table', async () => {
+  it('runs as the restricted role and cannot assume the authenticator role', async () => {
+    const [ownerIdentity] = await owner.query<
+      Array<{ current_user: string; rolsuper: boolean }>
+    >(`
+      SELECT current_user, role.rolsuper
+      FROM pg_roles role
+      WHERE role.rolname = current_user
+    `);
     const [role] = await application.query<
       Array<{
         current_user: string;
         session_user: string;
         rolsuper: boolean;
+        rolcreaterole: boolean;
+        rolcreatedb: boolean;
+        rolcanlogin: boolean;
+        rolinherit: boolean;
         rolbypassrls: boolean;
       }>
     >(`
@@ -156,17 +180,98 @@ describeWithPostgres('PostgreSQL bulk row-level security', () => {
         current_user,
         session_user,
         role.rolsuper,
+        role.rolcreaterole,
+        role.rolcreatedb,
+        role.rolcanlogin,
+        role.rolinherit,
         role.rolbypassrls
       FROM pg_roles role
       WHERE role.rolname = current_user
     `);
     expect(role).toEqual({
       current_user: 'demurrage_defender_app',
-      session_user: 'demurrage-defender-user',
+      session_user: ownerIdentity.current_user,
       rolsuper: false,
+      rolcreaterole: false,
+      rolcreatedb: false,
+      rolcanlogin: false,
+      rolinherit: false,
       rolbypassrls: false,
     });
 
+    const [authenticator] = await owner.query<
+      Array<{
+        rolsuper: boolean;
+        rolcreaterole: boolean;
+        rolcreatedb: boolean;
+        rolcanlogin: boolean;
+        rolinherit: boolean;
+        rolbypassrls: boolean;
+      }>
+    >(`
+      SELECT
+        rolsuper,
+        rolcreaterole,
+        rolcreatedb,
+        rolcanlogin,
+        rolinherit,
+        rolbypassrls
+      FROM pg_roles
+      WHERE rolname = 'demurrage_defender_authenticator'
+    `);
+    expect(authenticator).toEqual({
+      rolsuper: false,
+      rolcreaterole: false,
+      rolcreatedb: false,
+      rolcanlogin: false,
+      rolinherit: false,
+      rolbypassrls: false,
+    });
+
+    const [memberships] = await owner.query<
+      Array<{
+        login_can_set_application_role: boolean;
+        login_can_set_authenticator_role: boolean;
+        application_has_authenticator_role: boolean;
+      }>
+    >(
+      `SELECT
+         COALESCE((
+           SELECT bool_or(membership.set_option)
+           FROM pg_auth_members membership
+           JOIN pg_roles target ON target.oid = membership.roleid
+           JOIN pg_roles member ON member.oid = membership.member
+           WHERE target.rolname = 'demurrage_defender_app'
+             AND member.rolname = $1
+         ), false) AS login_can_set_application_role,
+         COALESCE((
+           SELECT bool_or(membership.set_option)
+           FROM pg_auth_members membership
+           JOIN pg_roles target ON target.oid = membership.roleid
+           JOIN pg_roles member ON member.oid = membership.member
+           WHERE target.rolname = 'demurrage_defender_authenticator'
+             AND member.rolname = $1
+         ), false) AS login_can_set_authenticator_role,
+         pg_has_role(
+           'demurrage_defender_app',
+           'demurrage_defender_authenticator',
+           'MEMBER'
+         ) AS application_has_authenticator_role`,
+      [ownerIdentity.current_user],
+    );
+    expect(memberships).toEqual({
+      login_can_set_application_role: true,
+      login_can_set_authenticator_role: false,
+      application_has_authenticator_role: false,
+    });
+    if (!ownerIdentity.rolsuper) {
+      await expect(
+        application.query(`SET ROLE demurrage_defender_authenticator`),
+      ).rejects.toMatchObject({ code: '42501' });
+    }
+  });
+
+  it('keeps RLS enabled and forced on every protected table', async () => {
     const tables = await owner.query<
       Array<{
         tablename: string;
@@ -200,17 +305,64 @@ describeWithPostgres('PostgreSQL bulk row-level security', () => {
     );
   });
 
-  it('has one explicit application-role policy per protected table and all required ownership indexes', async () => {
+  it('has tenant policies plus only narrow authenticator helper policies and all required ownership indexes', async () => {
     const policies = await owner.query<
-      Array<{ tablename: string; policyname: string }>
+      Array<{
+        tablename: string;
+        policyname: string;
+        roles: string;
+        cmd: string;
+        qual: string;
+      }>
     >(
-      `SELECT tablename, policyname
+      `SELECT tablename, policyname, roles, cmd, qual
        FROM pg_policies
        WHERE schemaname = 'public'
          AND tablename = ANY($1::text[])`,
       [PROTECTED_TABLES],
     );
-    expect(policies).toHaveLength(PROTECTED_TABLES.length);
+    const applicationPolicies = policies.filter(({ policyname }) =>
+      policyname.startsWith('tenant_isolation_'),
+    );
+    expect(applicationPolicies).toHaveLength(PROTECTED_TABLES.length);
+    expect(applicationPolicies).toEqual(
+      expect.arrayContaining(
+        PROTECTED_TABLES.map((tablename) =>
+          expect.objectContaining({
+            tablename,
+            policyname: `tenant_isolation_${tablename}`,
+            roles: '{demurrage_defender_app}',
+            cmd: 'ALL',
+          }),
+        ),
+      ),
+    );
+
+    const authenticatorPolicies = policies.filter(({ policyname }) =>
+      policyname.startsWith('authenticator_function_read_'),
+    );
+    expect(authenticatorPolicies).toHaveLength(
+      AUTHENTICATOR_POLICY_TABLES.length,
+    );
+    expect(authenticatorPolicies).toEqual(
+      expect.arrayContaining(
+        AUTHENTICATOR_POLICY_TABLES.map((tablename) =>
+          expect.objectContaining({
+            tablename,
+            policyname: `authenticator_function_read_${tablename}`,
+            roles: '{demurrage_defender_authenticator}',
+            cmd: 'SELECT',
+          }),
+        ),
+      ),
+    );
+    expect(authenticatorPolicies.every(({ qual }) => qual !== 'true')).toBe(
+      true,
+    );
+    expect(
+      authenticatorPolicies.find(({ tablename }) => tablename === 'users')
+        ?.qual,
+    ).toContain('app.authenticated_provider_identity');
 
     const requiredIndexes = [
       'idx_users_organization',
@@ -241,6 +393,153 @@ describeWithPostgres('PostgreSQL bulk row-level security', () => {
     expect(indexes.map(({ indexname }) => indexname).sort()).toEqual(
       [...requiredIndexes].sort(),
     );
+  });
+
+  it('hardens every definer function and limits authenticator table access to required columns', async () => {
+    const functions = await owner.query<
+      Array<{
+        signature: string;
+        owner: string;
+        security_definer: boolean;
+        volatility: string;
+        settings: string[] | null;
+        public_execute: boolean;
+        application_execute: boolean;
+        authenticator_execute: boolean;
+        definition: string;
+      }>
+    >(`
+      SELECT
+        function.oid::regprocedure::text AS signature,
+        owner.rolname AS owner,
+        function.prosecdef AS security_definer,
+        function.provolatile AS volatility,
+        function.proconfig AS settings,
+        EXISTS (
+          SELECT 1
+          FROM aclexplode(
+            COALESCE(function.proacl, acldefault('f', function.proowner))
+          ) privilege
+          WHERE privilege.grantee = 0
+            AND privilege.privilege_type = 'EXECUTE'
+        ) AS public_execute,
+        has_function_privilege(
+          'demurrage_defender_app', function.oid, 'EXECUTE'
+        ) AS application_execute,
+        has_function_privilege(
+          'demurrage_defender_authenticator', function.oid, 'EXECUTE'
+        ) AS authenticator_execute,
+        pg_get_functiondef(function.oid) AS definition
+      FROM pg_proc function
+      JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+      JOIN pg_roles owner ON owner.oid = function.proowner
+      WHERE namespace.nspname = 'app'
+      ORDER BY signature
+    `);
+
+    expect(functions).toHaveLength(14);
+    const contextFunctions = functions.filter(
+      ({ signature }) =>
+        signature === 'app.current_tenant_id()' ||
+        signature === 'app.current_user_id()',
+    );
+    expect(contextFunctions).toHaveLength(2);
+    expect(contextFunctions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          signature: 'app.current_tenant_id()',
+          security_definer: false,
+          public_execute: false,
+          application_execute: true,
+          authenticator_execute: true,
+        }),
+        expect.objectContaining({
+          signature: 'app.current_user_id()',
+          security_definer: false,
+          public_execute: false,
+          application_execute: true,
+          authenticator_execute: false,
+        }),
+      ]),
+    );
+
+    const definerFunctions = functions.filter(
+      ({ security_definer }) => security_definer,
+    );
+    const authenticatorExecutableHelpers = new Set([
+      'app.voyage_belongs_to_current_tenant(uuid)',
+      'app.charter_party_belongs_to_current_tenant(uuid)',
+      'app.sof_document_belongs_to_current_tenant(uuid)',
+    ]);
+    expect(definerFunctions).toHaveLength(12);
+    for (const databaseFunction of definerFunctions) {
+      expect(databaseFunction).toEqual(
+        expect.objectContaining({
+          owner: 'demurrage_defender_authenticator',
+          public_execute: false,
+          application_execute: true,
+          authenticator_execute: authenticatorExecutableHelpers.has(
+            databaseFunction.signature,
+          ),
+        }),
+      );
+      expect(databaseFunction.definition).not.toMatch(/\bEXECUTE\s+/i);
+      expect(databaseFunction.settings).toEqual(['search_path=pg_catalog']);
+    }
+    const resolverFunction = definerFunctions.find(
+      ({ signature }) => signature === 'app.resolve_authenticated_user(text)',
+    );
+    expect(resolverFunction).toEqual(
+      expect.objectContaining({ volatility: 'v' }),
+    );
+    expect(resolverFunction?.definition).toMatch(
+      /set_config\(\s*'app\.authenticated_provider_identity'/,
+    );
+
+    const tableGrants = await owner.query<
+      Array<{ table_name: string; privilege_type: string }>
+    >(`
+      SELECT table_name, privilege_type
+      FROM information_schema.role_table_grants
+      WHERE grantee = 'demurrage_defender_authenticator'
+        AND table_schema = 'public'
+    `);
+    expect(tableGrants).toEqual([]);
+
+    const columnGrants = await owner.query<
+      Array<{ table_name: string; column_name: string }>
+    >(`
+      SELECT table_name, column_name
+      FROM information_schema.role_column_grants
+      WHERE grantee = 'demurrage_defender_authenticator'
+        AND table_schema = 'public'
+        AND privilege_type = 'SELECT'
+      ORDER BY table_name, column_name
+    `);
+    expect(columnGrants).toEqual([
+      { table_name: 'charter_parties', column_name: 'id' },
+      { table_name: 'charter_parties', column_name: 'voyage_id' },
+      { table_name: 'counterparties', column_name: 'id' },
+      { table_name: 'counterparties', column_name: 'organization_id' },
+      { table_name: 'cp_clauses', column_name: 'charter_party_id' },
+      { table_name: 'cp_clauses', column_name: 'id' },
+      { table_name: 'laytime_calculations', column_name: 'id' },
+      { table_name: 'laytime_calculations', column_name: 'voyage_id' },
+      { table_name: 'nor_documents', column_name: 'id' },
+      { table_name: 'nor_documents', column_name: 'voyage_id' },
+      { table_name: 'sof_documents', column_name: 'id' },
+      { table_name: 'sof_documents', column_name: 'voyage_id' },
+      { table_name: 'sof_events', column_name: 'event_type' },
+      { table_name: 'sof_events', column_name: 'id' },
+      { table_name: 'sof_events', column_name: 'sof_id' },
+      { table_name: 'users', column_name: 'firebase_uid' },
+      { table_name: 'users', column_name: 'id' },
+      { table_name: 'users', column_name: 'organization_id' },
+      { table_name: 'vessels', column_name: 'id' },
+      { table_name: 'vessels', column_name: 'organization_id' },
+      { table_name: 'voyages', column_name: 'id' },
+      { table_name: 'voyages', column_name: 'organization_id' },
+    ]);
   });
 
   it.each([

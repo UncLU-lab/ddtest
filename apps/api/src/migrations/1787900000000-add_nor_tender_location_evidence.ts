@@ -4,6 +4,18 @@ const APPLICATION_ROLE = 'demurrage_defender_app';
 const AUTHENTICATOR_ROLE = 'demurrage_defender_authenticator';
 const TABLE = 'nor_tender_location_evidence';
 const POLICY = `tenant_isolation_${TABLE}`;
+const AUTHENTICATOR_COLUMN_GRANTS = {
+  nor_documents: 'id, voyage_id',
+  sof_events: 'id, sof_id, event_type',
+} as const;
+
+const AUTHENTICATOR_POLICY_EXPRESSIONS: Record<
+  keyof typeof AUTHENTICATOR_COLUMN_GRANTS,
+  string
+> = {
+  nor_documents: `app.voyage_belongs_to_current_tenant(voyage_id)`,
+  sof_events: `app.sof_document_belongs_to_current_tenant(sof_id)`,
+};
 
 export class AddNorTenderLocationEvidence1787900000000
   implements MigrationInterface
@@ -11,6 +23,9 @@ export class AddNorTenderLocationEvidence1787900000000
   name = 'AddNorTenderLocationEvidence1787900000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(
+      `GRANT CREATE ON SCHEMA app TO ${AUTHENTICATOR_ROLE}`,
+    );
     await queryRunner.query(`
       CREATE TABLE "${TABLE}" (
         "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -110,9 +125,30 @@ export class AddNorTenderLocationEvidence1787900000000
     ] as const;
 
     await queryRunner.query(`
-      GRANT SELECT ON TABLE public.nor_documents, public.sof_documents,
-        public.sof_events TO ${AUTHENTICATOR_ROLE}
+      GRANT SELECT (id, voyage_id) ON TABLE public.sof_documents
+      TO ${AUTHENTICATOR_ROLE}
     `);
+    for (const [table, columns] of Object.entries(
+      AUTHENTICATOR_COLUMN_GRANTS,
+    )) {
+      await queryRunner.query(`
+        GRANT SELECT (${columns}) ON TABLE public.${table}
+        TO ${AUTHENTICATOR_ROLE}
+      `);
+    }
+
+    for (const [table, expression] of Object.entries(
+      AUTHENTICATOR_POLICY_EXPRESSIONS,
+    )) {
+      await queryRunner.query(`
+        CREATE POLICY authenticator_function_read_${table}
+        ON public.${table}
+        AS PERMISSIVE
+        FOR SELECT
+        TO ${AUTHENTICATOR_ROLE}
+        USING (${expression})
+      `);
+    }
 
     for (const helper of ownershipFunctions) {
       await queryRunner.query(`
@@ -121,7 +157,7 @@ export class AddNorTenderLocationEvidence1787900000000
         LANGUAGE sql
         STABLE
         SECURITY DEFINER
-        SET search_path = pg_catalog, public, app
+        SET search_path = pg_catalog
         AS $function$
           ${helper.sql}
         $function$
@@ -135,7 +171,7 @@ export class AddNorTenderLocationEvidence1787900000000
       `);
       await queryRunner.query(`
         GRANT EXECUTE ON FUNCTION app.${helper.name}(uuid, uuid)
-        TO ${APPLICATION_ROLE}, ${AUTHENTICATOR_ROLE}
+        TO ${APPLICATION_ROLE}
       `);
     }
 
@@ -175,6 +211,9 @@ export class AddNorTenderLocationEvidence1787900000000
       USING (${expression})
       WITH CHECK (${expression})
     `);
+    await queryRunner.query(
+      `REVOKE CREATE ON SCHEMA app FROM ${AUTHENTICATOR_ROLE}`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
@@ -203,8 +242,21 @@ export class AddNorTenderLocationEvidence1787900000000
       );
     }
     await queryRunner.query(`
-      REVOKE SELECT ON TABLE public.nor_documents, public.sof_events
+      REVOKE SELECT (id, voyage_id) ON TABLE public.sof_documents
       FROM ${AUTHENTICATOR_ROLE}
     `);
+    for (const [table, columns] of Object.entries(
+      AUTHENTICATOR_COLUMN_GRANTS,
+    )) {
+      await queryRunner.query(`
+        REVOKE SELECT (${columns}) ON TABLE public.${table}
+        FROM ${AUTHENTICATOR_ROLE}
+      `);
+    }
+    for (const table of Object.keys(AUTHENTICATOR_COLUMN_GRANTS).reverse()) {
+      await queryRunner.query(
+        `DROP POLICY IF EXISTS authenticator_function_read_${table} ON public.${table}`,
+      );
+    }
   }
 }
