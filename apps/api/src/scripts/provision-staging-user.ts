@@ -1,7 +1,8 @@
 import 'reflect-metadata';
-import { DataSource, Repository } from 'typeorm';
-import { createDatabaseConfig } from '../config/database.config';
+import { createHash } from 'node:crypto';
+import { DataSource, QueryRunner, Repository } from 'typeorm';
 import {
+  createDatabaseConfig,
   DEFAULT_APPLICATION_DATABASE_ROLE,
   DEFAULT_RUNTIME_DATABASE_POOL_MAX,
 } from '../config/database.config';
@@ -12,6 +13,10 @@ const DEFAULT_ORGANIZATION_NAME = 'Demurrage Defender Staging';
 const DEFAULT_ORGANIZATION_SLUG = 'demurrage-defender-staging';
 const DEFAULT_USER_FULL_NAME = 'Demurrage Defender Staging User';
 const PROVISION_CONFIRMATION = 'provision-staging-user';
+const UUID_V5_NAMESPACE = Buffer.from(
+  '6ba7b8119dad11d180b400c04fd430c8',
+  'hex',
+);
 
 export interface ProvisioningInput {
   databaseUrl: string;
@@ -29,6 +34,7 @@ export interface ProvisioningResult {
   firebaseUid: string;
   email: string;
   runtimeRole: string;
+  tenantContextCleared: boolean;
 }
 
 type ResolverRow = {
@@ -40,6 +46,13 @@ type ResolverRow = {
 type RepoBundle = {
   organizations: Repository<Organization>;
   users: Repository<User>;
+};
+
+type ProvisionedIdentity = {
+  organizationId: string;
+  organizationSlug: string;
+  userId: string;
+  firebaseUid: string;
 };
 
 export function readProvisioningInput(
@@ -80,15 +93,76 @@ export function readProvisioningInput(
   };
 }
 
+export function deriveOrganizationId(organizationSlug: string): string {
+  const hash = createHash('sha1')
+    .update(UUID_V5_NAMESPACE)
+    .update(Buffer.from(organizationSlug, 'utf8'))
+    .digest();
+
+  const bytes = Buffer.from(hash.subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  const hex = bytes.toString('hex');
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join('-');
+}
+
+export async function resolveExistingUser(
+  application: DataSource,
+  firebaseUid: string,
+): Promise<ResolverRow | null> {
+  const rows = await application.query<ResolverRow[]>(
+    `SELECT * FROM app.resolve_authenticated_user($1::text)`,
+    [firebaseUid],
+  );
+
+  if (rows.length > 1) {
+    throw new Error(
+      'resolve_authenticated_user returned multiple rows for the supplied Firebase UID.',
+    );
+  }
+
+  return rows[0] ?? null;
+}
+
+async function enterProvisioningRole(runner: QueryRunner): Promise<void> {
+  await runner.query(`SET LOCAL ROLE ${DEFAULT_APPLICATION_DATABASE_ROLE}`);
+}
+
+async function establishTenantContext(
+  runner: QueryRunner,
+  organizationId: string,
+): Promise<void> {
+  await runner.query(
+    `SELECT
+       set_config('app.current_tenant_id', $1, true),
+       set_config('app.current_user_id', '', true)`,
+    [organizationId],
+  );
+}
+
 async function ensureOrganization(
   organizations: Repository<Organization>,
+  organizationId: string,
   input: ProvisioningInput,
 ): Promise<Organization> {
   const existing = await organizations.findOne({
-    where: { slug: input.organizationSlug },
+    where: { id: organizationId },
   });
 
   if (existing) {
+    if (existing.slug !== input.organizationSlug) {
+      throw new Error(
+        `Organization ${organizationId} already exists with a different slug.`,
+      );
+    }
+
     if (existing.name !== input.organizationName) {
       throw new Error(
         `Organization slug "${input.organizationSlug}" already exists with a different name.`,
@@ -98,17 +172,25 @@ async function ensureOrganization(
     return existing;
   }
 
-  return organizations.save(
-    organizations.create({
-      name: input.organizationName,
-      slug: input.organizationSlug,
-    }),
-  );
+  try {
+    return organizations.save(
+      organizations.create({
+        id: organizationId,
+        name: input.organizationName,
+        slug: input.organizationSlug,
+      }),
+    );
+  } catch (error) {
+    throw mapUniquenessError(
+      error,
+      `Organization slug "${input.organizationSlug}" is already assigned to another organization.`,
+    );
+  }
 }
 
 async function ensureUser(
   users: Repository<User>,
-  organization: Organization,
+  organizationId: string,
   input: ProvisioningInput,
 ): Promise<User> {
   const existingByFirebaseUid = await users.findOne({
@@ -143,7 +225,7 @@ async function ensureUser(
   if (existing) {
     if (
       existing.organizationId &&
-      existing.organizationId !== organization.id
+      existing.organizationId !== organizationId
     ) {
       throw new Error(
         `Firebase UID "${input.firebaseUid}" is already assigned to another organization.`,
@@ -162,74 +244,187 @@ async function ensureUser(
       );
     }
 
-    if (existing.organizationId !== organization.id) {
-      existing.organizationId = organization.id;
+    if (existing.organizationId !== organizationId) {
+      existing.organizationId = organizationId;
       return users.save(existing);
     }
 
     return existing;
   }
 
-  return users.save(
-    users.create({
-      firebaseUid: input.firebaseUid,
-      email: input.email,
-      fullName: input.fullName,
-      organizationId: organization.id,
-    }),
+  try {
+    return users.save(
+      users.create({
+        firebaseUid: input.firebaseUid,
+        email: input.email,
+        fullName: input.fullName,
+        organizationId,
+      }),
+    );
+  } catch (error) {
+    throw mapUniquenessError(
+      error,
+      'A conflicting existing user already owns the supplied Firebase UID or email.',
+    );
+  }
+}
+
+function mapUniquenessError(error: unknown, message: string): Error {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String(error.code)
+      : undefined;
+
+  if (code === '23505') {
+    return new Error(message);
+  }
+
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+export async function provisionStagingUserWithRepos(
+  repos: RepoBundle,
+  input: ProvisioningInput,
+  organizationId = deriveOrganizationId(input.organizationSlug),
+): Promise<ProvisionedIdentity> {
+  const organization = await ensureOrganization(
+    repos.organizations,
+    organizationId,
+    input,
   );
+  const user = await ensureUser(repos.users, organization.id, input);
+
+  return {
+    organizationId: organization.id,
+    organizationSlug: organization.slug,
+    userId: user.id,
+    firebaseUid: user.firebaseUid,
+  };
+}
+
+export async function runProvisioningTransaction(
+  runner: QueryRunner,
+  input: ProvisioningInput,
+  organizationId: string,
+): Promise<ProvisionedIdentity> {
+  await runner.startTransaction();
+
+  try {
+    await enterProvisioningRole(runner);
+    await establishTenantContext(runner, organizationId);
+
+    const provisioned = await provisionStagingUserWithRepos(
+      {
+        organizations: runner.manager.getRepository(Organization),
+        users: runner.manager.getRepository(User),
+      },
+      input,
+      organizationId,
+    );
+
+    await runner.commitTransaction();
+    return provisioned;
+  } catch (error) {
+    await runner.rollbackTransaction();
+    throw error;
+  }
 }
 
 export async function verifyProvisioning(
   owner: DataSource,
   application: DataSource,
-  result: {
-    organizationId: string;
-    organizationSlug: string;
-    userId: string;
-    firebaseUid: string;
-  },
+  result: ProvisionedIdentity,
 ): Promise<ProvisioningResult> {
-  const [counts] = await owner.query<
-    Array<{
+  const applicationRunner = application.createQueryRunner();
+  await applicationRunner.connect();
+
+  let counts:
+    | {
+        organization_count: string;
+        firebase_uid_count: string;
+        email_count: string;
+        email: string;
+        organization_id: string;
+        user_id: string;
+      }
+    | undefined;
+
+  try {
+    await applicationRunner.startTransaction();
+    await establishTenantContext(applicationRunner, result.organizationId);
+
+    [counts] = (await applicationRunner.query(
+      `
+      SELECT
+        (SELECT COUNT(*)::text
+         FROM organizations
+         WHERE id = $1 AND slug = $2) AS organization_count,
+        (SELECT COUNT(*)::text
+         FROM users
+         WHERE firebase_uid = $3) AS firebase_uid_count,
+        (SELECT COUNT(*)::text
+         FROM users
+         WHERE email = (
+           SELECT email FROM users WHERE id = $4
+         )) AS email_count,
+        user_record.email AS email,
+        user_record.organization_id::text AS organization_id,
+        user_record.id::text AS user_id
+      FROM users user_record
+      WHERE user_record.id = $4
+      `,
+      [
+        result.organizationId,
+        result.organizationSlug,
+        result.firebaseUid,
+        result.userId,
+      ],
+    )) as Array<{
       organization_count: string;
       firebase_uid_count: string;
+      email_count: string;
       email: string;
       organization_id: string;
       user_id: string;
-    }>
-  >(
-    `
-    SELECT
-      (SELECT COUNT(*)::text
-       FROM organizations
-       WHERE slug = $1) AS organization_count,
-      (SELECT COUNT(*)::text
-       FROM users
-       WHERE firebase_uid = $2) AS firebase_uid_count,
-      user_record.email AS email,
-      user_record.organization_id::text AS organization_id,
-      user_record.id::text AS user_id
-    FROM users user_record
-    WHERE user_record.id = $3
-    `,
-    [result.organizationSlug, result.firebaseUid, result.userId],
-  );
+    }>;
 
-  if (!counts) {
-    throw new Error('Provisioned user record could not be reloaded.');
-  }
+    if (!counts) {
+      throw new Error('Provisioned user record could not be reloaded.');
+    }
 
-  if (counts.organization_count !== '1') {
-    throw new Error('Expected exactly one staging organization.');
-  }
+    if (counts.organization_count !== '1') {
+      throw new Error('Expected exactly one staging organization.');
+    }
 
-  if (counts.firebase_uid_count !== '1') {
-    throw new Error('Expected exactly one user for the supplied Firebase UID.');
-  }
+    if (counts.firebase_uid_count !== '1') {
+      throw new Error(
+        'Expected exactly one user for the supplied Firebase UID.',
+      );
+    }
 
-  if (counts.organization_id !== result.organizationId) {
-    throw new Error('Provisioned user is not linked to the expected organization.');
+    if (counts.email_count !== '1') {
+      throw new Error('Expected exactly one user for the supplied email.');
+    }
+
+    if (counts.organization_id !== result.organizationId) {
+      throw new Error(
+        'Provisioned user is not linked to the expected organization.',
+      );
+    }
+
+    const ownRows = (await applicationRunner.query(
+      `SELECT id FROM organizations WHERE id = $1`,
+      [result.organizationId],
+    )) as Array<{ id: string }>;
+    if (ownRows.length !== 1) {
+      throw new Error(
+        'Application role could not read the provisioned organization.',
+      );
+    }
+
+    await applicationRunner.rollbackTransaction();
+  } finally {
+    await applicationRunner.release();
   }
 
   const resolved = await application.query<ResolverRow[]>(
@@ -264,6 +459,57 @@ export async function verifyProvisioning(
     );
   }
 
+  const unauthorizedRunner = application.createQueryRunner();
+  await unauthorizedRunner.connect();
+
+  try {
+    await unauthorizedRunner.startTransaction();
+    let rejected = false;
+
+    try {
+      await unauthorizedRunner.query(
+        `INSERT INTO organizations (id, name, slug)
+         VALUES ($1, 'Unauthorized Organization', $2)`,
+        [
+          deriveOrganizationId(`unauthorized-${result.organizationId}`),
+          `unauthorized-${result.organizationSlug}`,
+        ],
+      );
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String(error.code)
+          : undefined;
+      rejected = code === '42501';
+      if (!rejected) {
+        throw error;
+      }
+    }
+
+    if (!rejected) {
+      throw new Error(
+        'Application role unexpectedly inserted an organization without tenant context.',
+      );
+    }
+
+    await unauthorizedRunner.rollbackTransaction();
+  } finally {
+    await unauthorizedRunner.release();
+  }
+
+  const [tenantContext] = await owner.query<
+    Array<{
+      tenant_id: string | null;
+      user_id: string | null;
+      current_user: string;
+    }>
+  >(
+    `SELECT
+       current_setting('app.current_tenant_id', true) AS tenant_id,
+       current_setting('app.current_user_id', true) AS user_id,
+       current_user`,
+  );
+
   return {
     organizationId: result.organizationId,
     organizationSlug: result.organizationSlug,
@@ -271,31 +517,11 @@ export async function verifyProvisioning(
     firebaseUid: result.firebaseUid,
     email: counts.email,
     runtimeRole: role.current_user,
+    tenantContextCleared:
+      (tenantContext?.tenant_id ?? '') === '' &&
+      (tenantContext?.user_id ?? '') === '' &&
+      tenantContext?.current_user !== DEFAULT_APPLICATION_DATABASE_ROLE,
   };
-}
-
-export async function provisionStagingUserWithRepos(
-  repos: RepoBundle,
-  input: ProvisioningInput,
-): Promise<{
-  organizationId: string;
-  organizationSlug: string;
-  userId: string;
-  firebaseUid: string;
-}> {
-  const organization = await ensureOrganization(repos.organizations, input);
-  const user = await ensureUser(repos.users, organization, input);
-
-  return {
-    organizationId: organization.id,
-    organizationSlug: organization.slug,
-    userId: user.id,
-    firebaseUid: user.firebaseUid,
-  };
-}
-
-function createOwnerDataSource(databaseUrl: string): DataSource {
-  return new DataSource(createBaseDatabaseConfig(databaseUrl));
 }
 
 function createBaseDatabaseConfig(databaseUrl: string) {
@@ -330,7 +556,13 @@ function createBaseDatabaseConfig(databaseUrl: string) {
   }
 }
 
-function createApplicationVerificationDataSource(databaseUrl: string): DataSource {
+function createOwnerDataSource(databaseUrl: string): DataSource {
+  return new DataSource(createBaseDatabaseConfig(databaseUrl));
+}
+
+function createApplicationVerificationDataSource(
+  databaseUrl: string,
+): DataSource {
   return new DataSource({
     ...createBaseDatabaseConfig(databaseUrl),
     extra: {
@@ -351,19 +583,22 @@ export async function runProvisioning(
   await owner.initialize();
   await application.initialize();
 
-  try {
-    const provisioned = await owner.transaction(async (manager) =>
-      provisionStagingUserWithRepos(
-        {
-          organizations: manager.getRepository(Organization),
-          users: manager.getRepository(User),
-        },
-        input,
-      ),
-    );
+  const existing = await resolveExistingUser(application, input.firebaseUid);
+  const organizationId =
+    existing?.organization_id ?? deriveOrganizationId(input.organizationSlug);
 
+  const runner = owner.createQueryRunner();
+  await runner.connect();
+
+  try {
+    const provisioned = await runProvisioningTransaction(
+      runner,
+      input,
+      organizationId,
+    );
     return verifyProvisioning(owner, application, provisioned);
   } finally {
+    await runner.release();
     await application.destroy();
     await owner.destroy();
   }
@@ -379,6 +614,7 @@ function printResult(result: ProvisioningResult): void {
         firebaseUid: result.firebaseUid,
         email: result.email,
         runtimeRole: result.runtimeRole,
+        tenantContextCleared: result.tenantContextCleared,
       },
       null,
       2,

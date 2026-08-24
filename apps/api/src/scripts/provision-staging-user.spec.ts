@@ -1,7 +1,9 @@
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, QueryRunner, Repository } from 'typeorm';
 import {
+  deriveOrganizationId,
   provisionStagingUserWithRepos,
   readProvisioningInput,
+  runProvisioningTransaction,
   verifyProvisioning,
   type ProvisioningInput,
 } from './provision-staging-user';
@@ -22,7 +24,7 @@ function input(overrides: Partial<ProvisioningInput> = {}): ProvisioningInput {
 
 function organization(overrides: Partial<Organization> = {}): Organization {
   return {
-    id: 'org-1',
+    id: deriveOrganizationId('demurrage-defender-staging'),
     name: 'Demurrage Defender Staging',
     slug: 'demurrage-defender-staging',
     createdAt: new Date('2026-08-24T00:00:00Z'),
@@ -40,7 +42,7 @@ function user(overrides: Partial<User> = {}): User {
     fullName: 'Staging User',
     createdAt: new Date('2026-08-24T00:00:00Z'),
     lastLogin: null,
-    organizationId: 'org-1',
+    organizationId: deriveOrganizationId('demurrage-defender-staging'),
     organization: null,
     auditLogs: [],
     aiInteractions: [],
@@ -81,6 +83,20 @@ describe('readProvisioningInput', () => {
   });
 });
 
+describe('deriveOrganizationId', () => {
+  it('is deterministic for the trusted slug', () => {
+    const first = deriveOrganizationId('demurrage-defender-staging');
+    const second = deriveOrganizationId('demurrage-defender-staging');
+    const other = deriveOrganizationId('other-slug');
+
+    expect(first).toBe(second);
+    expect(first).not.toBe(other);
+    expect(first).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+});
+
 describe('provisionStagingUserWithRepos', () => {
   function createRepos(options: {
     existingOrganization?: Organization | null;
@@ -89,7 +105,7 @@ describe('provisionStagingUserWithRepos', () => {
   }) {
     const saveOrganization = jest.fn(async (value: Organization) => ({
       ...value,
-      id: value.id ?? 'org-1',
+      id: value.id ?? deriveOrganizationId('demurrage-defender-staging'),
       createdAt: value.createdAt ?? new Date('2026-08-24T00:00:00Z'),
       updatedAt: value.updatedAt ?? new Date('2026-08-24T00:00:00Z'),
     }));
@@ -119,20 +135,24 @@ describe('provisionStagingUserWithRepos', () => {
     return { organizations, users, saveOrganization, saveUser };
   }
 
-  it('creates a new staging organization and user', async () => {
+  it('creates a new staging organization and user with the derived organization id', async () => {
     const repos = createRepos({});
 
     const result = await provisionStagingUserWithRepos(repos, input());
 
-    expect(repos.saveOrganization).toHaveBeenCalled();
+    expect(repos.saveOrganization).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: deriveOrganizationId('demurrage-defender-staging'),
+      }),
+    );
     expect(repos.saveUser).toHaveBeenCalledWith(
       expect.objectContaining({
         firebaseUid: 'firebase-uid-1',
-        organizationId: 'org-1',
+        organizationId: deriveOrganizationId('demurrage-defender-staging'),
       }),
     );
     expect(result).toEqual({
-      organizationId: 'org-1',
+      organizationId: deriveOrganizationId('demurrage-defender-staging'),
       organizationSlug: 'demurrage-defender-staging',
       userId: 'user-1',
       firebaseUid: 'firebase-uid-1',
@@ -202,33 +222,119 @@ describe('provisionStagingUserWithRepos', () => {
     const result = await provisionStagingUserWithRepos(repos, input());
 
     expect(repos.saveUser).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: 'org-1' }),
+      expect.objectContaining({
+        organizationId: deriveOrganizationId('demurrage-defender-staging'),
+      }),
     );
-    expect(result.organizationId).toBe('org-1');
+    expect(result.organizationId).toBe(
+      deriveOrganizationId('demurrage-defender-staging'),
+    );
+  });
+});
+
+describe('runProvisioningTransaction', () => {
+  it('establishes role and tenant context inside the transaction before provisioning', async () => {
+    const orgRepo = {
+      findOne: jest.fn(async () => null),
+      create: jest.fn((value) => value),
+      save: jest.fn(async (value) => value),
+    } as unknown as Repository<Organization>;
+    const userRepo = {
+      findOne: jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(null),
+      create: jest.fn((value) => value),
+      save: jest.fn(async (value) => ({ ...value, id: 'user-1' })),
+    } as unknown as Repository<User>;
+
+    const manager = {
+      getRepository: jest
+        .fn()
+        .mockReturnValueOnce(orgRepo)
+        .mockReturnValueOnce(userRepo),
+    };
+    const runner = {
+      startTransaction: jest.fn(async () => undefined),
+      commitTransaction: jest.fn(async () => undefined),
+      rollbackTransaction: jest.fn(async () => undefined),
+      query: jest.fn(async () => undefined),
+      manager,
+    } as unknown as QueryRunner;
+
+    await runProvisioningTransaction(
+      runner,
+      input(),
+      deriveOrganizationId('demurrage-defender-staging'),
+    );
+
+    expect(runner.query).toHaveBeenNthCalledWith(
+      1,
+      'SET LOCAL ROLE demurrage_defender_app',
+    );
+    expect(runner.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("set_config('app.current_tenant_id'"),
+      [deriveOrganizationId('demurrage-defender-staging')],
+    );
+    expect(runner.commitTransaction).toHaveBeenCalled();
+    expect(runner.rollbackTransaction).not.toHaveBeenCalled();
   });
 });
 
 describe('verifyProvisioning', () => {
-  it('verifies the database result and runtime role', async () => {
+  it('verifies the database result, runtime role, unauthorized insert rejection, and cleared tenant context', async () => {
+    const applicationRunner = {
+      connect: jest.fn(async () => undefined),
+      startTransaction: jest.fn(async () => undefined),
+      rollbackTransaction: jest.fn(async () => undefined),
+      release: jest.fn(async () => undefined),
+      query: jest
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([
+          {
+            organization_count: '1',
+            firebase_uid_count: '1',
+            email_count: '1',
+            email: 'staging@example.test',
+            organization_id: deriveOrganizationId('demurrage-defender-staging'),
+            user_id: 'user-1',
+          },
+        ])
+        .mockResolvedValueOnce([
+          { id: deriveOrganizationId('demurrage-defender-staging') },
+        ]),
+    } as unknown as QueryRunner;
+
+    const unauthorizedRunner = {
+      connect: jest.fn(async () => undefined),
+      startTransaction: jest.fn(async () => undefined),
+      rollbackTransaction: jest.fn(async () => undefined),
+      release: jest.fn(async () => undefined),
+      query: jest.fn(async () => {
+        const error = new Error('forbidden') as Error & { code?: string };
+        error.code = '42501';
+        throw error;
+      }),
+    } as unknown as QueryRunner;
+
     const owner = {
       query: jest.fn(async () => [
-        {
-          organization_count: '1',
-          firebase_uid_count: '1',
-          email: 'staging@example.test',
-          organization_id: 'org-1',
-          user_id: 'user-1',
-        },
+        { tenant_id: '', user_id: '', current_user: 'render_owner' },
       ]),
     } as unknown as DataSource;
 
     const application = {
+      createQueryRunner: jest
+        .fn()
+        .mockReturnValueOnce(applicationRunner)
+        .mockReturnValueOnce(unauthorizedRunner),
       query: jest
         .fn()
         .mockResolvedValueOnce([
           {
             user_id: 'user-1',
-            organization_id: 'org-1',
+            organization_id: deriveOrganizationId(
+              'demurrage-defender-staging',
+            ),
             organization_exists: true,
           },
         ])
@@ -237,34 +343,53 @@ describe('verifyProvisioning', () => {
 
     await expect(
       verifyProvisioning(owner, application, {
-        organizationId: 'org-1',
+        organizationId: deriveOrganizationId('demurrage-defender-staging'),
         organizationSlug: 'demurrage-defender-staging',
         userId: 'user-1',
         firebaseUid: 'firebase-uid-1',
       }),
     ).resolves.toEqual(
       expect.objectContaining({
-        organizationId: 'org-1',
+        organizationId: deriveOrganizationId('demurrage-defender-staging'),
         userId: 'user-1',
         runtimeRole: 'demurrage_defender_app',
+        tenantContextCleared: true,
       }),
     );
   });
 
   it('fails when resolve_authenticated_user is not unique', async () => {
+    const applicationRunner = {
+      connect: jest.fn(async () => undefined),
+      startTransaction: jest.fn(async () => undefined),
+      rollbackTransaction: jest.fn(async () => undefined),
+      release: jest.fn(async () => undefined),
+      query: jest
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([
+          {
+            organization_count: '1',
+            firebase_uid_count: '1',
+            email_count: '1',
+            email: 'staging@example.test',
+            organization_id: deriveOrganizationId('demurrage-defender-staging'),
+            user_id: 'user-1',
+          },
+        ])
+        .mockResolvedValueOnce([
+          { id: deriveOrganizationId('demurrage-defender-staging') },
+        ]),
+    } as unknown as QueryRunner;
+
     const owner = {
       query: jest.fn(async () => [
-        {
-          organization_count: '1',
-          firebase_uid_count: '1',
-          email: 'staging@example.test',
-          organization_id: 'org-1',
-          user_id: 'user-1',
-        },
+        { tenant_id: '', user_id: '', current_user: 'render_owner' },
       ]),
     } as unknown as DataSource;
 
     const application = {
+      createQueryRunner: jest.fn().mockReturnValue(applicationRunner),
       query: jest
         .fn()
         .mockResolvedValueOnce([])
@@ -273,7 +398,7 @@ describe('verifyProvisioning', () => {
 
     await expect(
       verifyProvisioning(owner, application, {
-        organizationId: 'org-1',
+        organizationId: deriveOrganizationId('demurrage-defender-staging'),
         organizationSlug: 'demurrage-defender-staging',
         userId: 'user-1',
         firebaseUid: 'firebase-uid-1',
