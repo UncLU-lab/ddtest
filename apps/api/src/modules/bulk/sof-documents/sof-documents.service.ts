@@ -9,6 +9,7 @@ import { Paginated, paginate } from '../../../common/dto/paginated';
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
+import { TenantContextService } from '../../cross-cutting/tenant-context/tenant-context.service';
 import { VoyagesService } from '../voyages/voyages.service';
 import { CreateSofDocumentDto } from './dto/create-sof-document.dto';
 import { CreateSofEventDto } from './dto/create-sof-event.dto';
@@ -23,6 +24,7 @@ export class SofDocumentsService {
     @InjectRepository(SofEvent)
     private readonly events: Repository<SofEvent>,
     private readonly voyagesService: VoyagesService,
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   async findForVoyage(
@@ -57,11 +59,15 @@ export class SofDocumentsService {
   }
 
   async findOne(id: string): Promise<SofDocument> {
-    const document = await this.documents.findOne({ where: { id } });
+    const document = await this.documents.findOne({
+      where: { id },
+    });
 
     if (!document) {
       throw new NotFoundException(`SOF document ${id} not found`);
     }
+
+    await this.voyagesService.ensureExists(document.voyageId);
 
     return document;
   }
@@ -110,11 +116,15 @@ export class SofDocumentsService {
    * manual override and requires a reason, so the audit trail explains the edit.
    */
   async updateEvent(id: string, dto: UpdateSofEventDto): Promise<SofEvent> {
-    const event = await this.events.findOne({ where: { id } });
+    const event = await this.events.findOne({
+      where: { id },
+    });
 
     if (!event) {
       throw new NotFoundException(`SOF event ${id} not found`);
     }
+
+    await this.findOne(event.sofId);
 
     const correctsExtraction =
       (dto.eventTime !== undefined &&

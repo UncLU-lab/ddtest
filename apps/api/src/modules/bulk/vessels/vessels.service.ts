@@ -6,6 +6,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Paginated, paginate } from '../../../common/dto/paginated';
+import { TenantContextService } from '../../cross-cutting/tenant-context/tenant-context.service';
 import { Vessel } from '../entities/vessel.entity';
 import { Voyage } from '../entities/voyage.entity';
 import { CreateVesselDto } from './dto/create-vessel.dto';
@@ -19,11 +20,14 @@ export class VesselsService {
     private readonly vessels: Repository<Vessel>,
     @InjectRepository(Voyage)
     private readonly voyages: Repository<Voyage>,
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   async findAll(query: ListVesselsQueryDto): Promise<Paginated<Vessel>> {
+    const organizationId = this.tenantContext.getOrganizationId();
     const builder = this.vessels
       .createQueryBuilder('vessel')
+      .andWhere('vessel.organizationId = :organizationId', { organizationId })
       .orderBy('vessel.name', 'ASC')
       .skip(query.skip)
       .take(query.limit);
@@ -42,9 +46,15 @@ export class VesselsService {
   }
 
   async findOne(id: string): Promise<Vessel> {
-    const vessel = await this.vessels.findOne({ where: { id } });
+    const organizationId = this.tenantContext.getOrganizationId();
+    const vessel = await this.vessels.findOne({
+      where: {
+        id,
+        organizationId,
+      },
+    });
 
-    if (!vessel) {
+    if (!vessel || vessel.organizationId !== organizationId) {
       throw new NotFoundException(`Vessel ${id} not found`);
     }
 
@@ -52,6 +62,7 @@ export class VesselsService {
   }
 
   async create(dto: CreateVesselDto): Promise<Vessel> {
+    const organizationId = this.tenantContext.getOrganizationId();
     const existing = await this.vessels.findOne({
       where: { imo: dto.imo },
       select: { id: true },
@@ -63,7 +74,7 @@ export class VesselsService {
       );
     }
 
-    return this.vessels.save(this.vessels.create(dto));
+    return this.vessels.save(this.vessels.create({ ...dto, organizationId }));
   }
 
   async update(id: string, dto: UpdateVesselDto): Promise<Vessel> {
@@ -88,7 +99,10 @@ export class VesselsService {
     const vessel = await this.findOne(id);
 
     const voyageCount = await this.voyages.count({
-      where: { vesselId: vessel.id },
+      where: {
+        vesselId: vessel.id,
+        organizationId: this.tenantContext.getOrganizationId(),
+      },
     });
     if (voyageCount > 0) {
       throw new ConflictException(
@@ -106,7 +120,10 @@ export class VesselsService {
     await this.findOne(id);
 
     const result = await this.voyages.findAndCount({
-      where: { vesselId: id },
+      where: {
+        vesselId: id,
+        organizationId: this.tenantContext.getOrganizationId(),
+      },
       order: { laycanStart: 'DESC' },
       skip: query.skip,
       take: query.limit,

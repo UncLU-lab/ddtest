@@ -9,11 +9,14 @@ import { useShipments } from "./data/ShipmentsContext";
 import {
   createSofDocument,
   createSofEvent,
+  createNorTenderLocationEvidence,
   createBulkDispute,
   getLaytimeCalculations,
   getLaytimeOperationResults,
   getSofDocuments,
   getSofEvents,
+  getNorTenderLocationEvidence,
+  reversibleSettlementStatusLabel,
   runLaytimeCalculation,
   updateSofEvent,
   type LaytimeDecisionSnapshot,
@@ -21,9 +24,16 @@ import {
   type LaytimeOperationResult,
   type SofDocument,
   type SofEvent,
+  type NorTenderLocationEvidence,
+  type NorPortRelation,
+  type NorBerthRelation,
+  type NorWaitingPlace,
+  type ReversibleLaytimeOperationAnalysis,
+  type ReversibleSettlementStatus,
 } from "../lib/api";
+import { formatCurrencyAmount } from "../lib/currency";
 
-type EventOperation = NonNullable<SofEvent["operation"]>;
+type EventOperation = SofEvent["operation"];
 
 type CalcRowProps = {
   label: string;
@@ -86,6 +96,8 @@ type TimelineRow = {
   duration: string;
   cause: string;
   causeActive: boolean;
+  category?: string;
+  evidenceStatus?: "selected" | "excluded";
 };
 
 type ManualEventForm = {
@@ -105,6 +117,34 @@ type ManualEventDetails = {
   deductible?: boolean;
   notes?: string;
 };
+
+type LocationEvidenceForm = {
+  evidenceTime: string;
+  operation: "Loading" | "Discharge";
+  portRelation: NorPortRelation;
+  berthRelation: NorBerthRelation;
+  waitingPlace: NorWaitingPlace;
+  source: "MANUAL" | "SOF";
+  sourceReference: string;
+  note: string;
+  norTenderedEventId: string;
+};
+
+function createLocationEvidenceForm(
+  operation: "Loading" | "Discharge" = "Discharge",
+): LocationEvidenceForm {
+  return {
+    evidenceTime: formatDateTimeInput(new Date().toISOString()),
+    operation,
+    portRelation: "UNKNOWN",
+    berthRelation: "UNKNOWN",
+    waitingPlace: "UNKNOWN",
+    source: "MANUAL",
+    sourceReference: "",
+    note: "",
+    norTenderedEventId: "",
+  };
+}
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
 
@@ -233,15 +273,6 @@ function formatInterval(value?: string | null) {
   return `${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m`;
 }
 
-function formatMoney(value?: string | number | null) {
-  if (value === undefined || value === null || value === "") return "—";
-
-  const numeric = Number(value);
-  if (Number.isNaN(numeric)) return String(value);
-
-  return `$${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
 function formatSecondsAsInterval(seconds?: number | null) {
   if (seconds === undefined || seconds === null || Number.isNaN(seconds)) {
     return "—";
@@ -263,6 +294,26 @@ function getCalculationSnapshot(
   calc?: LaytimeCalculation | null,
 ): LaytimeDecisionSnapshot | null {
   return (calc?.decisionSnapshot as LaytimeDecisionSnapshot | null | undefined) ?? null;
+}
+
+function getEvidenceAuditIds(calc?: LaytimeCalculation | null) {
+  const snapshot = getCalculationSnapshot(calc) as any;
+  const commencement = snapshot?.commencement ?? null;
+  const completion = snapshot?.cargoCompletion ?? null;
+  const selectedIds = new Set<string>();
+  const excludedIds = new Set<string>();
+
+  if (commencement?.readinessEventId) selectedIds.add(commencement.readinessEventId);
+  if (commencement?.norTenderedEventId) selectedIds.add(commencement.norTenderedEventId);
+  if (completion?.selectedEventId) selectedIds.add(completion.selectedEventId);
+  for (const candidate of commencement?.rejectedNorCandidates ?? []) {
+    if (candidate?.norTenderedEventId) excludedIds.add(candidate.norTenderedEventId);
+  }
+  for (const eventId of completion?.excludedEventIds ?? []) {
+    if (eventId) excludedIds.add(eventId);
+  }
+
+  return { selectedIds, excludedIds, completion };
 }
 
 function validateDurationHours(value?: string | null) {
@@ -414,47 +465,67 @@ function getReversibleLaytimeAudit(calc?: LaytimeCalculation | null) {
   const snapshot = getCalculationSnapshot(calc);
   const reversibleRule = snapshot?.reversibleLaytimeRule ?? null;
   const reversibleAnalysis = snapshot?.reversibleLaytimeAnalysis ?? null;
-  const analysisAvailable = reversibleAnalysis?.status === "available";
-  const analysisNotAvailable = reversibleAnalysis?.status === "not-available";
-  const contractEnabled =
-    analysisAvailable &&
-    reversibleAnalysis?.mode === "contract-enabled" &&
-    reversibleAnalysis?.contractRuleApplied === true;
+  const settlement = snapshot?.reversibleSettlement ?? null;
   const ruleEnabled =
     typeof reversibleRule?.enabled === "boolean" ? reversibleRule.enabled : null;
 
-  const loading = reversibleAnalysis?.loading ?? null;
-  const discharge = reversibleAnalysis?.discharge ?? null;
-  const pool = reversibleAnalysis?.pool ?? null;
+  const operationAnalysis = (
+    allowedSeconds?: number | null,
+    usedSeconds?: number | null,
+    fallback?: ReversibleLaytimeOperationAnalysis | null,
+  ) =>
+    typeof allowedSeconds === "number" && typeof usedSeconds === "number"
+      ? {
+          allowedSeconds,
+          usedSeconds,
+          surplusSeconds: Math.max(allowedSeconds - usedSeconds, 0),
+          overrunSeconds: Math.max(usedSeconds - allowedSeconds, 0),
+        }
+      : fallback ?? null;
+  const loading = operationAnalysis(
+    settlement?.loadingAllowance?.allowedSeconds,
+    settlement?.loadingCountableInputSeconds,
+    reversibleAnalysis?.loading,
+  );
+  const discharge = operationAnalysis(
+    settlement?.dischargeAllowance?.allowedSeconds,
+    settlement?.dischargeCountableInputSeconds,
+    reversibleAnalysis?.discharge,
+  );
+  const pool = settlement
+    ? {
+        totalAllowedSeconds: settlement.combinedAllowedSeconds,
+        totalUsedSeconds: settlement.combinedUsedSeconds,
+        transferableSurplusSeconds:
+          (loading?.surplusSeconds ?? 0) + (discharge?.surplusSeconds ?? 0),
+        netPooledOverrunSeconds: settlement.combinedOverrunSeconds,
+        netPooledSurplusSeconds: settlement.combinedSavedSeconds,
+      }
+    : reversibleAnalysis?.pool ?? null;
+  const settlementStatus = settlement?.settlementStatus ?? null;
 
   return {
-    available: Boolean(snapshot && (reversibleRule || reversibleAnalysis)),
-    hasAnalysis: analysisAvailable || analysisNotAvailable,
-    statusLabel: analysisNotAvailable
-      ? "Not available"
-      : contractEnabled
-        ? "Contract enabled"
-        : analysisAvailable
-          ? "Audit only"
-          : "Not available",
-    contractRuleApplied:
-      typeof reversibleAnalysis?.contractRuleApplied === "boolean"
-        ? reversibleAnalysis.contractRuleApplied
-        : false,
+    available: Boolean(snapshot && (reversibleRule || reversibleAnalysis || settlement)),
+    hasAnalysis: Boolean(reversibleAnalysis),
+    statusLabel: reversibleSettlementStatusLabel(settlementStatus),
+    contractRuleApplied: settlementStatus === "FINAL_AUTHORITATIVE",
     ruleEnabled,
-    reason:
-      analysisNotAvailable && typeof reversibleAnalysis?.reason === "string"
-        ? reversibleAnalysis.reason
-        : null,
-    note: contractEnabled
-      ? "Reversible laytime is enabled by the persisted Charter Party rule. The pooled analysis is contract-supported, but authoritative pricing has not yet been adjusted."
-      : analysisAvailable
-        ? "Reversible laytime is not enabled by the persisted Charter Party rule. The pooled result below is audit-only and does not affect the authoritative calculation."
-        : null,
+    reason: settlement?.reason ?? reversibleAnalysis?.reason ?? null,
+    note:
+      settlementStatus === "FINAL_AUTHORITATIVE"
+        ? "The persisted parent result is the authoritative V1 combined Loading and Discharge settlement."
+        : settlement
+          ? "The operation results remain available for reference, but this parent result is not a final authoritative reversible settlement."
+          : reversibleAnalysis
+            ? "The pooled result is analysis only and does not change the commercial settlement."
+            : null,
     loading,
     discharge,
     pool,
-    warnings: Array.isArray(reversibleRule?.warnings) ? reversibleRule.warnings : [],
+    warnings: [
+      ...(Array.isArray(settlement?.warnings) ? settlement.warnings : []),
+      ...(Array.isArray(reversibleRule?.warnings) ? reversibleRule.warnings : []),
+    ],
   };
 }
 
@@ -480,9 +551,54 @@ function humanizeLabel(value?: string | null) {
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
+const EVENT_LABELS: Record<string, string> = {
+  NOR_TENDERED: "NOR tendered",
+  VESSEL_READY_IN_ALL_RESPECTS: "Vessel ready in all respects",
+  FREE_PRATIQUE_GRANTED: "Free pratique granted",
+  CARGO_STARTED: "Cargo started",
+  CARGO_COMPLETED: "Cargo completed",
+  LOADING_COMPLETED: "Loading completed",
+  DISCHARGE_COMPLETED: "Discharge completed",
+  COMPLETION_OF_CARGO: "Completion of cargo",
+  CARGO_SECURED: "Cargo secured",
+  HATCHES_CLOSED: "Hatches closed",
+  HOSES_DISCONNECTED: "Hoses disconnected",
+  WORK_STOPPED: "Work stopped",
+  WORK_RESUMED: "Work resumed",
+  BREAKDOWN: "Breakdown",
+  BREAKDOWN_REPAIRED: "Breakdown repaired",
+  STOPPAGE_START: "Stoppage started",
+  STOPPAGE_END: "Stoppage ended",
+  RAIN_STOPPAGE: "Rain stoppage",
+  RAIN_STOPPED: "Rain stopped",
+  WEATHER_CLEARED: "Weather cleared",
+  WEATHER_STOPPAGE: "Weather stoppage",
+  RAIN_COMMENCED: "Rain commenced",
+};
+
+function eventLabel(value?: string | null) {
+  if (!value) return "Event";
+  return EVENT_LABELS[value.trim().toUpperCase()] ?? humanizeLabel(value);
+}
+
+function eventCategory(value?: string | null) {
+  const type = String(value ?? "").toUpperCase();
+  if (["NOR_TENDERED", "VESSEL_READY_IN_ALL_RESPECTS", "FREE_PRATIQUE_GRANTED"].includes(type)) return "NOR / readiness";
+  if (["CARGO_STARTED", "CARGO_COMPLETED", "LOADING_COMPLETED", "DISCHARGE_COMPLETED", "COMPLETION_OF_CARGO", "CARGO_SECURED", "HATCHES_CLOSED", "HOSES_DISCONNECTED"].includes(type)) return "Cargo operation";
+  if (type.includes("RAIN") || type.includes("WEATHER")) return "Weather";
+  if (type.includes("STOP") || type.includes("BREAKDOWN") || type.includes("RESUMED") || type.includes("REPAIRED")) return "Stoppage";
+  return "Other operational evidence";
+}
+
 function formatOperationLabel(value?: string | null) {
   if (!value) return "Not set";
   return value;
+}
+
+function sofErrorMessage(error: any, fallback: string) {
+  if (error?.status === 400) return "Check the event time, event type, and operation, then try again.";
+  if (error?.status === 404) return "The SOF record could not be found. Refresh the timeline and try again.";
+  return error?.message || fallback;
 }
 
 function normalizeEngineEventType(value: string) {
@@ -500,11 +616,18 @@ function normalizeEngineEventType(value: string) {
 
   const aliases: Record<string, string> = {
     "nor tendered": "NOR_TENDERED",
+    "vessel ready in all respects": "VESSEL_READY_IN_ALL_RESPECTS",
+    "free pratique granted": "FREE_PRATIQUE_GRANTED",
+    "free pratique": "FREE_PRATIQUE_GRANTED",
     "cargo started": "CARGO_STARTED",
     "cargo completed": "CARGO_COMPLETED",
     "loading completed": "LOADING_COMPLETED",
     "discharge completed": "DISCHARGE_COMPLETED",
     "completion of cargo": "COMPLETION_OF_CARGO",
+    "hatches closed": "HATCHES_CLOSED",
+    "hatch closed": "HATCHES_CLOSED",
+    "hatches secured": "CARGO_SECURED",
+    "cargo secured": "CARGO_SECURED",
     "hoses disconnected": "HOSES_DISCONNECTED",
     "rain stoppage": "RAIN_STOPPAGE",
     "rain commenced": "RAIN_COMMENCED",
@@ -593,14 +716,25 @@ function formatDurationValue(value?: string | null) {
 
 const ENGINE_EVENT_PRESETS = [
   { value: "NOR_TENDERED", label: "NOR tendered" },
+  { value: "VESSEL_READY_IN_ALL_RESPECTS", label: "Vessel ready in all respects" },
+  { value: "FREE_PRATIQUE_GRANTED", label: "Free pratique granted" },
   { value: "CARGO_STARTED", label: "Cargo started" },
   { value: "CARGO_COMPLETED", label: "Cargo completed" },
   { value: "LOADING_COMPLETED", label: "Loading completed" },
   { value: "DISCHARGE_COMPLETED", label: "Discharge completed" },
+  { value: "COMPLETION_OF_CARGO", label: "Completion of cargo" },
+  { value: "HATCHES_CLOSED", label: "Hatches closed" },
+  { value: "CARGO_SECURED", label: "Cargo secured" },
+  { value: "HOSES_DISCONNECTED", label: "Hoses disconnected" },
   { value: "WORK_STOPPED", label: "Work stopped" },
   { value: "WORK_RESUMED", label: "Work resumed" },
+  { value: "BREAKDOWN", label: "Breakdown" },
+  { value: "BREAKDOWN_REPAIRED", label: "Breakdown repaired" },
+  { value: "STOPPAGE_START", label: "Stoppage started" },
+  { value: "STOPPAGE_END", label: "Stoppage ended" },
   { value: "RAIN_STOPPAGE", label: "Rain stoppage" },
   { value: "RAIN_STOPPED", label: "Rain stopped" },
+  { value: "WEATHER_CLEARED", label: "Weather cleared" },
 ] as const;
 
 function parseManualDetails(remarks?: string | null): ManualEventDetails | null {
@@ -679,7 +813,7 @@ function toTimelineRow(event: SofEvent, index: number): TimelineRow {
     n: String(index + 1).padStart(2, "0"),
     state,
     timestamp: formatDateTime(event.eventTime),
-    name: humanizeLabel(event.eventType),
+    name: eventLabel(event.eventType),
     detail: inferDetail(event.eventType, parsed, event.isManualOverride, event.remarks),
     tag:
       state === "deductible"
@@ -702,6 +836,7 @@ function toTimelineRow(event: SofEvent, index: number): TimelineRow {
     duration,
     cause,
     causeActive: cause !== "Disputed",
+    category: eventCategory(event.eventType),
   };
 }
 
@@ -850,14 +985,17 @@ function AddEventModal({
             <label htmlFor="sof-event-type" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
               Event type
             </label>
-            <input
+            <select
               id="sof-event-type"
-              type="text"
               value={form.eventType}
               onChange={(e) => setForm((current) => ({ ...current, eventType: e.target.value }))}
               className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
-              style={{ borderColor: "#D1D5DB" }}
-            />
+              style={{ borderColor: "#D1D5DB", backgroundColor: "#ffffff" }}
+            >
+              {ENGINE_EVENT_PRESETS.map((preset) => (
+                <option key={preset.value} value={preset.value}>{preset.label}</option>
+              ))}
+            </select>
           </div>
 
           <div>
@@ -870,12 +1008,13 @@ function AddEventModal({
               onChange={(e) =>
                 setForm((current) => ({
                   ...current,
-                  operation: e.target.value as EventOperation,
+                  operation: e.target.value ? e.target.value as EventOperation : null,
                 }))
               }
               className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
               style={{ borderColor: "#D1D5DB", backgroundColor: "#ffffff" }}
             >
+              <option value="">Global / not operation-specific</option>
               <option value="Loading">Loading</option>
               <option value="Discharge">Discharge</option>
             </select>
@@ -1000,6 +1139,13 @@ export default function SOFTimeline() {
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimSuccess, setClaimSuccess] = useState<string | null>(null);
   const [timelineSuccess, setTimelineSuccess] = useState<string | null>(null);
+  const [locationEvidence, setLocationEvidence] = useState<NorTenderLocationEvidence[]>([]);
+  const [locationEvidenceLoading, setLocationEvidenceLoading] = useState(true);
+  const [locationEvidenceError, setLocationEvidenceError] = useState<string | null>(null);
+  const [showLocationEvidenceForm, setShowLocationEvidenceForm] = useState(false);
+  const [savingLocationEvidence, setSavingLocationEvidence] = useState(false);
+  const [locationEvidenceForm, setLocationEvidenceForm] =
+    useState<LocationEvidenceForm>(() => createLocationEvidenceForm());
 
   useEffect(() => {
     let alive = true;
@@ -1049,7 +1195,7 @@ export default function SOFTimeline() {
         if (!alive) return;
         setDocuments([]);
         setTimelineEvents([]);
-        setTimelineError(error?.message ?? "Unable to load SOF timeline.");
+        setTimelineError(sofErrorMessage(error, "Unable to load the Statement of Facts timeline."));
       } finally {
         if (alive) {
           setTimelineLoading(false);
@@ -1059,6 +1205,44 @@ export default function SOFTimeline() {
 
     void loadTimeline();
 
+    return () => {
+      alive = false;
+    };
+  }, [id, refreshKey]);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function loadLocationEvidence() {
+      if (!id) {
+        if (alive) {
+          setLocationEvidence([]);
+          setLocationEvidenceLoading(false);
+        }
+        return;
+      }
+
+      setLocationEvidenceLoading(true);
+      setLocationEvidenceError(null);
+      try {
+        const response = await getNorTenderLocationEvidence(id, {
+          page: 1,
+          limit: 200,
+        });
+        if (alive) setLocationEvidence(response.data ?? []);
+      } catch (error: any) {
+        if (alive) {
+          setLocationEvidence([]);
+          setLocationEvidenceError(
+            error?.message ?? "Unable to load NOR tender-location evidence.",
+          );
+        }
+      } finally {
+        if (alive) setLocationEvidenceLoading(false);
+      }
+    }
+
+    void loadLocationEvidence();
     return () => {
       alive = false;
     };
@@ -1149,7 +1333,15 @@ export default function SOFTimeline() {
   }, [laytimeCalculation?.id]);
 
   const activeDocument = documents[0] ?? null;
-  const displayEvents = id ? timelineEvents : initialEvents;
+  const evidenceAudit = getEvidenceAuditIds(laytimeCalculation);
+  const displayEvents = (id ? timelineEvents : initialEvents).map((event) => ({
+    ...event,
+    evidenceStatus: event.eventId && evidenceAudit.selectedIds.has(event.eventId)
+      ? "selected" as const
+      : event.eventId && evidenceAudit.excludedIds.has(event.eventId)
+        ? "excluded" as const
+        : undefined,
+  }));
   const eventCounts = displayEvents.reduce(
     (acc, ev) => {
       acc[ev.state] += 1;
@@ -1191,7 +1383,7 @@ export default function SOFTimeline() {
       const payload = {
         eventTime: new Date(form.eventTime).toISOString(),
         eventType: form.eventType.trim(),
-        operation: form.operation,
+        ...(form.operation ? { operation: form.operation } : {}),
         remarks: buildManualDetails({
           cause: form.cause,
           duration: form.duration || undefined,
@@ -1226,9 +1418,51 @@ export default function SOFTimeline() {
       setEditingEvent(null);
       setRefreshKey((current) => current + 1);
     } catch (error: any) {
-      setTimelineError(error?.message ?? "Unable to save SOF event.");
+      setTimelineError(sofErrorMessage(error, "Unable to save this SOF event. Check the event time and try again."));
     } finally {
       setSavingEvent(false);
+    }
+  }
+
+  async function handleSaveLocationEvidence() {
+    if (!id) return;
+
+    setSavingLocationEvidence(true);
+    setLocationEvidenceError(null);
+    setTimelineSuccess(null);
+    try {
+      await createNorTenderLocationEvidence(id, {
+        evidenceTime: new Date(locationEvidenceForm.evidenceTime).toISOString(),
+        operation: locationEvidenceForm.operation,
+        portRelation: locationEvidenceForm.portRelation,
+        berthRelation: locationEvidenceForm.berthRelation,
+        waitingPlace: locationEvidenceForm.waitingPlace,
+        source: locationEvidenceForm.source,
+        ...(locationEvidenceForm.source === "SOF" && activeDocument
+          ? { sofDocumentId: activeDocument.id }
+          : {}),
+        ...(locationEvidenceForm.sourceReference.trim()
+          ? { sourceReference: locationEvidenceForm.sourceReference.trim() }
+          : {}),
+        ...(locationEvidenceForm.note.trim()
+          ? { note: locationEvidenceForm.note.trim() }
+          : {}),
+        ...(locationEvidenceForm.norTenderedEventId
+          ? { norTenderedEventId: locationEvidenceForm.norTenderedEventId }
+          : {}),
+      });
+      setTimelineSuccess("Tender-location evidence recorded successfully.");
+      setShowLocationEvidenceForm(false);
+      setLocationEvidenceForm(
+        createLocationEvidenceForm(locationEvidenceForm.operation),
+      );
+      setRefreshKey((current) => current + 1);
+    } catch (error: any) {
+      setLocationEvidenceError(
+        error?.message ?? "Unable to record NOR tender-location evidence.",
+      );
+    } finally {
+      setSavingLocationEvidence(false);
     }
   }
 
@@ -1254,6 +1488,9 @@ export default function SOFTimeline() {
   ].filter(Boolean) as string[];
 
   const calculationSnapshot = getCalculationSnapshot(laytimeCalculation);
+  const locationQualification = (calculationSnapshot?.commencement as any)?.location ?? null;
+  const wibonDecision = (calculationSnapshot as any)?.wibon ?? null;
+  const wiponDecision = (calculationSnapshot as any)?.wipon ?? null;
   const calculationPeriods = getCalculationPeriods(laytimeCalculation);
   const sofDocumentSelectionAudit = getSofDocumentSelectionAudit(laytimeCalculation);
   const demurrageAudit = getDemurrageAudit(laytimeCalculation);
@@ -1280,15 +1517,21 @@ export default function SOFTimeline() {
     allowedSeconds !== null && netUsedSeconds !== null
       ? Math.max(0, netUsedSeconds - allowedSeconds)
       : null;
-  const demurrageAmount = formatMoney((laytimeCalculation as any)?.demurrageAmount);
-  const despatchAmount = formatMoney((laytimeCalculation as any)?.despatchAmount);
-  const netPositionValue =
-    laytimeCalculation && Number((laytimeCalculation as any)?.demurrageAmount) > 0
+  const calculationCurrency = laytimeCalculation?.currency ?? null;
+  const demurrageAmount = formatCurrencyAmount(laytimeCalculation?.demurrageAmount, calculationCurrency);
+  const despatchAmount = formatCurrencyAmount(laytimeCalculation?.despatchAmount, calculationCurrency);
+  const nonReversibleSettlement = calculationSnapshot?.nonReversibleSettlement ?? null;
+  const monetarySummary = nonReversibleSettlement?.monetaryAggregation;
+  const netPositionValue = nonReversibleSettlement
+    ? monetarySummary?.status === "AVAILABLE"
+      ? `${formatCurrencyAmount(monetarySummary.netExposure, monetarySummary.currency)} ${String(monetarySummary.netDirection ?? "")}`.trim()
+      : "Operation results shown separately"
+    : laytimeCalculation && Number((laytimeCalculation as any)?.demurrageAmount) > 0
       ? `${demurrageAmount} demurrage`
       : laytimeCalculation && Number((laytimeCalculation as any)?.despatchAmount) > 0
         ? `${despatchAmount} despatch`
         : laytimeCalculation
-          ? "$0.00"
+          ? formatCurrencyAmount(0, calculationCurrency)
           : "—";
   const supplierClockStart = formatDateTime(calculationSnapshot?.commencement?.commencedAt);
   const demurrageAuditVisible = Boolean(demurrageAudit.startedAt);
@@ -1298,10 +1541,36 @@ export default function SOFTimeline() {
   const operationSelectionAuditVisible = Boolean(laytimeCalculation);
   const demurrageAmountValue = Number((laytimeCalculation as any)?.demurrageAmount ?? 0);
   const despatchAmountValue = Number((laytimeCalculation as any)?.despatchAmount ?? 0);
-  const hasClaimableAmount = Boolean(laytimeCalculation) && (demurrageAmountValue > 0 || despatchAmountValue > 0);
+  const reversibleSettlement = calculationSnapshot?.reversibleSettlement ?? null;
+  const reversibleConfigured =
+    Boolean(reversibleSettlement) ||
+    calculationSnapshot?.reversibleLaytimeRule?.enabled === true;
+  const reversibleSettlementStatus = (
+    reversibleSettlement?.settlementStatus ??
+    (reversibleConfigured ? "LEGACY" : null)
+  ) as ReversibleSettlementStatus | null;
+  const laytimeClaimAllowed =
+    reversibleConfigured &&
+    reversibleSettlementStatus === "FINAL_AUTHORITATIVE" &&
+    laytimeCalculation?.status === "Final" &&
+    Boolean(calculationCurrency);
+  const hasPositiveClaimAmount =
+    demurrageAmountValue > 0 || despatchAmountValue > 0;
+  const hasClaimableAmount =
+    Boolean(laytimeCalculation) &&
+    hasPositiveClaimAmount &&
+    laytimeClaimAllowed;
   const claimHelperText = !laytimeCalculation
     ? "No persisted laytime calculation yet."
-    : hasClaimableAmount
+    : !reversibleConfigured
+      ? calculationCurrency
+        ? "Non-reversible claims require an operation-linked claim source."
+        : "Non-reversible claims require an authoritative calculation currency."
+      : !calculationCurrency
+      ? "Reversible claims require an authoritative calculation currency."
+      : reversibleConfigured && !laytimeClaimAllowed
+      ? `${reversibleSettlementStatusLabel(reversibleSettlementStatus)} reversible results cannot create a final claim.`
+      : hasClaimableAmount
       ? "Create a claim from the persisted laytime calculation."
       : "No claimable amount from this laytime calculation.";
   const hasOperationResults = operationResults.length > 0;
@@ -1327,7 +1596,21 @@ export default function SOFTimeline() {
   async function handleCreateClaim() {
     if (!id || !laytimeCalculation) return;
 
-    if (demurrageAmountValue <= 0 && despatchAmountValue <= 0) {
+    if (!laytimeClaimAllowed) {
+      setClaimError(
+        reversibleConfigured
+          ? calculationCurrency
+            ? "A reversible claim requires a FINAL - AUTHORITATIVE calculation result."
+            : "A reversible claim requires an authoritative calculation currency."
+          : calculationCurrency
+            ? "Non-reversible claims require an operation-linked claim source."
+            : "Non-reversible claims require an authoritative calculation currency.",
+      );
+      setClaimSuccess(null);
+      return;
+    }
+
+    if (!hasPositiveClaimAmount) {
       setClaimError("No claimable amount from this laytime calculation.");
       setClaimSuccess(null);
       return;
@@ -1374,6 +1657,9 @@ export default function SOFTimeline() {
       ? "Loading latest backend calculation..."
       : "No persisted laytime calculation yet.";
   const defaultManualEventOperation = activeDocument?.operation ?? shipment?.laytimeOperation ?? "Discharge";
+  const norTenderEvents = timelineEvents.filter(
+    (event) => event.eventType === "NOR_TENDERED" && event.eventId,
+  );
   const laytimeBannerTitle = laytimeError
     ? "Laytime calculation failed"
     : laytimeLoading
@@ -1427,6 +1713,18 @@ export default function SOFTimeline() {
               <Plus size={11} /> Add event
             </button>
             <button
+              onClick={() => {
+                setLocationEvidenceForm(
+                  createLocationEvidenceForm(defaultManualEventOperation),
+                );
+                setShowLocationEvidenceForm(true);
+              }}
+              className="flex items-center gap-1.5 px-3 rounded-md border transition-colors cursor-pointer"
+              style={{ height: "32px", fontSize: "12px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
+            >
+              <Plus size={11} /> Add location evidence
+            </button>
+            <button
               onClick={() => void handleRunLaytimeCalculation()}
               className="flex items-center gap-1.5 px-3 rounded-md transition-colors cursor-pointer"
               style={{ height: "32px", fontSize: "12px", color: "#ffffff", backgroundColor: "#1A4ED8", border: "none", opacity: laytimeRunning ? 0.7 : 1 }}
@@ -1463,6 +1761,207 @@ export default function SOFTimeline() {
           <p style={{ fontSize: "12px", fontWeight: 500 }}>{timelineSuccess}</p>
         </div>
       )}
+      <section className="mx-6 mt-3 rounded-lg border bg-white p-4" style={{ borderColor: "#E5E7EB" }}>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p style={{ fontSize: "12px", fontWeight: 600, color: "#111827" }}>
+              NOR tender-location evidence
+            </p>
+            <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "3px" }}>
+              Factual observations only. Candidate-linked evidence supports WIBON/WIPON evaluation; unassociated observations remain timeline evidence.
+            </p>
+          </div>
+          <span style={{ fontSize: "11px", color: "#6B7280" }}>
+            {locationEvidenceLoading ? "Loading..." : `${locationEvidence.length} observation(s)`}
+          </span>
+        </div>
+
+        {locationEvidenceError && (
+          <p className="mt-3 rounded-md border px-3 py-2" style={{ fontSize: "11px", color: "#991B1B", borderColor: "#FCA5A5", backgroundColor: "#FEF2F2" }}>
+            {locationEvidenceError}
+          </p>
+        )}
+
+        {locationQualification && (
+          <div className="mt-3 grid gap-2 rounded-lg border p-3 sm:grid-cols-2 lg:grid-cols-4" style={{ borderColor: "#D1D5DB", backgroundColor: "#F9FAFB" }}>
+            <CalcRow label="Berth qualification" value={locationQualification.berth?.status ?? "UNAVAILABLE"} />
+            <CalcRow label="Port qualification" value={locationQualification.port?.status ?? "UNAVAILABLE"} />
+            <CalcRow label="WIBON" value={wibonDecision?.applied ? "Applied" : wibonDecision?.configured ? "Configured / not applied" : "Not configured"} />
+            <CalcRow label="WIPON" value={wiponDecision?.applied ? "Applied" : wiponDecision?.configured ? "Configured / not applied" : "Not configured"} />
+            <p className="sm:col-span-2 lg:col-span-4" style={{ fontSize: "10px", color: "#6B7280" }}>
+              {locationQualification.selectedEvidence
+                ? `Evidence ${locationQualification.selectedEvidence.id} observed ${formatDateTime(locationQualification.selectedEvidence.evidenceTime)} from ${locationQualification.selectedEvidence.source}.`
+                : `Evidence unavailable: ${locationQualification.berth?.reason ?? locationQualification.port?.reason ?? "NO_ASSOCIATED_LOCATION_EVIDENCE"}.`}
+            </p>
+          </div>
+        )}
+
+        {showLocationEvidenceForm && (
+          <form
+            className="mt-4 grid gap-3 rounded-lg border p-3 md:grid-cols-3"
+            style={{ borderColor: "#D1D5DB", backgroundColor: "#F9FAFB" }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleSaveLocationEvidence();
+            }}
+          >
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Observed at
+              <input
+                type="datetime-local"
+                required
+                value={locationEvidenceForm.evidenceTime}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, evidenceTime: event.target.value }))}
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              />
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Operation
+              <select
+                value={locationEvidenceForm.operation}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, operation: event.target.value as "Loading" | "Discharge" }))}
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              >
+                <option value="Loading">Loading</option>
+                <option value="Discharge">Discharge</option>
+              </select>
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Source
+              <select
+                value={locationEvidenceForm.source}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, source: event.target.value as "MANUAL" | "SOF" }))}
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              >
+                <option value="MANUAL">Manual observation</option>
+                <option value="SOF" disabled={!activeDocument}>Current SOF document</option>
+              </select>
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Port relation
+              <select
+                value={locationEvidenceForm.portRelation}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, portRelation: event.target.value as NorPortRelation }))}
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              >
+                <option value="UNKNOWN">Unknown</option>
+                <option value="INSIDE_PORT_LIMITS">Inside port limits</option>
+                <option value="OUTSIDE_PORT_LIMITS">Outside port limits</option>
+              </select>
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Berth relation
+              <select
+                value={locationEvidenceForm.berthRelation}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, berthRelation: event.target.value as NorBerthRelation }))}
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              >
+                <option value="UNKNOWN">Unknown</option>
+                <option value="AT_BERTH">At berth</option>
+                <option value="NOT_AT_BERTH">Not at berth</option>
+              </select>
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Waiting place
+              <select
+                value={locationEvidenceForm.waitingPlace}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, waitingPlace: event.target.value as NorWaitingPlace }))}
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              >
+                <option value="UNKNOWN">Unknown</option>
+                <option value="NONE">None</option>
+                <option value="ANCHORAGE">Anchorage</option>
+                <option value="PILOT_STATION">Pilot station</option>
+                <option value="CUSTOMARY_WAITING_PLACE">Customary waiting place</option>
+                <option value="OTHER">Other</option>
+              </select>
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Associated NOR tender
+              <select
+                value={locationEvidenceForm.norTenderedEventId}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, norTenderedEventId: event.target.value }))}
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              >
+                <option value="">Unassociated observation (not used for v1 validity)</option>
+                {norTenderEvents.map((event) => (
+                  <option key={event.eventId} value={event.eventId}>
+                    {formatDateTime(event.eventTimeIso)}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block" style={{ fontSize: "10px", color: "#6B7280" }}>
+                Select the exact NOR tender this evidence describes. The evidence time must be at or before that tender.
+              </span>
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Source reference
+              <input
+                value={locationEvidenceForm.sourceReference}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, sourceReference: event.target.value }))}
+                placeholder="SOF page, agent email, log reference"
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              />
+            </label>
+            <label style={{ fontSize: "11px", color: "#374151" }}>
+              Evidence note
+              <input
+                value={locationEvidenceForm.note}
+                onChange={(event) => setLocationEvidenceForm((current) => ({ ...current, note: event.target.value }))}
+                placeholder="Factual basis for this observation"
+                className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                style={{ borderColor: "#D1D5DB" }}
+              />
+            </label>
+            <div className="flex items-end justify-end gap-2 md:col-span-3">
+              <button type="button" onClick={() => setShowLocationEvidenceForm(false)} className="rounded-md border bg-white px-3 py-2" style={{ fontSize: "11px", borderColor: "#D1D5DB" }}>
+                Cancel
+              </button>
+              <button type="submit" disabled={savingLocationEvidence} className="rounded-md px-3 py-2 text-white" style={{ fontSize: "11px", backgroundColor: "#1A4ED8", opacity: savingLocationEvidence ? 0.7 : 1 }}>
+                {savingLocationEvidence ? "Saving..." : "Record evidence"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {!locationEvidenceLoading && locationEvidence.length === 0 && !locationEvidenceError && (
+          <p className="mt-3" style={{ fontSize: "11px", color: "#6B7280" }}>
+            No tender-location evidence has been recorded. No location is inferred.
+          </p>
+        )}
+        {locationEvidence.length > 0 && (
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {locationEvidence.map((evidence) => (
+              <article key={evidence.id} className="rounded-md border px-3 py-2" style={{ borderColor: "#E5E7EB" }}>
+                <div className="flex items-center justify-between gap-3">
+                  <span style={{ fontSize: "11px", fontWeight: 600, color: "#111827" }}>{evidence.operation}</span>
+                  <span style={{ fontSize: "10px", color: "#6B7280" }}>{formatDateTime(evidence.evidenceTime)}</span>
+                </div>
+                <p className="mt-1" style={{ fontSize: "11px", color: "#374151" }}>
+                  Port: {humanizeLabel(evidence.portRelation)} · Berth: {humanizeLabel(evidence.berthRelation)}
+                </p>
+                <p style={{ fontSize: "11px", color: "#374151" }}>
+                  Waiting place: {humanizeLabel(evidence.waitingPlace)} · Source: {evidence.source}
+                </p>
+                <p style={{ fontSize: "10px", color: "#6B7280" }}>
+                  {evidence.norDocumentId || evidence.norTenderedEventId
+                    ? "Candidate-linked evidence"
+                    : "Unassociated timeline observation"}
+                </p>
+                {evidence.note && <p className="mt-1" style={{ fontSize: "11px", color: "#6B7280" }}>{evidence.note}</p>}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
       {claimError && (
         <div className="mx-6 mt-3 rounded-lg border px-4 py-3" style={{ borderColor: "#FCA5A5", backgroundColor: "#FEF2F2", color: "#991B1B" }}>
           <p style={{ fontSize: "12px", fontWeight: 500 }}>{claimError}</p>
@@ -1505,7 +2004,7 @@ export default function SOFTimeline() {
           { label: "Laytime used", value: grossUsedDisplay, vc: "#B45309", sub: hasLaytimeCalculation ? "Gross elapsed time from the backend" : "No persisted calculation yet" },
           { label: "Deductions", value: deductionsDisplay, vc: "#374151", sub: hasLaytimeCalculation ? "Backend exception periods" : "No persisted calculation yet" },
           { label: "Remaining", value: remainingDisplay, vc: "#22543D", sub: hasLaytimeCalculation ? (overrunDisplay === "—" ? "Net laytime balance from backend" : `${overrunDisplay} over`) : "No persisted calculation yet" },
-          { label: "Net position", value: netPositionValue, vc: "#B45309", sub: hasLaytimeCalculation ? "Backend demurrage/despatch result" : "No persisted calculation yet" },
+          { label: "Net position", value: netPositionValue, vc: "#B45309", sub: hasLaytimeCalculation ? (reversibleConfigured ? reversibleSettlementStatusLabel(reversibleSettlementStatus) : monetarySummary?.status === "AVAILABLE" ? "Informational only - operation results remain separate" : "Authoritative calculation currency unavailable") : "No persisted calculation yet" },
         ].map(({ label, value, vc, sub }) => (
           <div
             key={label}
@@ -1547,6 +2046,7 @@ export default function SOFTimeline() {
                   style={{ height: "28px", fontSize: "11px", color: "#374151", borderColor: "#E5E7EB", borderWidth: "0.5px", backgroundColor: "#ffffff" }}
                   onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#F9FAFB")}
                   onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.backgroundColor = "#ffffff")}
+                  onClick={() => setRefreshKey((current) => current + 1)}
                 >
                   <RefreshCw size={10} />
                   Refresh SOF
@@ -1572,9 +2072,9 @@ export default function SOFTimeline() {
               </span>
               <div className="flex items-center gap-1.5">
                 {[
-                  { label: "8 counting", bg: "#C6F6D5", text: "#22543D" },
-                  { label: "2 deductible", bg: "#F3F4F6", text: "#374151" },
-                  { label: "1 pending", bg: "#EFF6FF", text: "#1E40AF" },
+                  { label: `${eventCounts.normal} recorded`, bg: "#C6F6D5", text: "#22543D" },
+                  { label: `${eventCounts.deductible} review`, bg: "#F3F4F6", text: "#374151" },
+                  { label: `${eventCounts.pending} pending`, bg: "#EFF6FF", text: "#1E40AF" },
                 ].map(({ label, bg, text }) => (
                   <span
                     key={label}
@@ -1587,20 +2087,14 @@ export default function SOFTimeline() {
               </div>
             </div>
 
-            {/* Warning strip */}
-            <div
-              className="flex items-center gap-2.5 px-4 py-2.5"
-              style={{
-                backgroundColor: "#FFFBEB",
-                borderLeft: "2.5px solid #F59E0B",
-                borderBottom: "0.5px solid #E5E7EB",
-              }}
-            >
-              <AlertTriangle size={13} color="#B45309" style={{ flexShrink: 0 }} />
-              <p style={{ fontSize: "11px", color: "#7B341E", lineHeight: 1.4 }}>
-                <strong style={{ fontWeight: 500 }}>Event 05 disputed:</strong> Counterparty contests weather deductibility. Awaiting supporting documentation from terminal agent. Event 10 pending classification.
-              </p>
-            </div>
+            {eventCounts.deductible + eventCounts.pending > 0 && (
+              <div className="flex items-center gap-2.5 px-4 py-2.5" style={{ backgroundColor: "#FFFBEB", borderLeft: "2.5px solid #F59E0B", borderBottom: "0.5px solid #E5E7EB" }}>
+                <AlertTriangle size={13} color="#B45309" style={{ flexShrink: 0 }} />
+                <p style={{ fontSize: "11px", color: "#7B341E", lineHeight: 1.4 }}>
+                  {eventCounts.deductible + eventCounts.pending} event(s) are marked for review in the persisted SOF evidence.
+                </p>
+              </div>
+            )}
 
             {/* Table */}
             <div className="overflow-x-auto">
@@ -1626,7 +2120,14 @@ export default function SOFTimeline() {
                   </tr>
                 </thead>
                 <tbody>
-                  {displayEvents.map((ev, i) => (
+                  {displayEvents.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-10 text-center">
+                        <p style={{ fontSize: "13px", color: "#374151", fontWeight: 500 }}>No Statement of Facts events yet.</p>
+                        <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "4px" }}>Add the first operational event to begin building the laytime evidence timeline.</p>
+                      </td>
+                    </tr>
+                  ) : displayEvents.map((ev, i) => (
                     <tr
                       key={ev.n}
                       style={{
@@ -1695,7 +2196,14 @@ export default function SOFTimeline() {
                           >
                             Operation: {formatOperationLabel(ev.operation)}
                           </span>
-                        ) : null}
+                        ) : (
+                          <span className="inline-flex items-center rounded-full px-2 py-0.5 font-medium" style={{ fontSize: "10px", backgroundColor: "#F9FAFB", color: "#6B7280", marginBottom: "4px" }}>
+                            Global / not operation-specific
+                          </span>
+                        )}
+                        {ev.category ? <span className="inline-block rounded-full px-2 py-0.5 font-medium" style={{ fontSize: "10px", backgroundColor: "#F3F4F6", color: "#4B5563", margin: "0 4px 4px 0" }}>{ev.category}</span> : null}
+                        {ev.evidenceStatus === "selected" ? <span className="inline-block rounded-full px-2 py-0.5 font-medium" style={{ fontSize: "10px", backgroundColor: "#DCFCE7", color: "#166534", marginBottom: "4px" }}>Selected for calculation</span> : null}
+                        {ev.evidenceStatus === "excluded" ? <span className="inline-block rounded-full px-2 py-0.5 font-medium" style={{ fontSize: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", marginBottom: "4px" }}>Excluded from calculation</span> : null}
                         <span
                           className="inline-block rounded-full px-2 py-0.5 font-medium"
                           style={{ fontSize: "10px", backgroundColor: ev.tagBg, color: ev.tagText }}
@@ -1782,23 +2290,42 @@ export default function SOFTimeline() {
             </p>
 
             {/* Supplier clock */}
-            <p className="mb-1.5" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>Supplier clock</p>
-            <CalcRow label="NOR tendered" value="23 Oct 08:00" />
-            <CalcRow label="Laytime starts" value="23 Oct 14:00" />
-            <CalcRow label="Allowed" value="72h 00m" valueColor="#1A4ED8" bold />
-            <CalcRow label="Used (gross)" value="58h 20m" />
-            <CalcRow label="Deductions" value="−4h 00m" valueColor="#22543D" />
-            <CalcRow label="Net used" value="54h 20m" valueColor="#B45309" bold />
-            <CalcRow label="Remaining" value="17h 40m" valueColor="#22543D" bold />
+            <p className="mb-1.5" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>Calculation evidence</p>
+            <CalcRow label="Laytime commenced" value={supplierClockStart} />
+            <CalcRow label="Cargo completion" value={formatDateTime(evidenceAudit.completion?.completionTime)} />
+            <CalcRow label="Allowed laytime" value={allowedDisplay} valueColor="#1A4ED8" bold />
+            <CalcRow label="Used laytime" value={grossUsedDisplay} />
+            <CalcRow label="Deductions" value={formatSecondsAsInterval(deductionSeconds)} valueColor="#22543D" />
+            <CalcRow label="Time balance" value={remainingDisplay} valueColor="#22543D" bold />
+            <CalcRow label="Net position" value={netPositionValue} valueColor="#B45309" bold />
+            {reversibleConfigured && (
+              <CalcRow
+                label="Settlement authority"
+                value={reversibleSettlementStatusLabel(reversibleSettlementStatus)}
+                valueColor={laytimeClaimAllowed ? "#166534" : "#92400E"}
+                bold
+              />
+            )}
+            <button
+              type="button"
+              onClick={() => void handleCreateClaim()}
+              disabled={!hasClaimableAmount || claimRunning}
+              className="mt-3 w-full rounded-md px-3 py-2 text-white"
+              style={{
+                fontSize: "11px",
+                backgroundColor: "#1A4ED8",
+                opacity: !hasClaimableAmount || claimRunning ? 0.45 : 1,
+              }}
+            >
+              {claimRunning ? "Creating claim..." : "Create claim"}
+            </button>
+            <p className="mt-1.5" style={{ fontSize: "10px", color: "#6B7280", lineHeight: 1.4 }}>
+              {claimHelperText}
+            </p>
 
             <div style={{ borderTop: "0.5px solid #E5E7EB", margin: "10px 0" }} />
 
             {/* Receiver clock */}
-            <p className="mb-1.5" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>Receiver clock</p>
-            <CalcRow label="Clock starts" value="24 Oct 00:00" />
-            <CalcRow label="Allowed" value="48h 00m" valueColor="#1A4ED8" bold />
-            <CalcRow label="Net used" value="44h 20m" valueColor="#B45309" bold />
-            <CalcRow label="Remaining" value="3h 40m" valueColor="#22543D" bold />
           </div>
 
           {operationResultsSectionVisible && (
@@ -1863,8 +2390,14 @@ export default function SOFTimeline() {
                         </p>
                         <CalcRow label="Allowed laytime" value={formatInterval(result.allowedLaytime)} />
                         <CalcRow label="Used laytime" value={formatInterval(result.usedLaytime)} />
-                        <CalcRow label="Demurrage" value={formatMoney(result.demurrageAmount)} />
-                        <CalcRow label="Despatch" value={formatMoney(result.despatchAmount)} />
+                        <CalcRow
+                          label={reversibleSettlementStatus === "FINAL_AUTHORITATIVE" ? "Demurrage (reference only)" : "Demurrage"}
+                          value={formatCurrencyAmount(result.demurrageAmount, result.currency)}
+                        />
+                        <CalcRow
+                          label={reversibleSettlementStatus === "FINAL_AUTHORITATIVE" ? "Despatch (reference only)" : "Despatch"}
+                          value={formatCurrencyAmount(result.despatchAmount, result.currency)}
+                        />
                         <CalcRow label="Status" value={result.status} />
                         <CalcRow label="Calculated at" value={formatDateTime(result.calculatedAt)} />
                         {sourceLine ? (
@@ -2027,11 +2560,11 @@ export default function SOFTimeline() {
                 <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
                   Not available for this calculation version.
                 </p>
-              ) : reversibleLaytimeAudit.statusLabel === "Not available" ? (
+              ) : reversibleLaytimeAudit.statusLabel === "NOT AVAILABLE" ? (
                 <>
                   <CalcRow
                     label="Status"
-                    value="Not available"
+                    value="NOT AVAILABLE"
                     valueColor="#6B7280"
                     bold
                   />

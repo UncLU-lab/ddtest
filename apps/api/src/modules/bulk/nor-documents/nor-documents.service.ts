@@ -8,6 +8,7 @@ import { Repository } from 'typeorm';
 import { Paginated, paginate } from '../../../common/dto/paginated';
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 import { NorDocument } from '../entities/nor-document.entity';
+import { TenantContextService } from '../../cross-cutting/tenant-context/tenant-context.service';
 import { VoyagesService } from '../voyages/voyages.service';
 import { CreateNorDocumentDto } from './dto/create-nor-document.dto';
 import { UpdateNorDocumentDto } from './dto/update-nor-document.dto';
@@ -18,6 +19,7 @@ export class NorDocumentsService {
     @InjectRepository(NorDocument)
     private readonly documents: Repository<NorDocument>,
     private readonly voyagesService: VoyagesService,
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   async findForVoyage(
@@ -55,11 +57,15 @@ export class NorDocumentsService {
   }
 
   async update(id: string, dto: UpdateNorDocumentDto): Promise<NorDocument> {
-    const document = await this.documents.findOne({ where: { id } });
+    const document = await this.documents.findOne({
+      where: { id },
+    });
 
     if (!document) {
       throw new NotFoundException(`NOR document ${id} not found`);
     }
+
+    await this.voyagesService.ensureExists(document.voyageId);
 
     const tenderTime = dto.tenderTime
       ? new Date(dto.tenderTime)

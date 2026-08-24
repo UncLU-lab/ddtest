@@ -1,21 +1,30 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
+import { TenantDatabaseContextService } from '../../../database/tenant-database-context.service';
 import { Paginated, paginate } from '../../../common/dto/paginated';
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 import { CalculationPeriod } from '../entities/calculation-period.entity';
 import { CharterParty } from '../entities/charter-party.entity';
 import { CpClause } from '../entities/cp-clause.entity';
 import { Voyage } from '../entities/voyage.entity';
+import { TenantContextService } from '../../cross-cutting/tenant-context/tenant-context.service';
 import { VoyagesService } from '../voyages/voyages.service';
 import { CreateCharterPartyDto } from './dto/create-charter-party.dto';
 import { CreateCpClauseDto } from './dto/create-cp-clause.dto';
 import { UpdateCharterPartyDto } from './dto/update-charter-party.dto';
 import { UpdateCpClauseDto } from './dto/update-cp-clause.dto';
+import {
+  areCpClauseParametersValid,
+  cpClauseParametersValidationMessage,
+} from './dto/cp-clause-parameters.validator';
+import { readExplicitNotice } from '../laytime/commencement-rule';
+import { parseNoticeHours } from '../charter-party-terms';
 
 @Injectable()
 export class CharterPartiesService {
@@ -25,7 +34,8 @@ export class CharterPartiesService {
     @InjectRepository(CpClause)
     private readonly clauses: Repository<CpClause>,
     private readonly voyagesService: VoyagesService,
-    private readonly dataSource: DataSource,
+    private readonly databaseContext: TenantDatabaseContextService,
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   async findForVoyage(voyageId: string): Promise<CharterParty> {
@@ -65,7 +75,7 @@ export class CharterPartiesService {
       );
     }
 
-    return this.dataSource.transaction(async (manager) => {
+    return this.databaseContext.transaction(async (manager) => {
       const charterParty = await manager.save(
         manager.create(CharterParty, { ...dto, voyageId }),
       );
@@ -87,6 +97,8 @@ export class CharterPartiesService {
     if (!charterParty) {
       throw new NotFoundException(`Charter party ${id} not found`);
     }
+
+    await this.voyagesService.ensureExists(charterParty.voyageId);
 
     return charterParty;
   }
@@ -119,19 +131,104 @@ export class CharterPartiesService {
     charterPartyId: string,
     dto: CreateCpClauseDto,
   ): Promise<CpClause> {
-    await this.findOne(charterPartyId);
+    const charterParty = await this.findOne(charterPartyId);
+    this.assertClauseContract(dto.clauseType, dto.parameters);
+    this.assertCommencementRulesCompatible(
+      [...(charterParty.clauses ?? []), dto],
+      charterParty.norNoticePeriod,
+    );
+    this.assertReversibleClausesUnambiguous([
+      ...(charterParty.clauses ?? []),
+      dto,
+    ]);
 
     return this.clauses.save(this.clauses.create({ ...dto, charterPartyId }));
   }
 
   async updateClause(id: string, dto: UpdateCpClauseDto): Promise<CpClause> {
-    const clause = await this.clauses.findOne({ where: { id } });
+    const clause = await this.clauses.findOne({
+      where: { id },
+      relations: { charterParty: true },
+    });
 
     if (!clause) {
       throw new NotFoundException(`Clause ${id} not found`);
     }
 
+    await this.voyagesService.ensureExists(clause.charterParty.voyageId);
+
+    const mergedClause = {
+      ...clause,
+      ...dto,
+      parameters: dto.parameters ?? clause.parameters,
+    };
+    this.assertClauseContract(mergedClause.clauseType, mergedClause.parameters);
+    const charterParty = await this.findOne(clause.charterPartyId);
+    this.assertCommencementRulesCompatible(
+      [
+        ...(charterParty.clauses ?? []).filter(
+          (existingClause) => existingClause.id !== clause.id,
+        ),
+        mergedClause,
+      ],
+      charterParty.norNoticePeriod,
+    );
+    this.assertReversibleClausesUnambiguous([
+      ...(charterParty.clauses ?? []).filter(
+        (existingClause) => existingClause.id !== clause.id,
+      ),
+      mergedClause,
+    ]);
+
     return this.clauses.save(this.clauses.merge(clause, dto));
+  }
+
+  private assertClauseContract(
+    clauseType: string,
+    parameters: Record<string, unknown>,
+  ): void {
+    if (!areCpClauseParametersValid(clauseType, parameters)) {
+      throw new BadRequestException(
+        cpClauseParametersValidationMessage(clauseType),
+      );
+    }
+  }
+
+  private assertCommencementRulesCompatible(
+    clauses: Array<Pick<CpClause, 'clauseType' | 'parameters'>>,
+    charterPartyNoticePeriod?: string | null,
+  ): void {
+    const hasSchedule = clauses.some(
+      (clause) => clause.clauseType === 'nor_commencement_schedule',
+    );
+    const hasExplicitNotice =
+      parseNoticeHours(charterPartyNoticePeriod) !== undefined ||
+      clauses.some(
+        (clause) =>
+          clause.clauseType === 'laytime_rate' &&
+          readExplicitNotice(clause.parameters) !== null,
+      );
+
+    if (hasSchedule && hasExplicitNotice) {
+      throw new ConflictException(
+        'The Charter Party cannot contain both explicit notice hours and a NOR commencement schedule; remove one commencement rule before saving.',
+      );
+    }
+  }
+
+  private assertReversibleClausesUnambiguous(
+    clauses: Array<Pick<CpClause, 'clauseType' | 'parameters'>>,
+  ): void {
+    const activeReversibleClauses = clauses.filter(
+      (clause) =>
+        clause.clauseType === 'reversible_laytime' &&
+        clause.parameters.enabled === true,
+    );
+    if (activeReversibleClauses.length > 1) {
+      throw new ConflictException(
+        'The Charter Party cannot contain multiple active reversible laytime settlement clauses.',
+      );
+    }
   }
 
   /**
@@ -139,13 +236,18 @@ export class CharterPartiesService {
    * calculations can lose the live relation; final calculation evidence cannot.
    */
   async removeClause(id: string): Promise<void> {
-    const clause = await this.clauses.findOne({ where: { id } });
+    const clause = await this.clauses.findOne({
+      where: { id },
+      relations: { charterParty: true },
+    });
 
     if (!clause) {
       throw new NotFoundException(`Clause ${id} not found`);
     }
 
-    await this.dataSource.transaction(async (manager) => {
+    await this.voyagesService.ensureExists(clause.charterParty.voyageId);
+
+    await this.databaseContext.transaction(async (manager) => {
       const finalPeriod = await manager
         .createQueryBuilder(CalculationPeriod, 'period')
         .innerJoin('period.calculation', 'calculation')

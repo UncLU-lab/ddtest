@@ -25,7 +25,6 @@ export class Counterparty extends UuidEntity {
   @Column({
     name: 'organization_id',
     type: 'uuid',
-    default: '00000000-0000-0000-0000-000000000001',
   })
   organizationId!: string;
 

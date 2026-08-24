@@ -1,12 +1,15 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { Shipment, RiskLevel } from "./shipments";
-import { getVoyages, getVoyageSummary } from "../../lib/api";
+import type { Shipment, RiskLevel } from "./shipments";
+import { getVoyages } from "../../lib/api";
+import type { VoyageListItem } from "../../lib/api";
 
-function normalizeShipment(item: any, summary?: any): Shipment | null {
+function isRiskLevel(value: unknown): value is RiskLevel {
+  return value === "critical" || value === "elevated" || value === "optimal";
+}
+
+function normalizeShipment(item: VoyageListItem): Shipment | null {
   if (!item) return null;
   const id = item.id ?? item.voyageId ?? item.uuid ?? "";
-  const parties = summary?.parties ?? {};
-  const commercialTerms = summary?.commercialTerms ?? {};
 
   const vessel =
     item.vessel?.name ??
@@ -35,24 +38,19 @@ function normalizeShipment(item: any, summary?: any): Shipment | null {
       ? `${Number(item.cargoQuantity).toLocaleString()} MT`
       : item.quantity ?? "N/A";
 
-  const riskData = summary?.risk ?? {};
-
-  const exposure = Number(riskData?.demurrageExposure ? Number(riskData.demurrageExposure) : 0) || 0;
-  const despatchCredit = Number(riskData?.despatchCredit ? Number(riskData.despatchCredit) : 0) || 0;
-
-  let risk: RiskLevel = "optimal";
-  if (riskData?.laycanExpired) {
-    risk = "critical";
-  } else if (
-    (riskData?.openDisputeCount ?? 0) > 0 ||
-    Boolean(riskData?.calculationStale)
-  ) {
-    risk = "elevated";
-  } else if (exposure > 0) {
-    risk = "elevated";
-  } else {
-    risk = "optimal";
-  }
+  const exposure = Number(item.exposure ?? 0) || 0;
+  const despatchCredit = Number(item.despatchCredit ?? 0) || 0;
+  const openDisputeCount = Number(item.openDisputeCount ?? 0) || 0;
+  const amountUnderDispute = Number(item.amountUnderDispute ?? 0) || 0;
+  const calculationStale = Boolean(item.calculationStale);
+  const laycanExpired = Boolean(item.laycanExpired);
+  const risk: RiskLevel = isRiskLevel(item.risk)
+    ? item.risk
+    : laycanExpired
+      ? "critical"
+      : openDisputeCount > 0 || calculationStale || exposure > 0
+        ? "elevated"
+        : "optimal";
 
   if (!id) return null;
 
@@ -71,14 +69,8 @@ function normalizeShipment(item: any, summary?: any): Shipment | null {
       item.voyageRef ??
       String(id),
 
-    supplier:
-      parties.supplier ??
-      item.supplier ??
-      "Not specified",
-    receiver:
-      parties.receiver ??
-      item.receiver ??
-      "Not specified",
+    supplier: item.supplier ?? "Not specified",
+    receiver: item.receiver ?? "Not specified",
 
     eta: String(eta),
     risk,
@@ -93,32 +85,40 @@ function normalizeShipment(item: any, summary?: any): Shipment | null {
       item.laytimeOperation ??
       item.laytime_operation ??
       "Discharge",
+    bulkOperationType:
+      item.bulkOperationType ??
+      item.bulk_operation_type ??
+      null,
     laytimeAllowed:
-      commercialTerms.laytimeAllowed != null
-        ? String(commercialTerms.laytimeAllowed)
-        : item.laytimeAllowed,
+      item.laytimeAllowed != null
+        ? String(item.laytimeAllowed)
+        : undefined,
     demurrageRate:
-      commercialTerms.demurrageRate ??
-      item.demurrageRate,
+      item.demurrageRate != null
+        ? String(item.demurrageRate)
+        : undefined,
     dispatchRate:
-      commercialTerms.dispatchRate ??
-      item.dispatchRate,
+      item.dispatchRate != null
+        ? String(item.dispatchRate)
+        : undefined,
     timeCountingBasis:
-      commercialTerms.timeCountingBasis ??
-      item.timeCountingBasis,
+      item.timeCountingBasis != null
+        ? String(item.timeCountingBasis)
+        : undefined,
     norNoticePeriod:
-      commercialTerms.norNoticePeriod ??
-      item.norNoticePeriod,
+      item.norNoticePeriod != null
+        ? String(item.norNoticePeriod)
+        : undefined,
 
     despatchCredit,
-    openDisputeCount: Number(riskData?.openDisputeCount ?? 0),
-    amountUnderDispute: Number(riskData?.amountUnderDispute ? Number(riskData.amountUnderDispute) : 0),
+    openDisputeCount,
+    amountUnderDispute,
 
-    readyToCalculate: Boolean(riskData?.readyToCalculate),
-    calculationStale: Boolean(riskData?.calculationStale),
-    laycanExpired: Boolean(riskData?.laycanExpired),
+    readyToCalculate: false,
+    calculationStale,
+    laycanExpired,
 
-    blockers: riskData?.blockers ?? [],
+    blockers: [],
   };
 }
 
@@ -138,10 +138,12 @@ export interface ShipmentDraft {
   laycanOpen: string;
   laycanClose: string;
   laytimeOperation: "Loading" | "Discharge";
+  bulkOperationType: "" | "dry_bulk" | "tanker";
   laytimeAllowed: string;
   demurrageRate: string;
   dispatchRate: string;
   timeCountingBasis: string;
+  shexCalendar: ShipmentShexCalendarDraft;
   norNoticePeriod: string;
   receiverLaycanOpen: string;
   receiverLaycanClose: string;
@@ -157,17 +159,31 @@ export interface ShipmentCommercialTermsDraft {
   demurrageRate: string;
   dispatchRate: string;
   timeCountingBasis: string;
+  shexCalendar: ShipmentShexCalendarDraft;
   norNoticePeriod: string;
   weatherWorking: "" | "Enabled" | "Disabled";
   wibon: "" | "Enabled" | "Disabled";
   wipon: "" | "Enabled" | "Disabled";
 }
 
+export interface ShipmentShexCalendarDraft {
+  timeZone: string;
+  holidayDates: string[];
+  saturdayExcepted: "Yes" | "No";
+}
+
+export const emptyShipmentShexCalendarDraft: ShipmentShexCalendarDraft = {
+  timeZone: "",
+  holidayDates: [],
+  saturdayExcepted: "No",
+};
+
 export const emptyShipmentCommercialTermsDraft: ShipmentCommercialTermsDraft = {
   laytimeAllowed: "",
   demurrageRate: "",
   dispatchRate: "",
   timeCountingBasis: "",
+  shexCalendar: { ...emptyShipmentShexCalendarDraft },
   norNoticePeriod: "",
   weatherWorking: "",
   wibon: "",
@@ -190,10 +206,12 @@ export const emptyDraft: ShipmentDraft = {
   laycanOpen: "",
   laycanClose: "",
   laytimeOperation: "Discharge",
+  bulkOperationType: "",
   laytimeAllowed: "",
   demurrageRate: "",
   dispatchRate: "",
   timeCountingBasis: "6h SHINC",
+  shexCalendar: { ...emptyShipmentShexCalendarDraft },
   norNoticePeriod: "6 hours",
   receiverLaycanOpen: "",
   receiverLaycanClose: "",
@@ -206,14 +224,14 @@ export const emptyDraft: ShipmentDraft = {
 
 export const REQUIRED_DRAFT_FIELDS: (keyof ShipmentDraft)[] = [
   "vessel", "voyageRef", "productType", "quantity", "eta", "loadPort", "dischargePort",
-  "supplier", "receiver", "laycanOpen", "laycanClose", "laytimeOperation", "laytimeAllowed", "demurrageRate", "timeCountingBasis",
+  "supplier", "receiver", "laycanOpen", "laycanClose", "laytimeOperation", "bulkOperationType", "laytimeAllowed", "demurrageRate", "timeCountingBasis",
 ];
 
 const FIELD_LABELS: Record<string, string> = {
   vessel: "Vessel name", voyageRef: "Voyage ref.", productType: "Product type",
   quantity: "Quantity", eta: "ETA", loadPort: "Load port", dischargePort: "Discharge port",
   supplier: "Supplier", receiver: "Receiver", laycanOpen: "Laycan open", laycanClose: "Laycan close",
-  laytimeOperation: "Laytime operation", laytimeAllowed: "Laytime allowed", demurrageRate: "Demurrage rate", timeCountingBasis: "Time counting basis",
+  laytimeOperation: "Laytime operation", bulkOperationType: "Bulk operation type", laytimeAllowed: "Laytime allowed", demurrageRate: "Demurrage rate", timeCountingBasis: "Time counting basis",
 };
 
 export function missingDraftFields(draft: ShipmentDraft): string[] {
@@ -251,35 +269,16 @@ export function ShipmentsProvider({ children }: { children: ReactNode }) {
       try {
         const resp = await getVoyages();
 
-if (!keepAlive) return;
+        if (!keepAlive) return;
 
-const summaries = await Promise.all(
-  (resp ?? []).map(async (voyage: any) => {
-    try {
-      return await getVoyageSummary(voyage.id);
-    } catch (error) {
-      console.error(
-        `Failed to load summary for voyage ${voyage.id}`,
-        error
-      );
-      return null;
-    }
-  })
-);
+        const mapped: Shipment[] = (resp ?? [])
+          .map((voyage: VoyageListItem) => normalizeShipment(voyage))
+          .filter(Boolean) as Shipment[];
 
-if (!keepAlive) return;
-
-const mapped: Shipment[] = (resp ?? [])
-  .map((voyage: any, index: number) =>
-    normalizeShipment(voyage, summaries[index])
-  )
-  .filter(Boolean) as Shipment[];
-
-setShipments(mapped);
+        setShipments(mapped);
       } catch (err: any) {
         if (!keepAlive) return;
         setApiError(err?.message ?? String(err) ?? "Failed to load voyages");
-        setShipments([]);
       } finally {
         if (keepAlive) setLoading(false);
       }

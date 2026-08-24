@@ -1,6 +1,9 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayUnique,
+  IsArray,
   IsDateString,
+  IsBoolean,
   IsIn,
   IsNumber,
   IsOptional,
@@ -9,9 +12,75 @@ import {
   Length,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
-import { VOYAGE_STATUSES } from '../../entities/voyage.entity';
-import type { VoyageStatus } from '../../entities/voyage.entity';
+import { BULK_OPERATION_TYPES, VOYAGE_STATUSES } from '../../entities/voyage.entity';
+import type { BulkOperationType, VoyageStatus } from '../../entities/voyage.entity';
+
+export class CreateVoyageShexCalendarDto {
+  @Type(() => Number)
+  @IsIn([1])
+  calendarVersion!: 1;
+
+  @IsString()
+  @MaxLength(100)
+  timeZone!: string;
+
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  holidayDates!: string[];
+
+  @IsBoolean()
+  saturdayExcepted!: boolean;
+}
+
+export class CreateVoyageCommercialTermsDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  laytimeAllowed?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  demurrageRate?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  dispatchRate?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  timeCountingBasis?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateVoyageShexCalendarDto)
+  shexCalendar?: CreateVoyageShexCalendarDto;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  norNoticePeriod?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  weatherWorking?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  wibon?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  wipon?: boolean;
+}
 
 export class CreateVoyageDto {
   @IsUUID()
@@ -84,13 +153,32 @@ export class CreateVoyageDto {
   timeCountingBasis?: string;
 
   @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateVoyageShexCalendarDto)
+  shexCalendar?: CreateVoyageShexCalendarDto;
+
+  @IsOptional()
   @IsString()
   @MaxLength(20)
   norNoticePeriod?: string;
 
   @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateVoyageCommercialTermsDto)
+  loadingTerms?: CreateVoyageCommercialTermsDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateVoyageCommercialTermsDto)
+  dischargeTerms?: CreateVoyageCommercialTermsDto;
+
+  @IsOptional()
   @IsIn(['Loading', 'Discharge'])
   laytimeOperation?: 'Loading' | 'Discharge';
+
+  @IsOptional()
+  @IsIn(BULK_OPERATION_TYPES)
+  bulkOperationType?: BulkOperationType;
 
   @IsOptional()
   @IsIn(VOYAGE_STATUSES)

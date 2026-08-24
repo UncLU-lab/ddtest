@@ -10,6 +10,14 @@ import {
 import { UuidEntity } from '../../../database/entities/base.entity';
 import { CpClause } from './cp-clause.entity';
 import { Voyage } from './voyage.entity';
+import type { SettlementCurrency } from '../currency/settlement-currency';
+
+export const LAYTIME_OPERATION_SCOPES = [
+  'Loading',
+  'Discharge',
+  'LoadingAndDischarge',
+] as const;
+export type LaytimeOperationScope = (typeof LAYTIME_OPERATION_SCOPES)[number];
 
 @Entity('charter_parties')
 @Index('idx_charter_parties_voyage', ['voyageId'])
@@ -70,6 +78,22 @@ export class CharterParty extends UuidEntity {
     nullable: true,
   })
   norNoticePeriod?: string | null;
+
+  @Column({
+    name: 'laytime_operation_scope',
+    type: 'varchar',
+    length: 30,
+    nullable: true,
+  })
+  laytimeOperationScope?: LaytimeOperationScope | null;
+
+  @Column({
+    name: 'settlement_currency',
+    type: 'varchar',
+    length: 3,
+    nullable: true,
+  })
+  settlementCurrency?: SettlementCurrency | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

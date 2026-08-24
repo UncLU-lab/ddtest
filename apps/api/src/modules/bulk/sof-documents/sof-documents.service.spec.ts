@@ -1,6 +1,7 @@
 import { Repository } from 'typeorm';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
+import { TenantContextService } from '../../cross-cutting/tenant-context/tenant-context.service';
 import { VoyagesService } from '../voyages/voyages.service';
 import { CreateSofDocumentDto } from './dto/create-sof-document.dto';
 import { CreateSofEventDto } from './dto/create-sof-event.dto';
@@ -14,7 +15,7 @@ const DOCUMENT_ID = '33333333-3333-4333-8333-333333333333';
 
 function buildService() {
   const documents = {
-    findOne: jest.fn().mockResolvedValue({ id: SOF_ID }),
+    findOne: jest.fn().mockResolvedValue({ id: SOF_ID, voyageId: SOF_ID }),
     create: jest.fn((value) => value),
     merge: jest.fn((entity, dto) => ({ ...entity, ...dto })),
     save: jest.fn(async (value) => value),
@@ -57,16 +58,21 @@ function buildService() {
   const voyagesService = {
     ensureExists: jest.fn().mockResolvedValue({ id: SOF_ID }),
   };
+  const tenantContext = {
+    getOrganizationId: jest.fn().mockReturnValue('00000000-0000-0000-0000-000000000001'),
+  };
 
   return {
     service: new SofDocumentsService(
       documents as unknown as Repository<SofDocument>,
       events as unknown as Repository<SofEvent>,
       voyagesService as unknown as VoyagesService,
+      tenantContext as unknown as TenantContextService,
     ),
     documents,
     events,
     voyagesService,
+    tenantContext,
   };
 }
 
@@ -133,9 +139,75 @@ describe('SofDocumentsService documents', () => {
       expect(events.save).not.toHaveBeenCalled();
     },
   );
+
+  it('rejects a SOF document that belongs to another organization', async () => {
+    const { service, documents, voyagesService } = buildService();
+    documents.findOne.mockResolvedValueOnce({
+      id: DOCUMENT_ID,
+      voyageId: '22222222-2222-4222-8222-222222222222',
+    });
+    voyagesService.ensureExists.mockRejectedValueOnce(new Error('Voyage not found'));
+
+    await expect(service.update(DOCUMENT_ID, {})).rejects.toThrow(
+      'Voyage not found',
+    );
+  });
 });
 
 describe('SofDocumentsService events', () => {
+  it('persists vessel readiness with its evidence timestamp', async () => {
+    const { service, events } = buildService();
+    const eventTime = '2026-08-17T09:30:00.000Z';
+
+    const result = await service.addEvent(SOF_ID, {
+      eventTime,
+      eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+    });
+
+    expect(events.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sofId: SOF_ID,
+        eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+        eventTime: new Date(eventTime),
+        operation: null,
+        isManualOverride: true,
+      }),
+    );
+    expect(result.eventType).toBe('VESSEL_READY_IN_ALL_RESPECTS');
+    expect(result.eventTime).toEqual(new Date(eventTime));
+  });
+
+  it.each([
+    ['Loading', 'Loading'],
+    ['Discharge', 'Discharge'],
+    ['null', undefined],
+  ] as const)(
+    'persists FREE_PRATIQUE_GRANTED with %s operation and its exact grant timestamp',
+    async (_label, operation) => {
+      const { service, events } = buildService();
+      const eventTime = '2026-08-17T09:37:41.250Z';
+
+      const result = await service.addEvent(SOF_ID, {
+        eventTime,
+        eventType: 'FREE_PRATIQUE_GRANTED',
+        ...(operation ? { operation } : {}),
+      });
+
+      expect(events.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sofId: SOF_ID,
+          eventType: 'FREE_PRATIQUE_GRANTED',
+          eventTime: new Date(eventTime),
+          operation: operation ?? null,
+          isManualOverride: true,
+        }),
+      );
+      expect(result.eventType).toBe('FREE_PRATIQUE_GRANTED');
+      expect(result.eventTime).toEqual(new Date(eventTime));
+      expect(result.operation).toBe(operation ?? null);
+    },
+  );
+
   it.each(['Loading', 'Discharge'] as const)(
     'persists operation = %s when adding a manual event',
     async (operation) => {
@@ -179,6 +251,41 @@ describe('SofDocumentsService events', () => {
       );
       expect(result.eventType).toBe('CARGO_STARTED');
       expect(result.operation).toBe(operation);
+    },
+  );
+
+  it.each([
+    ['HATCHES_CLOSED', 'Loading'],
+    ['CARGO_SECURED', 'Discharge'],
+    ['HATCHES_CLOSED', undefined],
+  ] as const)(
+    'persists %s with operation = %s and preserves the exact event timestamp',
+    async (eventType, operation) => {
+      const { service, events } = buildService();
+      const eventTime = '2026-08-17T10:12:34.567Z';
+
+      const result = await service.addEvent(SOF_ID, {
+        eventTime,
+        eventType,
+        ...(operation ? { operation } : {}),
+      });
+
+      expect(events.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sofId: SOF_ID,
+          eventType,
+          eventTime: new Date(eventTime),
+          operation: operation ?? null,
+          isManualOverride: true,
+        }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({
+          eventType,
+          eventTime: new Date(eventTime),
+          operation: operation ?? null,
+        }),
+      );
     },
   );
 

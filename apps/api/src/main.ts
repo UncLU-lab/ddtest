@@ -3,11 +3,13 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import {
   getProductionCorsOrigins,
+  validateAuthenticationEnvironment,
   validateProductionEnvironment,
 } from './config/env-validation';
 
 async function bootstrap(): Promise<void> {
   validateProductionEnvironment(process.env);
+  validateAuthenticationEnvironment(process.env);
 
   const app = await NestFactory.create(AppModule);
 

@@ -7,6 +7,8 @@ import {
   Plus,
 } from "lucide-react";
 import { PageHeader } from "./Layout";
+import { CharterPartyTermsPanel } from "./CharterPartyTermsPanel";
+import { LaytimeCalculationResultPanel } from "./LaytimeCalculationResultPanel";
 import { RISK_LABEL, RISK_BADGE } from "./data/shipments";
 import { useShipments } from "./data/ShipmentsContext";
 import {
@@ -14,6 +16,7 @@ import {
   getVoyageCharterParty,
   getVoyageSummary,
   updateCpClause,
+  updateVoyage,
   type CharterParty,
   type ClauseOperation,
   type CpClause,
@@ -47,7 +50,15 @@ type ShipmentRouteState = {
     dispatchRate?: string;
     timeCountingBasis?: string;
     norNoticePeriod?: string;
+    bulkOperationType?: "dry_bulk" | "tanker";
   };
+};
+
+type VoyageEditForm = {
+  port: string;
+  cargo: string;
+  quantity: string;
+  eta: string;
 };
 
 function formatValue(value: any, fallback = "Not available"): string {
@@ -60,6 +71,18 @@ function formatValue(value: any, fallback = "Not available"): string {
   }
 
   return String(value);
+}
+
+function formatBulkOperationType(value?: string | null) {
+  if (value === "dry_bulk") {
+    return "Dry bulk";
+  }
+
+  if (value === "tanker") {
+    return "Tanker / liquid bulk";
+  }
+
+  return "—";
 }
 
 function formatMoney(value: any, fallback = "Not available"): string {
@@ -98,6 +121,34 @@ function formatDateTime(value: any, fallback = "Not available"): string {
   }
 
   return date.toLocaleString();
+}
+
+function parseEditableQuantity(value: string): number | null {
+  const normalized = value.replace(/[^0-9.,-]/g, "").replace(/,/g, "");
+
+  if (!normalized.trim()) {
+    return null;
+  }
+
+  const quantity = Number(normalized);
+
+  return Number.isFinite(quantity) ? quantity : null;
+}
+
+function normalizeEditableEta(value: string): string | null {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  const eta = new Date(trimmed);
+
+  if (Number.isNaN(eta.getTime())) {
+    return null;
+  }
+
+  return eta.toISOString();
 }
 
 type ClauseScope = "Global" | ClauseOperation;
@@ -582,7 +633,7 @@ export default function ShipmentDetail() {
 
   const {
     getShipmentById,
-    updateShipment,
+    reload,
   } = useShipments();
 
   const ctxShipment =
@@ -602,6 +653,11 @@ export default function ShipmentDetail() {
     voyageError,
     setVoyageError,
   ] = useState<string | null>(null);
+
+  const [
+    voyageReloadKey,
+    setVoyageReloadKey,
+  ] = useState(0);
 
   const [
     charterParty,
@@ -696,7 +752,7 @@ export default function ShipmentDetail() {
     return () => {
       mounted = false;
     };
-  }, [id]);
+  }, [id, voyageReloadKey]);
 
   // ───────────────────────────────────────────────────────────────────────────
   // Backend data
@@ -757,16 +813,6 @@ export default function ShipmentDetail() {
   const summary =
     voyageSummary ?? null;
 
-  const shipmentForm = {
-    vessel: ctxShipment?.vessel ?? "",
-    port: ctxShipment?.port ?? "",
-    supplier: ctxShipment?.supplier ?? "",
-    receiver: ctxShipment?.receiver ?? "",
-    eta: ctxShipment?.eta ?? "",
-    cargo: ctxShipment?.cargo ?? "",
-    quantity: ctxShipment?.quantity ?? "",
-  };
-
   const [activeTab, setActiveTab] =
     useState<TabKey>("overview");
 
@@ -774,11 +820,39 @@ export default function ShipmentDetail() {
     useState(false);
 
   const [form, setForm] = useState(
-    shipmentForm
+    {
+      port: ctxShipment?.port ?? "",
+      cargo: ctxShipment?.cargo ?? "",
+      quantity:
+        voyage?.cargoQuantity !== undefined &&
+        voyage?.cargoQuantity !== null
+          ? String(Number(voyage.cargoQuantity))
+          : "",
+      eta: ctxShipment?.eta ?? "",
+    } as VoyageEditForm
   );
 
+  const [
+    editSaveError,
+    setEditSaveError,
+  ] = useState<string | null>(null);
+
+  const [
+    editSaving,
+    setEditSaving,
+  ] = useState(false);
+
   useEffect(() => {
-    setForm(shipmentForm);
+    setForm({
+      port: ctxShipment?.port ?? "",
+      cargo: ctxShipment?.cargo ?? "",
+      quantity:
+        voyage?.cargoQuantity !== undefined &&
+        voyage?.cargoQuantity !== null
+          ? String(Number(voyage.cargoQuantity))
+          : "",
+      eta: ctxShipment?.eta ?? "",
+    });
   }, [ctxShipment?.id]);
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -850,6 +924,12 @@ export default function ShipmentDetail() {
           draft?.loadPort ??
           ctxShipment?.loadPort ??
           "Not available",
+
+        bulkOperationType:
+          voyage.bulkOperationType ??
+          draft?.bulkOperationType ??
+          ctxShipment?.bulkOperationType ??
+          null,
 
         voyageRef:
           voyage.reference ??
@@ -996,24 +1076,74 @@ export default function ShipmentDetail() {
 
   function startEdit() {
     setForm({
-      vessel: shipment.vessel ?? "",
       port: shipment.port ?? "",
-      supplier: shipment.supplier ?? "",
-      receiver: shipment.receiver ?? "",
       eta: shipment.eta ?? "",
       cargo: shipment.cargo ?? "",
-      quantity: shipment.quantity ?? "",
+      quantity:
+        voyage?.cargoQuantity !== undefined &&
+        voyage?.cargoQuantity !== null
+          ? String(Number(voyage.cargoQuantity))
+          : "",
     });
 
+    setEditSaveError(null);
     setIsEditing(true);
   }
 
-  function saveEdit() {
-    updateShipment(shipment.id, form);
-    setIsEditing(false);
+  async function saveEdit() {
+    if (!shipment.id) {
+      setEditSaveError("Voyage ID is required.");
+      return;
+    }
+
+    const cargoQuantity = parseEditableQuantity(form.quantity);
+    const eta = normalizeEditableEta(form.eta);
+
+    if (!form.port.trim()) {
+      setEditSaveError("Port is required.");
+      return;
+    }
+
+    if (!form.cargo.trim()) {
+      setEditSaveError("Cargo is required.");
+      return;
+    }
+
+    if (cargoQuantity === null) {
+      setEditSaveError("Quantity must be a valid number.");
+      return;
+    }
+
+    if (form.eta.trim() && !eta) {
+      setEditSaveError("ETA must be a valid date.");
+      return;
+    }
+
+    setEditSaving(true);
+    setEditSaveError(null);
+
+    try {
+      await updateVoyage(shipment.id, {
+        dischargePort: form.port.trim(),
+        cargoType: form.cargo.trim(),
+        cargoQuantity,
+        ...(eta ? { eta } : {}),
+      });
+
+      reload();
+      setVoyageReloadKey((value) => value + 1);
+      setIsEditing(false);
+    } catch (error: any) {
+      setEditSaveError(
+        error?.message ?? "Unable to save voyage changes."
+      );
+    } finally {
+      setEditSaving(false);
+    }
   }
 
   function cancelEdit() {
+    setEditSaveError(null);
     setIsEditing(false);
   }
 
@@ -1330,10 +1460,12 @@ export default function ShipmentDetail() {
                     color: "#ffffff",
                     backgroundColor: "#1A4ED8",
                     border: "none",
+                    opacity: editSaving ? 0.7 : 1,
                   }}
+                  disabled={editSaving}
                   onClick={saveEdit}
                 >
-                  Save changes
+                  {editSaving ? "Saving..." : "Save changes"}
                 </button>
               </>
             ) : (
@@ -1372,35 +1504,15 @@ export default function ShipmentDetail() {
         }}
       >
         <div className="flex items-center gap-2.5 mb-2">
-          {isEditing ? (
-            <input
-              value={form.vessel}
-              onChange={(event) =>
-                setForm({
-                  ...form,
-                  vessel: event.target.value,
-                })
-              }
-              style={{
-                fontSize: "18px",
-                fontWeight: 500,
-                color: "#111827",
-                border: "0.5px solid #E5E7EB",
-                borderRadius: "6px",
-                padding: "2px 8px",
-              }}
-            />
-          ) : (
-            <h1
-              style={{
-                fontSize: "18px",
-                fontWeight: 500,
-                color: "#111827",
-              }}
-            >
-              {shipment.vessel}
-            </h1>
-          )}
+          <h1
+            style={{
+              fontSize: "18px",
+              fontWeight: 500,
+              color: "#111827",
+            }}
+          >
+            {shipment.vessel}
+          </h1>
 
           <span
             className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 font-semibold"
@@ -1424,12 +1536,11 @@ export default function ShipmentDetail() {
         </div>
 
         {isEditing ? (
-          <div className="flex items-center flex-wrap gap-2">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center flex-wrap gap-2">
             {(
               [
                 ["port", "Port"],
-                ["supplier", "Supplier"],
-                ["receiver", "Receiver"],
                 ["cargo", "Cargo"],
                 ["quantity", "Quantity"],
                 ["eta", "ETA"],
@@ -1463,14 +1574,27 @@ export default function ShipmentDetail() {
                     borderRadius: "6px",
                     padding: "2px 6px",
                     width:
-                      key === "supplier" ||
-                      key === "receiver"
-                        ? "110px"
-                        : "90px",
+                      key === "cargo"
+                        ? "130px"
+                        : key === "eta"
+                          ? "160px"
+                          : "100px",
                   }}
                 />
               </label>
             ))}
+            </div>
+
+            {editSaveError ? (
+              <p
+                style={{
+                  fontSize: "12px",
+                  color: "#B91C1C",
+                }}
+              >
+                {editSaveError}
+              </p>
+            ) : null}
           </div>
         ) : (
           <div
@@ -1696,6 +1820,8 @@ export default function ShipmentDetail() {
         {/* LEFT COLUMN */}
 
         <div className="flex-1 min-w-0 flex flex-col gap-3.5">
+          <LaytimeCalculationResultPanel calculation={calculation} />
+
           {/* Active laytime clocks */}
 
           <div
@@ -2124,354 +2250,13 @@ export default function ShipmentDetail() {
             />
           </div>
 
-          <div
-            className="rounded-xl border p-[16px_18px]"
-            style={{
-              borderColor: "#E5E7EB",
-              borderWidth: "0.5px",
-              backgroundColor: "#ffffff",
-            }}
-          >
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <span
-                style={{
-                  fontSize: "11px",
-                  color: "#6B7280",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.05em",
-                }}
-              >
-                Charter party clauses
-              </span>
-
-              <button
-                type="button"
-                onClick={startNewClause}
-                disabled={!charterParty || charterPartyLoading}
-                className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 transition-colors cursor-pointer disabled:cursor-not-allowed"
-                style={{
-                  fontSize: "11px",
-                  color:
-                    !charterParty || charterPartyLoading
-                      ? "#9CA3AF"
-                      : "#374151",
-                  borderColor: "#E5E7EB",
-                  borderWidth: "0.5px",
-                  backgroundColor: "#ffffff",
-                }}
-              >
-                <Plus size={11} />
-                Add clause
-              </button>
-            </div>
-
-            {charterPartyLoading ? (
-              <p style={{ fontSize: "12px", color: "#6B7280" }}>
-                Loading charter party clauses...
-              </p>
-            ) : charterPartyError ? (
-              <p style={{ fontSize: "12px", color: "#B45309", lineHeight: 1.4 }}>
-                Unable to load charter party clauses: {charterPartyError}
-              </p>
-            ) : !charterParty ? (
-              <p style={{ fontSize: "12px", color: "#6B7280", lineHeight: 1.4 }}>
-                No charter party is attached to this voyage yet.
-              </p>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {clauseEditorOpen && (
-                  <div
-                    className="rounded-lg border p-3"
-                    style={{
-                      borderColor: "#E5E7EB",
-                      borderWidth: "0.5px",
-                      backgroundColor: "#F9FAFB",
-                    }}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span
-                        style={{
-                          fontSize: "12px",
-                          fontWeight: 500,
-                          color: "#111827",
-                        }}
-                      >
-                        {clauseForm.clauseId ? "Edit clause" : "New clause"}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <label className="flex flex-col gap-1">
-                        <span style={{ fontSize: "10px", color: "#6B7280" }}>
-                          Clause type
-                        </span>
-                        <select
-                          value={clauseForm.clauseType}
-                          onChange={(event) =>
-                            setClauseForm((current) => ({
-                              ...current,
-                              clauseType: event.target.value,
-                            }))
-                          }
-                          className="w-full appearance-none outline-none cursor-pointer"
-                          style={{
-                            height: "32px",
-                            border: "0.5px solid #E5E7EB",
-                            borderRadius: "8px",
-                            padding: "0 10px",
-                            fontSize: "12px",
-                            color: "#111827",
-                            backgroundColor: "#ffffff",
-                          }}
-                        >
-                          {Array.from(
-                            new Set([
-                              ...CLAUSE_TYPE_OPTIONS,
-                              clauseForm.clauseType,
-                            ]),
-                          ).map((option) => (
-                            <option key={option} value={option}>
-                              {formatClauseTypeLabel(option)}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="flex flex-col gap-1">
-                        <span style={{ fontSize: "10px", color: "#6B7280" }}>
-                          Operation
-                        </span>
-                        <select
-                          value={clauseForm.operation}
-                          onChange={(event) => {
-                            const nextOperation = event.target.value as ClauseScope;
-
-                            setClauseForm((current) => {
-                              try {
-                                const nextParameters = buildClauseParameters(
-                                  current.parametersText,
-                                  nextOperation,
-                                );
-
-                                return {
-                                  ...current,
-                                  operation: nextOperation,
-                                  parametersText: stringifyClauseParameters(nextParameters),
-                                };
-                              } catch {
-                                return {
-                                  ...current,
-                                  operation: nextOperation,
-                                };
-                              }
-                            });
-                          }}
-                          className="w-full appearance-none outline-none cursor-pointer"
-                          style={{
-                            height: "32px",
-                            border: "0.5px solid #E5E7EB",
-                            borderRadius: "8px",
-                            padding: "0 10px",
-                            fontSize: "12px",
-                            color: "#111827",
-                            backgroundColor: "#ffffff",
-                          }}
-                        >
-                          <option value="Global">Global</option>
-                          <option value="Loading">Loading</option>
-                          <option value="Discharge">Discharge</option>
-                        </select>
-                      </label>
-                    </div>
-
-                    {isOperationScopedClause(clauseForm.clauseType) ? (
-                      <p style={{ fontSize: "10px", color: "#6B7280", marginTop: "6px" }}>
-                        Global removes <code>parameters.operation</code>.
-                      </p>
-                    ) : (
-                      <p style={{ fontSize: "10px", color: "#6B7280", marginTop: "6px" }}>
-                        Scope is only used for the supported laytime and rate clauses.
-                      </p>
-                    )}
-
-                    <label className="flex flex-col gap-1 mt-3">
-                      <span style={{ fontSize: "10px", color: "#6B7280" }}>
-                        Raw text
-                      </span>
-                      <textarea
-                        value={clauseForm.rawText}
-                        onChange={(event) =>
-                          setClauseForm((current) => ({
-                            ...current,
-                            rawText: event.target.value,
-                          }))
-                        }
-                        rows={3}
-                        className="w-full outline-none"
-                        style={{
-                          border: "0.5px solid #E5E7EB",
-                          borderRadius: "8px",
-                          padding: "8px 10px",
-                          fontSize: "12px",
-                          color: "#111827",
-                          backgroundColor: "#ffffff",
-                          resize: "vertical",
-                        }}
-                      />
-                    </label>
-
-                    <label className="flex flex-col gap-1 mt-3">
-                      <span style={{ fontSize: "10px", color: "#6B7280" }}>
-                        Parameters JSON
-                      </span>
-                      <textarea
-                        value={clauseForm.parametersText}
-                        onChange={(event) =>
-                          setClauseForm((current) => ({
-                            ...current,
-                            parametersText: event.target.value,
-                          }))
-                        }
-                        rows={5}
-                        className="w-full outline-none"
-                        style={{
-                          border: "0.5px solid #E5E7EB",
-                          borderRadius: "8px",
-                          padding: "8px 10px",
-                          fontSize: "12px",
-                          color: "#111827",
-                          backgroundColor: "#ffffff",
-                          resize: "vertical",
-                          fontFamily: "monospace",
-                        }}
-                      />
-                    </label>
-
-                    {clauseSaveError && (
-                      <p style={{ marginTop: "8px", fontSize: "12px", color: "#B45309" }}>
-                        {clauseSaveError}
-                      </p>
-                    )}
-
-                    <div className="flex items-center justify-end gap-2 mt-3">
-                      <button
-                        type="button"
-                        onClick={cancelClauseEdit}
-                        className="rounded-md border px-3 py-1.5 text-xs cursor-pointer"
-                        style={{
-                          color: "#374151",
-                          borderColor: "#E5E7EB",
-                          borderWidth: "0.5px",
-                          backgroundColor: "#ffffff",
-                        }}
-                      >
-                        Cancel
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => void saveClause()}
-                        disabled={clauseSaving}
-                        className="rounded-md px-3 py-1.5 text-xs cursor-pointer disabled:cursor-not-allowed"
-                        style={{
-                          color: "#ffffff",
-                          backgroundColor: clauseSaving ? "#93C5FD" : "#1A4ED8",
-                          border: "none",
-                        }}
-                      >
-                        {clauseSaving ? "Saving..." : "Save clause"}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {(["Global", "Loading", "Discharge"] as ClauseScope[]).map((scope) => {
-                  const groupedClauses = clauseGroups[scope];
-
-                  if (groupedClauses.length === 0) {
-                    return null;
-                  }
-
-                  return (
-                    <div key={scope}>
-                      <p
-                        style={{
-                          fontSize: "10px",
-                          color: "#9CA3AF",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.05em",
-                          marginBottom: "6px",
-                        }}
-                      >
-                        {scope}
-                      </p>
-
-                      <div className="flex flex-col gap-2">
-                        {groupedClauses.map((clause) => {
-                          const clauseScope = getClauseOperation(clause.parameters);
-                          return (
-                            <div
-                              key={clause.id}
-                              className="rounded-lg border p-3"
-                              style={{
-                                borderColor: "#E5E7EB",
-                                borderWidth: "0.5px",
-                                backgroundColor: "#F9FAFB",
-                              }}
-                            >
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <p
-                                    style={{
-                                      fontSize: "12px",
-                                      fontWeight: 500,
-                                      color: "#111827",
-                                      marginBottom: "2px",
-                                    }}
-                                  >
-                                    {formatClauseTypeLabel(clause.clauseType)} — {clauseScope}
-                                  </p>
-                                  <p
-                                    style={{
-                                      fontSize: "11px",
-                                      color: "#6B7280",
-                                      lineHeight: 1.45,
-                                    }}
-                                  >
-                                    {clause.rawText}
-                                  </p>
-                                </div>
-
-                                <button
-                                  type="button"
-                                  onClick={() => startEditClause(clause)}
-                                  className="rounded-md border px-2 py-1 text-xs cursor-pointer flex-shrink-0"
-                                  style={{
-                                    color: "#374151",
-                                    borderColor: "#E5E7EB",
-                                    borderWidth: "0.5px",
-                                    backgroundColor: "#ffffff",
-                                  }}
-                                >
-                                  Edit
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {charterPartyClauses.length === 0 && !clauseEditorOpen && (
-                  <p style={{ fontSize: "12px", color: "#6B7280", lineHeight: 1.4 }}>
-                    No charter party clauses have been added yet.
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
+          <CharterPartyTermsPanel
+            charterParty={charterParty}
+            commercialTerms={summary?.commercialTerms ?? null}
+            loading={charterPartyLoading}
+            error={charterPartyError}
+            onReload={() => setClauseReloadKey((value) => value + 1)}
+          />
 
         </div>
 
@@ -2676,6 +2461,15 @@ export default function ShipmentDetail() {
                 voyage?.laytimeOperation ??
                   shipment.laytimeOperation ??
                   "Discharge"
+              )}
+            />
+
+            <KVRow
+              label="Bulk operation type"
+              value={formatBulkOperationType(
+                voyage?.bulkOperationType ??
+                  shipment.bulkOperationType ??
+                  null
               )}
             />
 

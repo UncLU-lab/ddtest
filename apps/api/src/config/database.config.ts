@@ -7,6 +7,12 @@ export type AppDatabaseConfig = DataSourceOptions & {
   autoLoadEntities?: boolean;
 };
 
+export const DEFAULT_APPLICATION_DATABASE_ROLE = 'demurrage_defender_app';
+
+export interface DatabaseConfigOptions {
+  useApplicationRole?: boolean;
+}
+
 function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';
 }
@@ -19,7 +25,9 @@ function readBoolean(value: string | undefined, fallback = false): boolean {
   return value.trim().toLowerCase() === 'true';
 }
 
-export default registerAs('database', (): AppDatabaseConfig => {
+export function createDatabaseConfig(
+  options: DatabaseConfigOptions = {},
+): AppDatabaseConfig {
   validateProductionDatabaseEnvironment(process.env);
 
   const connection = isProduction()
@@ -42,13 +50,21 @@ export default registerAs('database', (): AppDatabaseConfig => {
           database: process.env.DB_DATABASE ?? 'demurrage-defender',
         };
 
+  const applicationRole =
+    process.env.DB_APPLICATION_ROLE?.trim() ||
+    DEFAULT_APPLICATION_DATABASE_ROLE;
+
+  if (!/^[a-z_][a-z0-9_]*$/.test(applicationRole)) {
+    throw new Error(
+      'Invalid database configuration: DB_APPLICATION_ROLE must be a PostgreSQL identifier.',
+    );
+  }
+
   return {
     type: 'postgres',
     ...connection,
     entities: [...databaseEntities],
-    migrations: [
-      __dirname + '/../migrations/!(*.spec|*.test|*.d).{ts,js}',
-    ],
+    migrations: [__dirname + '/../migrations/!(*.spec|*.test|*.d).{ts,js}'],
     synchronize: false,
     dropSchema: false,
     logging: readBoolean(process.env.DB_LOGGING),
@@ -60,5 +76,19 @@ export default registerAs('database', (): AppDatabaseConfig => {
           ),
         }
       : false,
+    ...(options.useApplicationRole === false
+      ? {}
+      : {
+          // Migrations connect as the privileged owner; runtime connections
+          // always assume the non-owner role that is subject to RLS.
+          extra: {
+            options: `-c role=${applicationRole}`,
+          },
+        }),
   };
-});
+}
+
+export default registerAs(
+  'database',
+  (): AppDatabaseConfig => createDatabaseConfig(),
+);

@@ -5,6 +5,8 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { BulkModule } from './modules/bulk/bulk.module';
+import { AuthenticationModule } from './modules/cross-cutting/auth/authentication.module';
+import { TenantContextModule } from './modules/cross-cutting/tenant-context/tenant-context.module';
 
 dotenv.config({
   path: [`.env.${process.env.NODE_ENV ?? 'development'}`, '.env'],
@@ -14,7 +16,7 @@ dotenv.config({
 // Feature modules need repositories, so they load only alongside the database.
 const databaseImports =
   process.env.DB_ENABLED?.toLowerCase() === 'true'
-    ? [DatabaseModule, BulkModule]
+    ? [DatabaseModule, AuthenticationModule, BulkModule]
     : [];
 
 @Module({
@@ -23,6 +25,7 @@ const databaseImports =
       isGlobal: true,
       envFilePath: [`.env.${process.env.NODE_ENV ?? 'development'}`, '.env'],
     }),
+    TenantContextModule,
     ...databaseImports,
   ],
   controllers: [AppController],

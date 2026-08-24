@@ -1,13 +1,16 @@
 import { ConflictException } from '@nestjs/common';
-import { DataSource, IsNull, Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
+import { TenantDatabaseContextService } from '../../../database/tenant-database-context.service';
 import { CalculationPeriod } from '../entities/calculation-period.entity';
 import { CharterParty } from '../entities/charter-party.entity';
 import { LaytimeCalculation } from '../entities/laytime-calculation.entity';
 import { NorDocument } from '../entities/nor-document.entity';
+import { NorTenderLocationEvidence } from '../entities/nor-tender-location-evidence.entity';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
 import { normalizeCommercialTermsToClauses } from '../charter-party-terms';
 import { Voyage } from '../entities/voyage.entity';
+import { TenantContextService } from '../../cross-cutting/tenant-context/tenant-context.service';
 import { VoyagesService } from '../voyages/voyages.service';
 import { LaytimeCalculationsService } from './laytime-calculations.service';
 
@@ -35,6 +38,7 @@ function buildService(maximum = 0) {
     dispatchRate: null,
     timeCountingBasis: null,
     norNoticePeriod: '6 hours',
+    settlementCurrency: 'USD',
   };
 
   return buildServiceWithCharterParty(maximum, charterParty);
@@ -55,10 +59,13 @@ function buildServiceWithCharterParty(
     dispatchRate: string | null;
     timeCountingBasis: string | null;
     norNoticePeriod: string | null;
+    laytimeOperationScope: 'Loading' | 'Discharge' | 'LoadingAndDischarge' | null;
+    settlementCurrency: 'USD' | 'EUR' | null;
   }>,
   options?: Partial<{
     cargoQuantity: string;
     laytimeOperation: 'Loading' | 'Discharge';
+    bulkOperationType: 'dry_bulk' | 'tanker' | null;
     sofDocuments: Array<{
       id: string;
       status: 'Draft' | 'Final';
@@ -69,6 +76,29 @@ function buildServiceWithCharterParty(
       id: string;
       tenderTime: Date;
       acceptedTime?: Date | null;
+    }>;
+    locationEvidence: Array<{
+      id: string;
+      voyageId: string;
+      operation: 'Loading' | 'Discharge';
+      evidenceTime: Date;
+      portRelation: 'INSIDE_PORT_LIMITS' | 'OUTSIDE_PORT_LIMITS' | 'UNKNOWN';
+      berthRelation: 'AT_BERTH' | 'NOT_AT_BERTH' | 'UNKNOWN';
+      waitingPlace:
+        | 'ANCHORAGE'
+        | 'PILOT_STATION'
+        | 'CUSTOMARY_WAITING_PLACE'
+        | 'OTHER'
+        | 'NONE'
+        | 'UNKNOWN';
+      source: 'MANUAL' | 'SOF' | 'OCR' | 'AIS';
+      sofDocumentId?: string | null;
+      sourceReference?: string | null;
+      note?: string | null;
+      norDocumentId?: string | null;
+      norTenderedEventId?: string | null;
+      createdByUserId: string;
+      createdAt: Date;
     }>;
     sofEvents: Array<{
       id: string;
@@ -98,6 +128,7 @@ function buildServiceWithCharterParty(
       Array.isArray(value) ? value : { ...value, id: 'new-calculation' },
     ),
     findOne: jest.fn().mockResolvedValue(null),
+    find: jest.fn().mockResolvedValue([]),
     findOneOrFail: jest.fn().mockResolvedValue({
       id: 'new-calculation',
       voyageId: VOYAGE_ID,
@@ -111,11 +142,20 @@ function buildServiceWithCharterParty(
   const dataSource = {
     transaction: jest.fn((work) => work(manager)),
   };
+  const tenantContext = {
+    getOrganizationId: jest
+      .fn()
+      .mockReturnValue('00000000-0000-0000-0000-000000000001'),
+  };
   const voyagesService = {
     ensureExists: jest.fn().mockResolvedValue({
       id: VOYAGE_ID,
       cargoQuantity: options?.cargoQuantity ?? '20000.00',
       laytimeOperation: options?.laytimeOperation ?? 'Discharge',
+      bulkOperationType:
+        options?.bulkOperationType !== undefined
+          ? options.bulkOperationType
+          : null,
     }),
   };
   const charterParty = {
@@ -139,6 +179,7 @@ function buildServiceWithCharterParty(
     dispatchRate: null,
     timeCountingBasis: null,
     norNoticePeriod: '6 hours',
+    settlementCurrency: 'USD',
     ...charterPartyOverrides,
   };
   const charterParties = {
@@ -183,6 +224,9 @@ function buildServiceWithCharterParty(
       ],
     ),
   };
+  const locationEvidence = {
+    find: jest.fn().mockResolvedValue(options?.locationEvidence ?? []),
+  };
 
   return {
     service: new LaytimeCalculationsService(
@@ -192,12 +236,17 @@ function buildServiceWithCharterParty(
       norDocuments as unknown as Repository<NorDocument>,
       sofDocuments as unknown as Repository<SofDocument>,
       sofEvents as unknown as Repository<SofEvent>,
+      locationEvidence as unknown as Repository<NorTenderLocationEvidence>,
       voyagesService as unknown as VoyagesService,
-      dataSource as unknown as DataSource,
+      dataSource as unknown as TenantDatabaseContextService,
+      tenantContext as unknown as TenantContextService,
     ),
     calculations,
     charterParty,
+    charterParties,
+    voyagesService,
     manager,
+    locationEvidence,
   };
 }
 
@@ -213,11 +262,21 @@ function cpClause(
   parameters: Record<string, unknown>,
   rawText = `${clauseType} ${id}`,
 ) {
+  const normalizedParameters =
+    clauseType === 'reversible_laytime' &&
+    parameters.enabled === true &&
+    parameters.settlementVersion === undefined
+      ? {
+          ...parameters,
+          settlementVersion: 1,
+          allowanceMode: 'sum_operation_allowances',
+        }
+      : parameters;
   return {
     id,
     clauseType,
     rawText,
-    parameters,
+    parameters: normalizedParameters,
   };
 }
 
@@ -266,10 +325,11 @@ describe('LaytimeCalculationsService lifecycle', () => {
     } as LaytimeCalculation;
     calculations.findAndCount.mockResolvedValue([[parentCalculation], 1]);
 
-    const result = await service.findForVoyage(
-      VOYAGE_ID,
-      { skip: 0, limit: 10, page: 1 } as never,
-    );
+    const result = await service.findForVoyage(VOYAGE_ID, {
+      skip: 0,
+      limit: 10,
+      page: 1,
+    } as never);
 
     expect(calculations.findAndCount).toHaveBeenCalledWith({
       where: { voyageId: VOYAGE_ID, parentCalculationId: IsNull() },
@@ -278,6 +338,21 @@ describe('LaytimeCalculationsService lifecycle', () => {
       take: 10,
     });
     expect(result.data).toEqual([parentCalculation]);
+  });
+
+  it('rejects a laytime calculation that belongs to another organization', async () => {
+    const { service, calculations, voyagesService } = buildService();
+    calculations.findOne.mockResolvedValueOnce({
+      id: 'foreign-calculation',
+      voyageId: 'foreign-voyage',
+    } as LaytimeCalculation);
+    voyagesService.ensureExists.mockRejectedValueOnce(
+      new Error('Voyage not found'),
+    );
+
+    await expect(service.findOne('foreign-calculation')).rejects.toThrow(
+      'Voyage not found',
+    );
   });
 
   it('returns direct Loading and Discharge children in deterministic order', async () => {
@@ -391,7 +466,11 @@ describe('LaytimeCalculationsService lifecycle', () => {
     expect(parentCalculation).toEqual(
       expect.objectContaining({
         engineVersion: 'laytime-engine-v1',
-        warnings: [],
+        warnings: [
+          'Free-pratique qualification was not evaluated because grant evidence and an applicable WIFPON clause are missing.',
+          'NOR location qualification is unavailable because no eligible candidate-associated location evidence exists.',
+          'NOR validity was not evaluated because vessel-readiness evidence is missing.',
+        ],
         inputSnapshot: expect.objectContaining({
           voyage: expect.objectContaining({
             laytimeOperation: 'Discharge',
@@ -430,14 +509,24 @@ describe('LaytimeCalculationsService lifecycle', () => {
             basis: 'nor_accepted',
             norDocumentId: 'nor-1',
             noticeHours: 6,
-            noticeSource: 'charter_party',
+            noticeSource: 'noticeHours',
             commencedAt: '2026-03-04T06:00:00.000Z',
+            readinessEventId: null,
+            readinessTime: null,
+            readinessSource: 'missing',
+            validityStatus: 'unavailable',
+            validityBasis: null,
           }),
-          cargoCompletion: {
+          cargoCompletion: expect.objectContaining({
             eventId: 'completion-1',
             eventType: 'CARGO_COMPLETED',
             eventTime: '2026-03-06T06:00:00.000Z',
-          },
+            selectedEventId: 'completion-1',
+            selectedEventType: 'CARGO_COMPLETED',
+            selectedTime: '2026-03-06T06:00:00.000Z',
+            bulkOperationType: null,
+            selectionBasis: 'legacy-completion-fallback',
+          }),
           allowedLaytime: expect.objectContaining({
             clauseId: 'laytime-clause',
             allowedLaytime: '2 days 00:00:00',
@@ -508,6 +597,404 @@ describe('LaytimeCalculationsService lifecycle', () => {
     );
   });
 
+  it.each(['Loading', 'Discharge'] as const)(
+    'persists the exact readiness-valid NOR selected by the engine for a %s child',
+    async (operation) => {
+      const readinessId = `${operation.toLowerCase()}-ready`;
+      const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+        laytimeOperation: operation,
+        norDocuments: [
+          {
+            id: 'nor-before-readiness',
+            tenderTime: new Date('2026-03-04T00:00:00Z'),
+          },
+          {
+            id: 'nor-after-readiness',
+            tenderTime: new Date('2026-03-04T02:00:00Z'),
+            acceptedTime: new Date('2026-03-04T03:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            id: readinessId,
+            sofId: 'sof-1',
+            eventTime: new Date('2026-03-04T01:00:00Z'),
+            eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+            operation,
+            isManualOverride: true,
+          },
+          {
+            id: 'completion-1',
+            sofId: 'sof-1',
+            eventTime: new Date('2026-03-06T09:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+            operation: null,
+            isManualOverride: false,
+          },
+        ],
+      });
+
+      await service.calculate(VOYAGE_ID);
+
+      const [parent, child] = getCreatedCalculations(manager);
+      for (const calculation of [parent, child]) {
+        expect(calculation.decisionSnapshot).toEqual(
+          expect.objectContaining({
+            commencement: expect.objectContaining({
+              basis: 'nor_accepted',
+              norDocumentId: 'nor-after-readiness',
+              readinessEventId: readinessId,
+              readinessSource: 'operation-specific',
+              validityStatus: 'valid',
+              validityBasis: 'accepted',
+              baseTime: '2026-03-04T03:00:00.000Z',
+              commencedAt: '2026-03-04T09:00:00.000Z',
+              rejectedNorCandidates: [
+                expect.objectContaining({
+                  norDocumentId: 'nor-before-readiness',
+                  validityBasis: 'not-ready',
+                }),
+              ],
+            }),
+          }),
+        );
+      }
+    },
+  );
+
+  it('retains free-pratique evidence without changing readiness or laytime results', async () => {
+    const commonEvents = [
+      {
+        id: 'loading-ready',
+        sofId: 'sof-1',
+        eventTime: new Date('2026-03-04T00:00:00Z'),
+        eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+        operation: 'Loading' as const,
+        isManualOverride: true,
+      },
+      {
+        id: 'completion-1',
+        sofId: 'sof-1',
+        eventTime: new Date('2026-03-06T06:00:00Z'),
+        eventType: 'CARGO_COMPLETED',
+        operation: null,
+        isManualOverride: false,
+      },
+    ];
+    const grantEvent = {
+      id: 'loading-free-pratique',
+      sofId: 'sof-1',
+      eventTime: new Date('2026-03-03T23:17:23.450Z'),
+      eventType: 'FREE_PRATIQUE_GRANTED',
+      operation: 'Loading' as const,
+      isManualOverride: true,
+    };
+    const options = {
+      laytimeOperation: 'Loading' as const,
+      norDocuments: [
+        {
+          id: 'nor-1',
+          tenderTime: new Date('2026-03-04T00:00:00Z'),
+          acceptedTime: new Date('2026-03-04T00:00:00Z'),
+        },
+      ],
+    };
+    const baseline = buildServiceWithCharterParty(0, undefined, {
+      ...options,
+      sofEvents: commonEvents,
+    });
+    const withGrant = buildServiceWithCharterParty(0, undefined, {
+      ...options,
+      sofEvents: [...commonEvents, grantEvent],
+    });
+
+    await baseline.service.calculate(VOYAGE_ID);
+    await withGrant.service.calculate(VOYAGE_ID);
+
+    const baselineParent = getCreatedCalculations(baseline.manager)[0];
+    const grantParent = getCreatedCalculations(withGrant.manager)[0];
+    expect(grantParent).toEqual(
+      expect.objectContaining({
+        allowedLaytime: baselineParent.allowedLaytime,
+        usedLaytime: baselineParent.usedLaytime,
+        demurrageAmount: baselineParent.demurrageAmount,
+        despatchAmount: baselineParent.despatchAmount,
+      }),
+    );
+    expect(grantParent.decisionSnapshot.commencement).toEqual(
+      expect.objectContaining({
+        readinessEventId: 'loading-ready',
+        readinessTime: '2026-03-04T00:00:00.000Z',
+        freePratique: expect.objectContaining({
+          eventId: 'loading-free-pratique',
+          grantedTime: '2026-03-03T23:17:23.450Z',
+          source: 'operation-specific',
+          status: 'granted-before-nor',
+          valid: true,
+          wifponEnabled: false,
+          wifponApplied: false,
+        }),
+      }),
+    );
+    expect(grantParent.inputSnapshot).toEqual(
+      expect.objectContaining({
+        sofEvents: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'loading-free-pratique',
+            eventType: 'FREE_PRATIQUE_GRANTED',
+            eventTime: '2026-03-03T23:17:23.450Z',
+            operation: 'Loading',
+            operationClassification: 'global',
+          }),
+        ]),
+        calculationEventSelection: expect.objectContaining({
+          includedEventIds: expect.arrayContaining(['loading-free-pratique']),
+        }),
+      }),
+    );
+  });
+
+  it.each(['Loading', 'Discharge'] as const)(
+    'persists WIFPON qualification for the %s parent and child engine paths',
+    async (operation) => {
+      const clauseId = `wifpon-${operation.toLowerCase()}`;
+      const { service, manager } = buildServiceWithCharterParty(
+        0,
+        {
+          clauses: [
+            cpClause('laytime-clause', 'laytime_rate', {
+              hours: 48,
+              noticeHours: 6,
+            }),
+            cpClause('demurrage-clause', 'demurrage_rate', { rate: 12_000 }),
+            cpClause(clauseId, 'wifpon', { enabled: true, operation }),
+          ],
+        },
+        {
+          laytimeOperation: operation,
+          norDocuments: [
+            {
+              id: 'wifpon-nor',
+              tenderTime: new Date('2026-03-04T10:00:00Z'),
+            },
+          ],
+          sofEvents: [
+            {
+              id: `ready-${operation.toLowerCase()}`,
+              sofId: 'sof-1',
+              eventTime: new Date('2026-03-04T09:00:00Z'),
+              eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+              operation,
+              isManualOverride: true,
+            },
+            {
+              id: 'completion-1',
+              sofId: 'sof-1',
+              eventTime: new Date('2026-03-06T16:00:00Z'),
+              eventType: 'CARGO_COMPLETED',
+              operation: null,
+              isManualOverride: false,
+            },
+          ],
+        },
+      );
+
+      await service.calculate(VOYAGE_ID);
+
+      const [parent, child] = getCreatedCalculations(manager);
+      for (const calculation of [parent, child]) {
+        expect(calculation.decisionSnapshot).toEqual(
+          expect.objectContaining({
+            commencement: expect.objectContaining({
+              norDocumentId: 'wifpon-nor',
+              freePratique: expect.objectContaining({
+                eventId: null,
+                grantedTime: null,
+                source: 'missing',
+                status: 'waived-by-wifpon',
+                valid: true,
+                wifponClauseId: clauseId,
+                wifponEnabled: true,
+                wifponApplied: true,
+              }),
+            }),
+          }),
+        );
+      }
+    },
+  );
+
+  it('persists rejected pre-grant NOR audit and the authoritative post-grant re-tender', async () => {
+    const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+      laytimeOperation: 'Loading',
+      norDocuments: [
+        {
+          id: 'nor-before-grant',
+          tenderTime: new Date('2026-03-04T10:00:00Z'),
+        },
+        { id: 'nor-after-grant', tenderTime: new Date('2026-03-04T13:00:00Z') },
+      ],
+      sofEvents: [
+        {
+          id: 'loading-ready',
+          sofId: 'sof-1',
+          eventTime: new Date('2026-03-04T09:00:00Z'),
+          eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+          operation: 'Loading',
+          isManualOverride: true,
+        },
+        {
+          id: 'loading-free-pratique',
+          sofId: 'sof-1',
+          eventTime: new Date('2026-03-04T12:00:00Z'),
+          eventType: 'FREE_PRATIQUE_GRANTED',
+          operation: 'Loading',
+          isManualOverride: true,
+        },
+        {
+          id: 'completion-1',
+          sofId: 'sof-1',
+          eventTime: new Date('2026-03-06T19:00:00Z'),
+          eventType: 'CARGO_COMPLETED',
+          operation: null,
+          isManualOverride: false,
+        },
+      ],
+    });
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parent, child] = getCreatedCalculations(manager);
+    for (const calculation of [parent, child]) {
+      expect(calculation.decisionSnapshot.commencement).toEqual(
+        expect.objectContaining({
+          norDocumentId: 'nor-after-grant',
+          tenderTime: '2026-03-04T13:00:00.000Z',
+          freePratique: expect.objectContaining({
+            eventId: 'loading-free-pratique',
+            grantedTime: '2026-03-04T12:00:00.000Z',
+            status: 'granted-before-nor',
+            valid: true,
+          }),
+          freePratiqueRejectedCandidates: [
+            expect.objectContaining({
+              norDocumentId: 'nor-before-grant',
+              tenderTime: '2026-03-04T10:00:00.000Z',
+              freePratique: expect.objectContaining({
+                eventId: 'loading-free-pratique',
+                grantedTime: '2026-03-04T12:00:00.000Z',
+                status: 'granted-after-nor',
+                valid: false,
+              }),
+            }),
+          ],
+        }),
+      );
+    }
+  });
+
+  it.each(['Loading', 'Discharge'] as const)(
+    'persists the engine-selected office schedule decision for a %s calculation and child',
+    async (operation) => {
+      const readinessId = `${operation.toLowerCase()}-schedule-ready`;
+      const { service, manager } = buildServiceWithCharterParty(
+        0,
+        {
+          clauses: [
+            {
+              id: 'laytime-clause',
+              clauseType: 'laytime_rate',
+              rawText: '48 hours laytime',
+              parameters: { hours: 48 },
+            },
+            {
+              id: 'demurrage-clause',
+              clauseType: 'demurrage_rate',
+              rawText: 'USD 12,000 per day',
+              parameters: { rate: 12000 },
+            },
+            {
+              id: 'schedule-clause',
+              clauseType: 'nor_commencement_schedule',
+              rawText: 'Before noon, 13:00; otherwise next working day 08:00',
+              parameters: {
+                cutoffReference: 'acceptedTime',
+                tenderCutoffTime: '12:00',
+                sameDayCommencementTime: '13:00',
+                nextWorkingDayCommencementTime: '08:00',
+                workingDays: ['MON', 'TUE', 'WED', 'THU', 'FRI'],
+                timeZone: 'UTC',
+              },
+            },
+          ],
+        },
+        {
+          laytimeOperation: operation,
+          norDocuments: [
+            {
+              id: 'schedule-nor',
+              tenderTime: new Date('2026-03-02T10:30:00Z'),
+              acceptedTime: new Date('2026-03-02T11:00:00Z'),
+            },
+          ],
+          sofEvents: [
+            {
+              id: readinessId,
+              sofId: 'sof-1',
+              eventTime: new Date('2026-03-02T10:00:00Z'),
+              eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+              operation,
+              isManualOverride: true,
+            },
+            {
+              id: 'completion-1',
+              sofId: 'sof-1',
+              eventTime: new Date('2026-03-04T13:00:00Z'),
+              eventType: 'CARGO_COMPLETED',
+              operation: null,
+              isManualOverride: false,
+            },
+          ],
+        },
+      );
+
+      await service.calculate(VOYAGE_ID);
+
+      const [parent, child] = getCreatedCalculations(manager);
+      for (const calculation of [parent, child]) {
+        expect(calculation.decisionSnapshot).toEqual(
+          expect.objectContaining({
+            commencement: expect.objectContaining({
+              commencementRule: 'office-schedule',
+              basis: 'nor_accepted',
+              norDocumentId: 'schedule-nor',
+              readinessEventId: readinessId,
+              validityStatus: 'valid',
+              validityBasis: 'accepted',
+              baseTime: '2026-03-02T11:00:00.000Z',
+              noticeHours: null,
+              noticeSource: null,
+              scheduleClauseId: 'schedule-clause',
+              scheduleBasis: 'same-day',
+              scheduleCutoffReference: 'acceptedTime',
+              scheduleGoverningTime: '2026-03-02T11:00:00.000Z',
+              scheduleCutoffTime: '12:00',
+              scheduleLegacyCompatibilityUsed: false,
+              scheduleTimeZone: 'UTC',
+              scheduleWorkingDays: ['MON', 'TUE', 'WED', 'THU', 'FRI'],
+              scheduleLocalNorDate: '2026-03-02',
+              scheduleLocalNorTime: '11:00:00',
+              scheduleSelectedWorkingDate: '2026-03-02',
+              scheduleSelectedLocalCommencementTime: '13:00',
+              scheduleSkippedDates: [],
+              commencedAt: '2026-03-02T13:00:00.000Z',
+            }),
+          }),
+        );
+      }
+    },
+  );
+
   it('returns explicit child calculations from findOne without altering child rows', async () => {
     const { service, calculations } = buildService();
     calculations.findOne.mockResolvedValue({
@@ -530,9 +1017,13 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
   it.each([
     {
-      title: 'persists enabled ATUTC audit evidence when SHEX overlap is restored',
+      title:
+        'persists enabled ATUTC audit evidence when SHEX overlap is restored',
       clauses: [
-        cpClause('laytime-clause', 'laytime_rate', { hours: 120, noticeHours: 6 }),
+        cpClause('laytime-clause', 'laytime_rate', {
+          hours: 120,
+          noticeHours: 6,
+        }),
         cpClause('demurrage-clause', 'demurrage_rate', { rate: 12000 }),
         cpClause('despatch-clause', 'despatch', { rate: 6000 }),
         cpClause('shex-clause', 'shex_shinc', { shex: true }),
@@ -580,9 +1071,13 @@ describe('LaytimeCalculationsService lifecycle', () => {
         'Duplicate CARGO_STARTED event was ignored while the Loading operation was already working.',
     },
     {
-      title: 'persists enabled ATUTC audit evidence with no qualifying SHEX overlap',
+      title:
+        'persists enabled ATUTC audit evidence with no qualifying SHEX overlap',
       clauses: [
-        cpClause('laytime-clause', 'laytime_rate', { hours: 120, noticeHours: 6 }),
+        cpClause('laytime-clause', 'laytime_rate', {
+          hours: 120,
+          noticeHours: 6,
+        }),
         cpClause('demurrage-clause', 'demurrage_rate', { rate: 12000 }),
         cpClause('despatch-clause', 'despatch', { rate: 6000 }),
         cpClause('shex-clause', 'shex_shinc', { shex: true }),
@@ -618,7 +1113,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
     {
       title: 'persists disabled ATUTC audit evidence when no clause exists',
       clauses: [
-        cpClause('laytime-clause', 'laytime_rate', { hours: 120, noticeHours: 6 }),
+        cpClause('laytime-clause', 'laytime_rate', {
+          hours: 120,
+          noticeHours: 6,
+        }),
         cpClause('demurrage-clause', 'demurrage_rate', { rate: 12000 }),
         cpClause('despatch-clause', 'despatch', { rate: 6000 }),
         cpClause('shex-clause', 'shex_shinc', { shex: true }),
@@ -650,50 +1148,59 @@ describe('LaytimeCalculationsService lifecycle', () => {
       }),
       expectedWarning: null,
     },
-  ])('$title', async ({ clauses, laytimeOperation, sofEvents, expectedAtutc, expectedWarning }) => {
-    const { service, manager } = buildServiceWithCharterParty(
-      0,
-      {
-        clauses,
-        laytimeAllowed: 120,
-        demurrageRate: '12000.00',
-        dispatchRate: '6000.00',
-        timeCountingBasis: 'SHEX',
-        norNoticePeriod: '6 hours',
-      },
-      {
-        laytimeOperation,
-        sofDocuments: [
-          {
-            id: 'sof-1',
-            status: 'Final',
-            uploadDate: new Date('2026-03-03T00:00:00Z'),
-            operation: laytimeOperation,
-          },
-        ],
-        sofEvents,
-      },
-    );
+  ])(
+    '$title',
+    async ({
+      clauses,
+      laytimeOperation,
+      sofEvents,
+      expectedAtutc,
+      expectedWarning,
+    }) => {
+      const { service, manager } = buildServiceWithCharterParty(
+        0,
+        {
+          clauses,
+          laytimeAllowed: 120,
+          demurrageRate: '12000.00',
+          dispatchRate: '6000.00',
+          timeCountingBasis: 'SHEX',
+          norNoticePeriod: '6 hours',
+        },
+        {
+          laytimeOperation,
+          sofDocuments: [
+            {
+              id: 'sof-1',
+              status: 'Final',
+              uploadDate: new Date('2026-03-03T00:00:00Z'),
+              operation: laytimeOperation,
+            },
+          ],
+          sofEvents,
+        },
+      );
 
-    await service.calculate(VOYAGE_ID);
+      await service.calculate(VOYAGE_ID);
 
-    const parentCalculation = getCreatedCalculations(manager).find(
-      (calculation) => calculation.parentCalculationId === null,
-    ) as LaytimeCalculation;
+      const parentCalculation = getCreatedCalculations(manager).find(
+        (calculation) => calculation.parentCalculationId === null,
+      ) as LaytimeCalculation;
 
-    expect(parentCalculation.decisionSnapshot).toEqual(
-      expect.objectContaining({
-        atutc: expectedAtutc,
-      }),
-    );
-    expect(parentCalculation.allowedLaytime).toBe('5 days 00:00:00');
+      expect(parentCalculation.decisionSnapshot).toEqual(
+        expect.objectContaining({
+          atutc: expectedAtutc,
+        }),
+      );
+      expect(parentCalculation.allowedLaytime).toBe('5 days 00:00:00');
 
-    if (expectedWarning) {
-      expect(parentCalculation.warnings).toContain(expectedWarning);
-    } else {
-      expect(parentCalculation.warnings).toEqual(expect.any(Array));
-    }
-  });
+      if (expectedWarning) {
+        expect(parentCalculation.warnings).toContain(expectedWarning);
+      } else {
+        expect(parentCalculation.warnings).toEqual(expect.any(Array));
+      }
+    },
+  );
 
   it('uses loading-specific clauses for the loading child while keeping the parent on global clauses', async () => {
     const clauses = [
@@ -716,6 +1223,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
       cpClause('global-shex', 'shex_shinc', { shex: false }),
       cpClause('loading-shex', 'shex_shinc', {
         shex: true,
+        calendarVersion: 1,
+        timeZone: 'Australia/Sydney',
+        holidayDates: ['2026-12-25'],
+        saturdayExcepted: false,
         operation: 'Loading',
       }),
       cpClause('discharge-laytime', 'laytime_rate', {
@@ -750,7 +1261,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     await service.calculate(VOYAGE_ID);
 
-    const [parentCalculation, childCalculation] = getCreatedCalculations(manager);
+    const [parentCalculation, childCalculation] =
+      getCreatedCalculations(manager);
 
     expect(parentCalculation).toEqual(
       expect.objectContaining({
@@ -801,6 +1313,13 @@ describe('LaytimeCalculationsService lifecycle', () => {
               theoreticalExpiry: null,
               projectedExceptedIntervals: [],
             },
+          }),
+          shexCalendar: expect.objectContaining({
+            clauseId: 'loading-shex',
+            calendarVersion: 1,
+            operation: 'Loading',
+            timeZone: 'Australia/Sydney',
+            holidayDates: ['2026-12-25'],
           }),
           operationResult: expect.objectContaining({
             operation: 'Loading',
@@ -854,7 +1373,21 @@ describe('LaytimeCalculationsService lifecycle', () => {
       }),
       cpClause('global-demurrage', 'demurrage_rate', { rate: 10_000 }),
       cpClause('global-despatch', 'despatch', { rate: 5_000 }),
-      cpClause('global-shex', 'shex_shinc', { shex: true }),
+      cpClause('global-shex', 'shex_shinc', {
+        shex: true,
+        calendarVersion: 1,
+        timeZone: 'UTC',
+        holidayDates: [],
+        saturdayExcepted: false,
+      }),
+      cpClause('discharge-shex', 'shex_shinc', {
+        shex: true,
+        calendarVersion: 1,
+        timeZone: 'America/New_York',
+        holidayDates: ['2026-07-04'],
+        saturdayExcepted: true,
+        operation: 'Discharge',
+      }),
     ];
     const { service, manager } = buildServiceWithCharterParty(
       0,
@@ -883,7 +1416,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     await service.calculate(VOYAGE_ID);
 
-    const [parentCalculation, childCalculation] = getCreatedCalculations(manager);
+    const [parentCalculation, childCalculation] =
+      getCreatedCalculations(manager);
 
     expect(parentCalculation).toEqual(
       expect.objectContaining({
@@ -918,6 +1452,13 @@ describe('LaytimeCalculationsService lifecycle', () => {
           despatch: expect.objectContaining({
             clauseId: 'global-despatch',
           }),
+          shexCalendar: expect.objectContaining({
+            clauseId: 'discharge-shex',
+            operation: 'Discharge',
+            timeZone: 'America/New_York',
+            holidayDates: ['2026-07-04'],
+            saturdayExcepted: true,
+          }),
         }),
       }),
     );
@@ -928,7 +1469,13 @@ describe('LaytimeCalculationsService lifecycle', () => {
       cpClause('global-laytime', 'laytime_rate', { hours: 48 }),
       cpClause('global-demurrage', 'demurrage_rate', { rate: 10_000 }),
       cpClause('global-despatch', 'despatch', { rate: 5_000 }),
-      cpClause('global-shex', 'shex_shinc', { shex: true }),
+      cpClause('global-shex', 'shex_shinc', {
+        shex: true,
+        calendarVersion: 1,
+        timeZone: 'Europe/London',
+        holidayDates: [],
+        saturdayExcepted: false,
+      }),
       cpClause('loading-demurrage', 'demurrage_rate', {
         rate: 20_000,
         operation: 'Loading',
@@ -961,7 +1508,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     await service.calculate(VOYAGE_ID);
 
-    const [parentCalculation, childCalculation] = getCreatedCalculations(manager);
+    const [parentCalculation, childCalculation] =
+      getCreatedCalculations(manager);
 
     expect(parentCalculation.allowedLaytime).toBe('2 days 00:00:00');
     expect(childCalculation.allowedLaytime).toBe('2 days 00:00:00');
@@ -1025,7 +1573,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     await service.calculate(VOYAGE_ID);
 
-    const [parentCalculation, childCalculation] = getCreatedCalculations(manager);
+    const [parentCalculation, childCalculation] =
+      getCreatedCalculations(manager);
 
     expect(parentCalculation.demurrageAmount).toBe('2500.00');
     expect(childCalculation.demurrageAmount).toBe('5000.00');
@@ -1081,7 +1630,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     await service.calculate(VOYAGE_ID);
 
-    const [parentCalculation, childCalculation] = getCreatedCalculations(manager);
+    const [parentCalculation, childCalculation] =
+      getCreatedCalculations(manager);
 
     expect(parentCalculation.despatchAmount).toBe('2500.00');
     expect(childCalculation.despatchAmount).toBe('5000.00');
@@ -1162,7 +1712,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     await service.calculate(VOYAGE_ID);
 
-    const [parentCalculation, childCalculation] = getCreatedCalculations(manager);
+    const [parentCalculation, childCalculation] =
+      getCreatedCalculations(manager);
 
     expect(parentCalculation.decisionSnapshot).toEqual(
       expect.objectContaining({
@@ -1194,7 +1745,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
         }),
       }),
     );
-    expect(childCalculation.usedLaytime).not.toBe(parentCalculation.usedLaytime);
+    expect(childCalculation.usedLaytime).not.toBe(
+      parentCalculation.usedLaytime,
+    );
   });
 
   it('records duplicate same-operation warnings in the child snapshot', async () => {
@@ -1247,60 +1800,58 @@ describe('LaytimeCalculationsService lifecycle', () => {
   ])(
     'creates one %s child and no opposite child',
     async ({ voyageOperation, childOperation }) => {
-    const { service, manager } = buildServiceWithCharterParty(
-      0,
-      undefined,
-      { laytimeOperation: voyageOperation },
-    );
+      const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+        laytimeOperation: voyageOperation,
+      });
 
-    const result = await service.calculate(VOYAGE_ID);
+      const result = await service.calculate(VOYAGE_ID);
 
-    const createdCalculations = getCreatedCalculations(manager);
-    const parentCalculation = createdCalculations[0];
-    const childCalculation = createdCalculations[1];
+      const createdCalculations = getCreatedCalculations(manager);
+      const parentCalculation = createdCalculations[0];
+      const childCalculation = createdCalculations[1];
 
-    expect(result.calculation).toEqual(
-      expect.objectContaining({
-        parentCalculationId: null,
-        operation: null,
-      }),
-    );
-    expect(createdCalculations).toHaveLength(2);
-    expect(parentCalculation).toEqual(
-      expect.objectContaining({
-        parentCalculationId: null,
-        operation: null,
-      }),
-    );
-    expect(childCalculation).toEqual(
-      expect.objectContaining({
-        parentCalculationId: 'new-calculation',
-        operation: childOperation,
-      }),
-    );
-    expect(
-      createdCalculations.some(
-        (calculation) =>
-          calculation.operation !== null && calculation.operation !== childOperation,
-      ),
-    ).toBe(false);
-    expect(manager.save).toHaveBeenCalledTimes(4);
-    expect(manager.save).toHaveBeenNthCalledWith(
-      4,
-      expect.arrayContaining([
+      expect(result.calculation).toEqual(
         expect.objectContaining({
-          calculationId: 'new-calculation',
+          parentCalculationId: null,
+          operation: null,
         }),
-      ]),
-    );
-  });
+      );
+      expect(createdCalculations).toHaveLength(2);
+      expect(parentCalculation).toEqual(
+        expect.objectContaining({
+          parentCalculationId: null,
+          operation: null,
+        }),
+      );
+      expect(childCalculation).toEqual(
+        expect.objectContaining({
+          parentCalculationId: 'new-calculation',
+          operation: childOperation,
+        }),
+      );
+      expect(
+        createdCalculations.some(
+          (calculation) =>
+            calculation.operation !== null &&
+            calculation.operation !== childOperation,
+        ),
+      ).toBe(false);
+      expect(manager.save).toHaveBeenCalledTimes(4);
+      expect(manager.save).toHaveBeenNthCalledWith(
+        4,
+        expect.arrayContaining([
+          expect.objectContaining({
+            calculationId: 'new-calculation',
+          }),
+        ]),
+      );
+    },
+  );
 
   it('rolls back the calculation if child persistence fails', async () => {
-    const { service, manager } = buildServiceWithCharterParty(
-      0,
-      undefined,
-      { laytimeOperation: 'Discharge' },
-    );
+    const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+      laytimeOperation: 'Discharge',
+    });
 
     manager.save
       .mockImplementationOnce(async (value) =>
@@ -1318,63 +1869,59 @@ describe('LaytimeCalculationsService lifecycle', () => {
   });
 
   it('runs a separate child engine pass and prefers explicit matching completion evidence over later global completion evidence', async () => {
-    const { service, manager } = buildServiceWithCharterParty(
-      0,
-      undefined,
-      {
-        laytimeOperation: 'Discharge',
-        sofDocuments: [
-          {
-            id: 'matching-doc',
-            status: 'Final',
-            uploadDate: new Date('2026-03-03T00:00:00Z'),
-            operation: 'Discharge',
-          },
-        ],
-        sofEvents: [
-          {
-            id: 'nor',
-            sofId: 'matching-doc',
-            eventTime: new Date('2026-03-04T00:00:00Z'),
-            eventType: 'NOR_TENDERED',
-            operation: null,
-            isManualOverride: false,
-          },
-          {
-            id: 'rain-start',
-            sofId: 'matching-doc',
-            eventTime: new Date('2026-03-04T06:00:00Z'),
-            eventType: 'RAIN_STOPPAGE',
-            operation: null,
-            isManualOverride: false,
-          },
-          {
-            id: 'rain-end',
-            sofId: 'matching-doc',
-            eventTime: new Date('2026-03-04T12:00:00Z'),
-            eventType: 'RAIN_STOPPED',
-            operation: null,
-            isManualOverride: false,
-          },
-          {
-            id: 'matching-completion',
-            sofId: 'matching-doc',
-            eventTime: new Date('2026-03-05T00:00:00Z'),
-            eventType: 'DISCHARGE_COMPLETED',
-            operation: 'Discharge',
-            isManualOverride: false,
-          },
-          {
-            id: 'global-completion',
-            sofId: 'matching-doc',
-            eventTime: new Date('2026-03-05T12:00:00Z'),
-            eventType: 'CARGO_COMPLETED',
-            operation: null,
-            isManualOverride: false,
-          },
-        ],
-      },
-    );
+    const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+      laytimeOperation: 'Discharge',
+      sofDocuments: [
+        {
+          id: 'matching-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T00:00:00Z'),
+          operation: 'Discharge',
+        },
+      ],
+      sofEvents: [
+        {
+          id: 'nor',
+          sofId: 'matching-doc',
+          eventTime: new Date('2026-03-04T00:00:00Z'),
+          eventType: 'NOR_TENDERED',
+          operation: null,
+          isManualOverride: false,
+        },
+        {
+          id: 'rain-start',
+          sofId: 'matching-doc',
+          eventTime: new Date('2026-03-04T06:00:00Z'),
+          eventType: 'RAIN_STOPPAGE',
+          operation: null,
+          isManualOverride: false,
+        },
+        {
+          id: 'rain-end',
+          sofId: 'matching-doc',
+          eventTime: new Date('2026-03-04T12:00:00Z'),
+          eventType: 'RAIN_STOPPED',
+          operation: null,
+          isManualOverride: false,
+        },
+        {
+          id: 'matching-completion',
+          sofId: 'matching-doc',
+          eventTime: new Date('2026-03-05T00:00:00Z'),
+          eventType: 'DISCHARGE_COMPLETED',
+          operation: 'Discharge',
+          isManualOverride: false,
+        },
+        {
+          id: 'global-completion',
+          sofId: 'matching-doc',
+          eventTime: new Date('2026-03-05T12:00:00Z'),
+          eventType: 'CARGO_COMPLETED',
+          operation: null,
+          isManualOverride: false,
+        },
+      ],
+    });
 
     await service.calculate(VOYAGE_ID);
 
@@ -1402,7 +1949,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
         }),
       }),
     );
-    expect(childCalculation.usedLaytime).not.toBe(parentCalculation.usedLaytime);
+    expect(childCalculation.usedLaytime).not.toBe(
+      parentCalculation.usedLaytime,
+    );
     expect(
       (childCalculation.inputSnapshot as Record<string, any>).operationResult,
     ).toEqual(
@@ -1441,39 +1990,35 @@ describe('LaytimeCalculationsService lifecycle', () => {
   });
 
   it('falls back to legacy null child documents and events when no explicit operation-specific evidence exists', async () => {
-    const { service, manager } = buildServiceWithCharterParty(
-      0,
-      undefined,
-      {
-        laytimeOperation: 'Loading',
-        sofDocuments: [
-          {
-            id: 'legacy-doc',
-            status: 'Final',
-            uploadDate: new Date('2026-03-03T00:00:00Z'),
-            operation: null,
-          },
-        ],
-        sofEvents: [
-          {
-            id: 'nor',
-            sofId: 'legacy-doc',
-            eventTime: new Date('2026-03-04T00:00:00Z'),
-            eventType: 'NOR_TENDERED',
-            operation: null,
-            isManualOverride: false,
-          },
-          {
-            id: 'legacy-completion',
-            sofId: 'legacy-doc',
-            eventTime: new Date('2026-03-05T00:00:00Z'),
-            eventType: 'LOADING_COMPLETED',
-            operation: null,
-            isManualOverride: false,
-          },
-        ],
-      },
-    );
+    const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+      laytimeOperation: 'Loading',
+      sofDocuments: [
+        {
+          id: 'legacy-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T00:00:00Z'),
+          operation: null,
+        },
+      ],
+      sofEvents: [
+        {
+          id: 'nor',
+          sofId: 'legacy-doc',
+          eventTime: new Date('2026-03-04T00:00:00Z'),
+          eventType: 'NOR_TENDERED',
+          operation: null,
+          isManualOverride: false,
+        },
+        {
+          id: 'legacy-completion',
+          sofId: 'legacy-doc',
+          eventTime: new Date('2026-03-05T00:00:00Z'),
+          eventType: 'LOADING_COMPLETED',
+          operation: null,
+          isManualOverride: false,
+        },
+      ],
+    });
 
     await service.calculate(VOYAGE_ID);
 
@@ -1491,7 +2036,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
           usedLegacyFallback: true,
         }),
         eventSelection: expect.objectContaining({
-          includedEventIds: expect.arrayContaining(['nor', 'legacy-completion']),
+          includedEventIds: expect.arrayContaining([
+            'nor',
+            'legacy-completion',
+          ]),
           matchingCompletionEventId: null,
           selectedCompletionEventId: 'legacy-completion',
           usedLegacyFallback: true,
@@ -1660,7 +2208,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
         return value;
       }
 
-      if (value.parentCalculationId === null || value.parentCalculationId === undefined) {
+      if (
+        value.parentCalculationId === null ||
+        value.parentCalculationId === undefined
+      ) {
         parentPersistCount += 1;
         const saved = {
           ...value,
@@ -1771,28 +2322,38 @@ describe('LaytimeCalculationsService lifecycle', () => {
         version: 2,
       }),
     );
-    expect((firstParent.inputSnapshot as Record<string, any>).operationChildren).toEqual(
+    expect(
+      (firstParent.inputSnapshot as Record<string, any>).operationChildren,
+    ).toEqual(
       expect.objectContaining({
         requestedOperations: ['Loading', 'Discharge'],
         createdOperations: ['Loading', 'Discharge'],
         skippedOperations: [],
       }),
     );
-    expect((firstParent.decisionSnapshot as Record<string, any>).reversibleLaytimeAnalysis).toEqual(
+    expect(
+      (firstParent.decisionSnapshot as Record<string, any>)
+        .reversibleLaytimeAnalysis,
+    ).toEqual(
       expect.objectContaining({
         status: 'available',
         mode: 'audit-only',
         contractRuleApplied: false,
       }),
     );
-    expect((secondParent.inputSnapshot as Record<string, any>).operationChildren).toEqual(
+    expect(
+      (secondParent.inputSnapshot as Record<string, any>).operationChildren,
+    ).toEqual(
       expect.objectContaining({
         requestedOperations: ['Loading', 'Discharge'],
         createdOperations: ['Loading', 'Discharge'],
         skippedOperations: [],
       }),
     );
-    expect((secondParent.decisionSnapshot as Record<string, any>).reversibleLaytimeAnalysis).toEqual(
+    expect(
+      (secondParent.decisionSnapshot as Record<string, any>)
+        .reversibleLaytimeAnalysis,
+    ).toEqual(
       expect.objectContaining({
         status: 'available',
         mode: 'audit-only',
@@ -1875,7 +2436,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
       }),
     );
     expect(
-      (firstLoading.decisionSnapshot as Record<string, any>).operationResult.clauseSelection.selectedClauses,
+      (firstLoading.decisionSnapshot as Record<string, any>).operationResult
+        .clauseSelection.selectedClauses,
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1896,7 +2458,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
       ]),
     );
     expect(
-      (firstDischarge.decisionSnapshot as Record<string, any>).operationResult.clauseSelection.selectedClauses,
+      (firstDischarge.decisionSnapshot as Record<string, any>).operationResult
+        .clauseSelection.selectedClauses,
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1917,7 +2480,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
       ]),
     );
     expect(firstLoading.allowedLaytime).not.toBe(firstDischarge.allowedLaytime);
-    expect(secondLoading.allowedLaytime).not.toBe(secondDischarge.allowedLaytime);
+    expect(secondLoading.allowedLaytime).not.toBe(
+      secondDischarge.allowedLaytime,
+    );
 
     calculations.findOne.mockImplementation(async ({ where }) => {
       if (where.id === savedParents[0].id) {
@@ -1942,23 +2507,30 @@ describe('LaytimeCalculationsService lifecycle', () => {
       2,
     ]);
 
-    await expect(service.findOperationChildren(savedParents[0].id)).resolves.toEqual([
+    await expect(
+      service.findOperationChildren(savedParents[0].id),
+    ).resolves.toEqual([
       expect.objectContaining({ operation: 'Loading' }),
       expect.objectContaining({ operation: 'Discharge' }),
     ]);
 
     await expect(
-      service.findForVoyage(
-        VOYAGE_ID,
-        { skip: 0, limit: 10, page: 1 } as never,
-      ),
+      service.findForVoyage(VOYAGE_ID, {
+        skip: 0,
+        limit: 10,
+        page: 1,
+      } as never),
     ).resolves.toEqual(
       expect.objectContaining({
         data: [savedParents[1], savedParents[0]],
       }),
     );
-    expect((firstParent.inputSnapshot as Record<string, any>).operationResult).toBeUndefined();
-    expect((secondParent.inputSnapshot as Record<string, any>).operationResult).toBeUndefined();
+    expect(
+      (firstParent.inputSnapshot as Record<string, any>).operationResult,
+    ).toBeUndefined();
+    expect(
+      (secondParent.inputSnapshot as Record<string, any>).operationResult,
+    ).toBeUndefined();
   });
 
   it('records a contract-aware reversible laytime analysis when the clause is enabled', async () => {
@@ -1966,9 +2538,14 @@ describe('LaytimeCalculationsService lifecycle', () => {
       0,
       {
         clauses: [
-          cpClause('global-laytime', 'laytime_rate', { hours: 48, noticeHours: 6 }),
+          cpClause('global-laytime', 'laytime_rate', {
+            hours: 48,
+            noticeHours: 6,
+          }),
           cpClause('global-demurrage', 'demurrage_rate', { rate: 12000 }),
-          cpClause('reversible-laytime', 'reversible_laytime', { enabled: true }),
+          cpClause('reversible-laytime', 'reversible_laytime', {
+            enabled: true,
+          }),
         ],
       },
       {
@@ -2018,7 +2595,11 @@ describe('LaytimeCalculationsService lifecycle', () => {
           clauseId: 'reversible-laytime',
           clauseType: 'reversible_laytime',
           enabled: true,
-          clauseParameters: { enabled: true },
+          clauseParameters: expect.objectContaining({
+            enabled: true,
+            settlementVersion: 1,
+            allowanceMode: 'sum_operation_allowances',
+          }),
         }),
         reversibleLaytimeAnalysis: expect.objectContaining({
           status: 'available',
@@ -2027,6 +2608,765 @@ describe('LaytimeCalculationsService lifecycle', () => {
           pool: expect.objectContaining({
             totalAllowedSeconds: expect.any(Number),
             totalUsedSeconds: expect.any(Number),
+          }),
+        }),
+        reversibleSettlement: expect.objectContaining({
+          settlementStatus: 'NONAUTHORITATIVE',
+          reasonCode: 'REVERSIBLE_EXPLICIT_OPERATION_ALLOWANCES_REQUIRED',
+          combinedAllowedSeconds: null,
+        }),
+      }),
+    );
+  });
+
+  it.each(['absent', 'disabled'] as const)(
+    'keeps the parent result unchanged when reversible laytime is %s',
+    async (state) => {
+      const clauses = [
+        opClause('loading-laytime', 'laytime_rate', 'Loading', {
+          hours: 48,
+          noticeHours: 6,
+        }),
+        opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+          rate: 12000,
+        }),
+        opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+          hours: 60,
+          noticeHours: 6,
+        }),
+        opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+          rate: 12000,
+        }),
+      ];
+      const options = {
+        laytimeOperation: 'Discharge' as const,
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: 'Loading' as const,
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T01:00:00Z'),
+            operation: 'Discharge' as const,
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-completion',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-06T18:00:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading' as const,
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-03-06T06:00:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge' as const,
+            isManualOverride: false,
+          },
+        ],
+      };
+      const baseline = buildServiceWithCharterParty(0, { clauses }, options);
+      await baseline.service.calculate(VOYAGE_ID);
+      const baselineParent = getCreatedCalculations(baseline.manager)[0];
+
+      const reversibleClause =
+        state === 'disabled'
+          ? cpClause('reversible-laytime', 'reversible_laytime', {
+              enabled: false,
+            })
+          : null;
+      const { service, manager } = buildServiceWithCharterParty(
+        0,
+        {
+          clauses: reversibleClause ? [...clauses, reversibleClause] : clauses,
+        },
+        options,
+      );
+
+      await service.calculate(VOYAGE_ID);
+
+      const parentCalculation = getCreatedCalculations(manager)[0];
+      expect(parentCalculation).toEqual(
+        expect.objectContaining({
+          allowedLaytime: baselineParent.allowedLaytime,
+          usedLaytime: baselineParent.usedLaytime,
+          demurrageAmount: baselineParent.demurrageAmount,
+          despatchAmount: baselineParent.despatchAmount,
+          decisionSnapshot: expect.objectContaining({
+            reversibleSettlement: null,
+          }),
+        }),
+      );
+    },
+  );
+
+  it('marks an enabled-only historical reversible clause as legacy without applying V1', async () => {
+    const { service, manager } = buildServiceWithCharterParty(0, {
+      clauses: [
+        cpClause('laytime', 'laytime_rate', { hours: 48, noticeHours: 6 }),
+        cpClause('demurrage', 'demurrage_rate', { rate: 12000 }),
+        {
+          id: 'legacy-reversible',
+          clauseType: 'reversible_laytime',
+          rawText: 'Historical reversible term',
+          parameters: { enabled: true },
+        },
+      ],
+    });
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parentCalculation] = getCreatedCalculations(manager);
+    expect(parentCalculation.decisionSnapshot).toEqual(
+      expect.objectContaining({
+        reversibleSettlement: expect.objectContaining({
+          settlementStatus: 'LEGACY',
+          reasonCode: 'LEGACY_REVERSIBLE_CONTRACT',
+        }),
+      }),
+    );
+  });
+
+  it('marks a V1 calculation provisional when one operation is incomplete', async () => {
+    const { service, manager } = buildServiceWithCharterParty(0, {
+      clauses: [
+        opClause('loading-laytime', 'laytime_rate', 'Loading', { hours: 72 }),
+        opClause('discharge-laytime', 'laytime_rate', 'Discharge', { hours: 48 }),
+        cpClause('reversible', 'reversible_laytime', { enabled: true }),
+      ],
+    });
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parentCalculation] = getCreatedCalculations(manager);
+    expect(parentCalculation).toEqual(
+      expect.objectContaining({
+        allowedLaytime: '5 days 00:00:00',
+        demurrageAmount: '0.00',
+        despatchAmount: '0.00',
+        decisionSnapshot: expect.objectContaining({
+          reversibleSettlement: expect.objectContaining({
+            settlementStatus: 'PROVISIONAL',
+            reasonCode: 'REVERSIBLE_OPERATION_INCOMPLETE',
+            combinedAllowedSeconds: 120 * 3600,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('derives both operation allowances from the snapshotted Voyage cargo quantity', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        clauses: [
+          opClause('loading-rate', 'laytime_rate', 'Loading', { rate: 10000 }),
+          opClause('discharge-rate', 'laytime_rate', 'Discharge', { rate: 5000 }),
+          cpClause('reversible', 'reversible_laytime', { enabled: true }),
+        ],
+      },
+      { cargoQuantity: '20000.00' },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parentCalculation] = getCreatedCalculations(manager);
+    expect(parentCalculation.decisionSnapshot).toEqual(
+      expect.objectContaining({
+        reversibleSettlement: expect.objectContaining({
+          cargoQuantity: 20000,
+          cargoQuantityBasis: 'voyage_cargo_quantity',
+          combinedAllowedSeconds: 6 * 86400,
+          loadingAllowance: expect.objectContaining({
+            mechanism: 'rate',
+            allowedSeconds: 2 * 86400,
+          }),
+          dischargeAllowance: expect.objectContaining({
+            mechanism: 'rate',
+            allowedSeconds: 4 * 86400,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('applies balanced reversible pooling authoritatively when the pooled result nets to zero', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        clauses: [
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 48,
+            noticeHours: 6,
+          }),
+          opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+            rate: 12000,
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 60,
+            noticeHours: 6,
+          }),
+          opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+            rate: 12000,
+          }),
+          cpClause('reversible-laytime', 'reversible_laytime', {
+            enabled: true,
+          }),
+        ],
+      },
+      {
+        laytimeOperation: 'Discharge',
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T01:00:00Z'),
+            operation: 'Discharge',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-completion',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-06T18:00:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-03-06T06:00:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parentCalculation] = getCreatedCalculations(manager);
+
+    expect(parentCalculation).toEqual(
+      expect.objectContaining({
+        allowedLaytime: '4 days 12:00:00',
+        usedLaytime: '4 days 12:00:00',
+        demurrageAmount: '0.00',
+        despatchAmount: '0.00',
+        decisionSnapshot: expect.objectContaining({
+          reversibleSettlement: expect.objectContaining({
+            version: 1,
+            allowanceMode: 'sum_operation_allowances',
+            cargoQuantityBasis: 'voyage_cargo_quantity',
+            thresholdMode: 'combined_pool',
+            cargoQuantity: 20000,
+            settlementStatus: 'FINAL_AUTHORITATIVE',
+            reasonCode: 'SETTLED',
+            currency: 'USD',
+            currencySource: 'charter_party_settlement_currency',
+            currencyAuthorityStatus: 'AVAILABLE',
+            loadingDemurrage: expect.objectContaining({
+              rate: 12000,
+              rateBasis: 'per_day',
+              currency: 'USD',
+            }),
+            dischargeDemurrage: expect.objectContaining({
+              rate: 12000,
+              rateBasis: 'per_day',
+              currency: 'USD',
+            }),
+            loadingChildCalculationId: expect.any(String),
+            dischargeChildCalculationId: expect.any(String),
+            loadingAllowance: expect.objectContaining({
+              clauseId: 'loading-laytime',
+              source: 'operation-specific',
+            }),
+            dischargeAllowance: expect.objectContaining({
+              clauseId: 'discharge-laytime',
+              source: 'operation-specific',
+            }),
+            combinedAllowedSeconds: 108 * 3600,
+            combinedUsedSeconds: 108 * 3600,
+            combinedOverrunSeconds: 0,
+            combinedSavedSeconds: 0,
+          }),
+        }),
+      }),
+    );
+    const settlement = (parentCalculation.decisionSnapshot as Record<string, any>)
+      .reversibleSettlement;
+    expect(manager.save.mock.calls[1][0]).toEqual([]);
+    expect(
+      settlement.timeline.reduce(
+        (total: number, segment: { countedSeconds: number }) =>
+          total + segment.countedSeconds,
+        0,
+      ),
+    ).toBe(settlement.combinedUsedSeconds);
+  });
+
+  it('applies pooled demurrage authoritatively when the child demurrage rates are compatible', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        clauses: [
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 48,
+            noticeHours: 6,
+          }),
+          opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+            rate: 12000,
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 48,
+            noticeHours: 6,
+          }),
+          opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+            rate: 12000,
+          }),
+          cpClause('reversible-laytime', 'reversible_laytime', {
+            enabled: true,
+          }),
+        ],
+      },
+      {
+        laytimeOperation: 'Discharge',
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T01:00:00Z'),
+            operation: 'Discharge',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-completion',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-06T18:00:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-03-07T06:00:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parentCalculation] = getCreatedCalculations(manager);
+
+    expect(parentCalculation).toEqual(
+      expect.objectContaining({
+        allowedLaytime: '4 days 00:00:00',
+        usedLaytime: '5 days 12:00:00',
+        demurrageAmount: '18000.00',
+        despatchAmount: '0.00',
+        decisionSnapshot: expect.objectContaining({
+          reversibleSettlement: expect.objectContaining({
+            settlementStatus: 'FINAL_AUTHORITATIVE',
+            reasonCode: 'SETTLED',
+            demurrageRate: 12000,
+            despatchRate: null,
+            combinedAllowedSeconds: 96 * 3600,
+            combinedUsedSeconds: 132 * 3600,
+            combinedOverrunSeconds: 36 * 3600,
+            combinedSavedSeconds: 0,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('pools timelines resolved under independent operation-specific SHEX calendars', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        clauses: [
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 120,
+            noticeHours: 0,
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 120,
+            noticeHours: 0,
+          }),
+          opClause('loading-shex', 'shex_shinc', 'Loading', {
+            shex: true,
+            calendarVersion: 1,
+            timeZone: 'Australia/Sydney',
+            holidayDates: [],
+            saturdayExcepted: false,
+          }),
+          opClause('discharge-shex', 'shex_shinc', 'Discharge', {
+            shex: true,
+            calendarVersion: 1,
+            timeZone: 'America/New_York',
+            holidayDates: [],
+            saturdayExcepted: false,
+          }),
+          cpClause('reversible', 'reversible_laytime', { enabled: true }),
+        ],
+      },
+      {
+        laytimeOperation: 'Discharge',
+        norDocuments: [
+          {
+            id: 'nor-1',
+            tenderTime: new Date('2026-07-04T12:00:00Z'),
+            acceptedTime: new Date('2026-07-04T12:00:00Z'),
+          },
+        ],
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-07-04T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-07-04T01:00:00Z'),
+            operation: 'Discharge',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-completion',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-07-05T18:00:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-07-06T18:00:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const calculations = getCreatedCalculations(manager);
+    const parent = calculations.find((calculation) => !calculation.operation)!;
+    const loading = calculations.find(
+      (calculation) => calculation.operation === 'Loading',
+    )!;
+    const discharge = calculations.find(
+      (calculation) => calculation.operation === 'Discharge',
+    )!;
+    const settlement = (parent.decisionSnapshot as Record<string, any>)
+      .reversibleSettlement;
+
+    expect((loading.decisionSnapshot as Record<string, any>).shexCalendar).toEqual(
+      expect.objectContaining({ clauseId: 'loading-shex', timeZone: 'Australia/Sydney' }),
+    );
+    expect((discharge.decisionSnapshot as Record<string, any>).shexCalendar).toEqual(
+      expect.objectContaining({ clauseId: 'discharge-shex', timeZone: 'America/New_York' }),
+    );
+    expect(settlement).toEqual(
+      expect.objectContaining({
+        settlementStatus: 'FINAL_AUTHORITATIVE',
+        combinedUsedSeconds:
+          settlement.loadingCountableInputSeconds +
+          settlement.dischargeCountableInputSeconds,
+      }),
+    );
+  });
+
+  it('applies pooled despatch authoritatively when the child despatch basis is compatible', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        clauses: [
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 60,
+            noticeHours: 6,
+          }),
+          opClause('loading-despatch', 'despatch', 'Loading', {
+            rate: 6000,
+            timeBasis: 'working_time_saved',
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 72,
+            noticeHours: 6,
+          }),
+          opClause('discharge-despatch', 'despatch', 'Discharge', {
+            rate: 6000,
+            timeBasis: 'working_time_saved',
+          }),
+          cpClause('reversible-laytime', 'reversible_laytime', {
+            enabled: true,
+          }),
+        ],
+      },
+      {
+        laytimeOperation: 'Discharge',
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T01:00:00Z'),
+            operation: 'Discharge',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-completion',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-06T06:00:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-03-05T06:00:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parentCalculation] = getCreatedCalculations(manager);
+
+    expect(parentCalculation).toEqual(
+      expect.objectContaining({
+        allowedLaytime: '5 days 12:00:00',
+        usedLaytime: '3 days 00:00:00',
+        demurrageAmount: '0.00',
+        despatchAmount: '15000.00',
+        decisionSnapshot: expect.objectContaining({
+          reversibleSettlement: expect.objectContaining({
+            settlementStatus: 'FINAL_AUTHORITATIVE',
+            reasonCode: 'SETTLED',
+            demurrageRate: null,
+            despatchRate: 6000,
+            despatchTimeBasis: 'working_time_saved',
+            combinedAllowedSeconds: 132 * 3600,
+            combinedUsedSeconds: 72 * 3600,
+            combinedOverrunSeconds: 0,
+            combinedSavedSeconds: 60 * 3600,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('suppresses parent money when reversible demurrage pricing is incompatible', async () => {
+    const clauses = [
+      opClause('loading-laytime', 'laytime_rate', 'Loading', {
+        hours: 48,
+        noticeHours: 6,
+      }),
+      opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+        rate: 12000,
+      }),
+      opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+        hours: 48,
+        noticeHours: 6,
+      }),
+      opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+        rate: 15000,
+      }),
+      cpClause('reversible-laytime', 'reversible_laytime', { enabled: true }),
+    ];
+    const options = {
+      laytimeOperation: 'Discharge' as const,
+      sofDocuments: [
+        {
+          id: 'loading-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T00:00:00Z'),
+          operation: 'Loading' as const,
+        },
+        {
+          id: 'discharge-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T01:00:00Z'),
+          operation: 'Discharge' as const,
+        },
+      ],
+      sofEvents: [
+        {
+          id: 'loading-completion',
+          sofId: 'loading-doc',
+          eventTime: new Date('2026-03-06T18:00:00Z'),
+          eventType: 'LOADING_COMPLETED',
+          operation: 'Loading' as const,
+          isManualOverride: false,
+        },
+        {
+          id: 'discharge-completion',
+          sofId: 'discharge-doc',
+          eventTime: new Date('2026-03-07T06:00:00Z'),
+          eventType: 'DISCHARGE_COMPLETED',
+          operation: 'Discharge' as const,
+          isManualOverride: false,
+        },
+      ],
+    };
+    const baseline = buildServiceWithCharterParty(
+      0,
+      { clauses: clauses.slice(0, -1) },
+      options,
+    );
+    await baseline.service.calculate(VOYAGE_ID);
+    const baselineParent = getCreatedCalculations(baseline.manager)[0];
+
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      { clauses },
+      options,
+    );
+    await service.calculate(VOYAGE_ID);
+    const parentCalculation = getCreatedCalculations(manager)[0];
+
+    expect(parentCalculation).toEqual(
+      expect.objectContaining({
+        allowedLaytime: '4 days 00:00:00',
+        usedLaytime: '5 days 12:00:00',
+        demurrageAmount: '0.00',
+        despatchAmount: '0.00',
+        decisionSnapshot: expect.objectContaining({
+          reversibleSettlement: expect.objectContaining({
+            settlementStatus: 'NONAUTHORITATIVE',
+            reasonCode: 'REVERSIBLE_DEMURRAGE_RATE_MISMATCH',
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('suppresses parent money when reversible despatch timing is incompatible', async () => {
+    const clauses = [
+      opClause('loading-laytime', 'laytime_rate', 'Loading', {
+        hours: 60,
+        noticeHours: 6,
+      }),
+      opClause('loading-despatch', 'despatch', 'Loading', {
+        rate: 6000,
+        timeBasis: 'working_time_saved',
+      }),
+      opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+        hours: 72,
+        noticeHours: 6,
+      }),
+      opClause('discharge-despatch', 'despatch', 'Discharge', {
+        rate: 6000,
+        timeBasis: 'all_time_saved',
+      }),
+      cpClause('reversible-laytime', 'reversible_laytime', { enabled: true }),
+    ];
+    const options = {
+      laytimeOperation: 'Discharge' as const,
+      sofDocuments: [
+        {
+          id: 'loading-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T00:00:00Z'),
+          operation: 'Loading' as const,
+        },
+        {
+          id: 'discharge-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T01:00:00Z'),
+          operation: 'Discharge' as const,
+        },
+      ],
+      sofEvents: [
+        {
+          id: 'loading-completion',
+          sofId: 'loading-doc',
+          eventTime: new Date('2026-03-06T06:00:00Z'),
+          eventType: 'LOADING_COMPLETED',
+          operation: 'Loading' as const,
+          isManualOverride: false,
+        },
+        {
+          id: 'discharge-completion',
+          sofId: 'discharge-doc',
+          eventTime: new Date('2026-03-05T06:00:00Z'),
+          eventType: 'DISCHARGE_COMPLETED',
+          operation: 'Discharge' as const,
+          isManualOverride: false,
+        },
+      ],
+    };
+    const baseline = buildServiceWithCharterParty(
+      0,
+      { clauses: clauses.slice(0, -1) },
+      options,
+    );
+    await baseline.service.calculate(VOYAGE_ID);
+    const baselineParent = getCreatedCalculations(baseline.manager)[0];
+
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      { clauses },
+      options,
+    );
+    await service.calculate(VOYAGE_ID);
+    const parentCalculation = getCreatedCalculations(manager)[0];
+
+    expect(parentCalculation).toEqual(
+      expect.objectContaining({
+        allowedLaytime: '5 days 12:00:00',
+        usedLaytime: '3 days 00:00:00',
+        demurrageAmount: '0.00',
+        despatchAmount: '0.00',
+        decisionSnapshot: expect.objectContaining({
+          reversibleSettlement: expect.objectContaining({
+            settlementStatus: 'NONAUTHORITATIVE',
+            reasonCode: 'REVERSIBLE_DESPATCH_TERMS_MISMATCH',
           }),
         }),
       }),
@@ -2078,19 +3418,26 @@ describe('LaytimeCalculationsService lifecycle', () => {
         0,
         {
           clauses: [
-            cpClause('global-laytime', 'laytime_rate', { hours: 48, noticeHours: 6 }),
+            cpClause('global-laytime', 'laytime_rate', {
+              hours: 48,
+              noticeHours: 6,
+            }),
             cpClause('global-demurrage', 'demurrage_rate', { rate: 12000 }),
             cpClause('global-shex', 'shex_shinc', { shex: true }),
             opClause('loading-laytime', 'laytime_rate', 'Loading', {
               hours: 72,
               noticeHours: 6,
             }),
-            opClause('loading-demurrage', 'demurrage_rate', 'Loading', { rate: 10000 }),
+            opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+              rate: 10000,
+            }),
             opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
               hours: 24,
               noticeHours: 6,
             }),
-            opClause('discharge-despatch', 'despatch', 'Discharge', { rate: 5000 }),
+            opClause('discharge-despatch', 'despatch', 'Discharge', {
+              rate: 5000,
+            }),
           ],
         },
         {
@@ -2202,7 +3549,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
           return value;
         }
 
-        if (value.parentCalculationId === null || value.parentCalculationId === undefined) {
+        if (
+          value.parentCalculationId === null ||
+          value.parentCalculationId === undefined
+        ) {
           parentPersistCount += 1;
           const saved = {
             ...value,
@@ -2247,19 +3597,29 @@ describe('LaytimeCalculationsService lifecycle', () => {
       expect(savedPeriods).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ calculationId: 'parent-calculation-1' }),
-          expect.objectContaining({ calculationId: `${createdOperation.toLowerCase()}-child-1` }),
+          expect.objectContaining({
+            calculationId: `${createdOperation.toLowerCase()}-child-1`,
+          }),
           expect.objectContaining({ calculationId: 'parent-calculation-2' }),
-          expect.objectContaining({ calculationId: `${createdOperation.toLowerCase()}-child-2` }),
+          expect.objectContaining({
+            calculationId: `${createdOperation.toLowerCase()}-child-2`,
+          }),
         ]),
       );
 
-      const firstParent = savedParents.find((calculation) => calculation.version === 1) as LaytimeCalculation;
-      const secondParent = savedParents.find((calculation) => calculation.version === 2) as LaytimeCalculation;
+      const firstParent = savedParents.find(
+        (calculation) => calculation.version === 1,
+      ) as LaytimeCalculation;
+      const secondParent = savedParents.find(
+        (calculation) => calculation.version === 2,
+      ) as LaytimeCalculation;
       const firstChild = savedChildren.find(
-        (calculation) => calculation.parentCalculationId === 'parent-calculation-1',
+        (calculation) =>
+          calculation.parentCalculationId === 'parent-calculation-1',
       ) as LaytimeCalculation;
       const secondChild = savedChildren.find(
-        (calculation) => calculation.parentCalculationId === 'parent-calculation-2',
+        (calculation) =>
+          calculation.parentCalculationId === 'parent-calculation-2',
       ) as LaytimeCalculation;
 
       expect(firstParent.inputSnapshot).toEqual(
@@ -2339,21 +3699,26 @@ describe('LaytimeCalculationsService lifecycle', () => {
         2,
       ]);
 
-      await expect(service.findOperationChildren(firstParent.id)).resolves.toEqual([
+      await expect(
+        service.findOperationChildren(firstParent.id),
+      ).resolves.toEqual([
         expect.objectContaining({ operation: createdOperation }),
       ]);
 
       await expect(
-        service.findForVoyage(
-          VOYAGE_ID,
-          { skip: 0, limit: 10, page: 1 } as never,
-        ),
+        service.findForVoyage(VOYAGE_ID, {
+          skip: 0,
+          limit: 10,
+          page: 1,
+        } as never),
       ).resolves.toEqual(
         expect.objectContaining({
           data: [secondParent, firstParent],
         }),
       );
-      expect((firstChild.inputSnapshot as Record<string, any>).operationResult).toEqual(
+      expect(
+        (firstChild.inputSnapshot as Record<string, any>).operationResult,
+      ).toEqual(
         expect.objectContaining({
           operation: createdOperation,
           source: 'operation-specific-child-calculation',
@@ -2381,12 +3746,25 @@ describe('LaytimeCalculationsService lifecycle', () => {
       0,
       {
         clauses: [
-          cpClause('global-laytime', 'laytime_rate', { hours: 48, noticeHours: 6 }),
+          cpClause('global-laytime', 'laytime_rate', {
+            hours: 48,
+            noticeHours: 6,
+          }),
           cpClause('global-demurrage', 'demurrage_rate', { rate: 12000 }),
-          opClause('loading-laytime', 'laytime_rate', 'Loading', { hours: 72, noticeHours: 6 }),
-          opClause('loading-demurrage', 'demurrage_rate', 'Loading', { rate: 10000 }),
-          opClause('discharge-laytime', 'laytime_rate', 'Discharge', { hours: 24, noticeHours: 6 }),
-          opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', { rate: 15000 }),
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 72,
+            noticeHours: 6,
+          }),
+          opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+            rate: 10000,
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 24,
+            noticeHours: 6,
+          }),
+          opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+            rate: 15000,
+          }),
         ],
       },
       {
@@ -2479,68 +3857,64 @@ describe('LaytimeCalculationsService lifecycle', () => {
       matchingDocumentOperation,
       oppositeDocumentOperation,
     }) => {
-      const { service, manager } = buildServiceWithCharterParty(
-        0,
-        undefined,
-        {
-          laytimeOperation: voyageOperation,
-          sofDocuments: [
-            {
-              id: 'matching-doc',
-              status: 'Final',
-              uploadDate: new Date('2026-03-03T00:00:00Z'),
-              operation: matchingDocumentOperation,
-            },
-            {
-              id: 'legacy-doc',
-              status: 'Final',
-              uploadDate: new Date('2026-03-03T01:00:00Z'),
-              operation: null,
-            },
-            {
-              id: 'opposite-doc',
-              status: 'Final',
-              uploadDate: new Date('2026-03-03T02:00:00Z'),
-              operation: oppositeDocumentOperation,
-            },
-          ],
-          sofEvents: [
-            {
-              id: 'matching-completion',
-              sofId: 'matching-doc',
-              eventTime: new Date('2026-03-05T00:00:00Z'),
-              eventType:
-                voyageOperation === 'Loading'
-                  ? 'LOADING_COMPLETED'
-                  : 'DISCHARGE_COMPLETED',
-              operation: voyageOperation,
-              isManualOverride: false,
-            },
-            {
-              id: 'legacy-completion',
-              sofId: 'legacy-doc',
-              eventTime: new Date('2026-03-05T06:00:00Z'),
-              eventType:
-                voyageOperation === 'Loading'
-                  ? 'DISCHARGE_COMPLETED'
-                  : 'LOADING_COMPLETED',
-              operation: null,
-              isManualOverride: false,
-            },
-            {
-              id: 'opposite-completion',
-              sofId: 'opposite-doc',
-              eventTime: new Date('2026-03-05T12:00:00Z'),
-              eventType:
-                voyageOperation === 'Loading'
-                  ? 'DISCHARGE_COMPLETED'
-                  : 'LOADING_COMPLETED',
-              operation: oppositeDocumentOperation,
-              isManualOverride: false,
-            },
-          ],
-        },
-      );
+      const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+        laytimeOperation: voyageOperation,
+        sofDocuments: [
+          {
+            id: 'matching-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: matchingDocumentOperation,
+          },
+          {
+            id: 'legacy-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T01:00:00Z'),
+            operation: null,
+          },
+          {
+            id: 'opposite-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T02:00:00Z'),
+            operation: oppositeDocumentOperation,
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'matching-completion',
+            sofId: 'matching-doc',
+            eventTime: new Date('2026-03-05T00:00:00Z'),
+            eventType:
+              voyageOperation === 'Loading'
+                ? 'LOADING_COMPLETED'
+                : 'DISCHARGE_COMPLETED',
+            operation: voyageOperation,
+            isManualOverride: false,
+          },
+          {
+            id: 'legacy-completion',
+            sofId: 'legacy-doc',
+            eventTime: new Date('2026-03-05T06:00:00Z'),
+            eventType:
+              voyageOperation === 'Loading'
+                ? 'DISCHARGE_COMPLETED'
+                : 'LOADING_COMPLETED',
+            operation: null,
+            isManualOverride: false,
+          },
+          {
+            id: 'opposite-completion',
+            sofId: 'opposite-doc',
+            eventTime: new Date('2026-03-05T12:00:00Z'),
+            eventType:
+              voyageOperation === 'Loading'
+                ? 'DISCHARGE_COMPLETED'
+                : 'LOADING_COMPLETED',
+            operation: oppositeDocumentOperation,
+            isManualOverride: false,
+          },
+        ],
+      });
 
       await service.calculate(VOYAGE_ID);
 
@@ -2555,7 +3929,11 @@ describe('LaytimeCalculationsService lifecycle', () => {
         expect.objectContaining({
           sofDocumentSelection: expect.objectContaining({
             voyageLaytimeOperation: voyageOperation,
-            candidateDocumentIds: ['matching-doc', 'legacy-doc', 'opposite-doc'],
+            candidateDocumentIds: [
+              'matching-doc',
+              'legacy-doc',
+              'opposite-doc',
+            ],
             includedDocumentIds: ['matching-doc', 'legacy-doc'],
             excludedDocumentIds: ['opposite-doc'],
             matchingDocumentIds: ['matching-doc'],
@@ -2564,9 +3942,15 @@ describe('LaytimeCalculationsService lifecycle', () => {
             rule: 'matching-operation-plus-legacy-null',
           }),
           sofDocuments: [
-            expect.objectContaining({ id: 'matching-doc', operation: voyageOperation }),
+            expect.objectContaining({
+              id: 'matching-doc',
+              operation: voyageOperation,
+            }),
             expect.objectContaining({ id: 'legacy-doc', operation: null }),
-            expect.objectContaining({ id: 'opposite-doc', operation: oppositeDocumentOperation }),
+            expect.objectContaining({
+              id: 'opposite-doc',
+              operation: oppositeDocumentOperation,
+            }),
           ],
           sofEvents: [
             expect.objectContaining({ id: 'matching-completion' }),
@@ -2578,31 +3962,27 @@ describe('LaytimeCalculationsService lifecycle', () => {
   );
 
   it('uses legacy null documents with a warning when no operation-matching document exists', async () => {
-    const { service, manager } = buildServiceWithCharterParty(
-      0,
-      undefined,
-      {
-        laytimeOperation: 'Loading',
-        sofDocuments: [
-          {
-            id: 'legacy-doc',
-            status: 'Final',
-            uploadDate: new Date('2026-03-03T00:00:00Z'),
-            operation: null,
-          },
-        ],
-        sofEvents: [
-          {
-            id: 'legacy-completion',
-            sofId: 'legacy-doc',
-            eventTime: new Date('2026-03-05T00:00:00Z'),
-            eventType: 'LOADING_COMPLETED',
-            operation: null,
-            isManualOverride: false,
-          },
-        ],
-      },
-    );
+    const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+      laytimeOperation: 'Loading',
+      sofDocuments: [
+        {
+          id: 'legacy-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T00:00:00Z'),
+          operation: null,
+        },
+      ],
+      sofEvents: [
+        {
+          id: 'legacy-completion',
+          sofId: 'legacy-doc',
+          eventTime: new Date('2026-03-05T00:00:00Z'),
+          eventType: 'LOADING_COMPLETED',
+          operation: null,
+          isManualOverride: false,
+        },
+      ],
+    });
 
     await service.calculate(VOYAGE_ID);
 
@@ -2613,7 +3993,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
     expect(created.warnings).toContain(
       'Legacy unscoped SOF evidence was used because no operation-matching SOF document existed for the voyage laytime operation.',
     );
-    expect((created.inputSnapshot as Record<string, any>).sofDocumentSelection).toEqual(
+    expect(
+      (created.inputSnapshot as Record<string, any>).sofDocumentSelection,
+    ).toEqual(
       expect.objectContaining({
         voyageLaytimeOperation: 'Loading',
         matchingDocumentIds: [],
@@ -2625,21 +4007,17 @@ describe('LaytimeCalculationsService lifecycle', () => {
   });
 
   it('fails when only opposite-operation documents exist', async () => {
-    const { service } = buildServiceWithCharterParty(
-      0,
-      undefined,
-      {
-        laytimeOperation: 'Loading',
-        sofDocuments: [
-          {
-            id: 'opposite-doc',
-            status: 'Final',
-            uploadDate: new Date('2026-03-03T00:00:00Z'),
-            operation: 'Discharge',
-          },
-        ],
-      },
-    );
+    const { service } = buildServiceWithCharterParty(0, undefined, {
+      laytimeOperation: 'Loading',
+      sofDocuments: [
+        {
+          id: 'opposite-doc',
+          status: 'Final',
+          uploadDate: new Date('2026-03-03T00:00:00Z'),
+          operation: 'Discharge',
+        },
+      ],
+    });
 
     await expect(service.calculate(VOYAGE_ID)).rejects.toThrow(
       'No applicable SOF document exists for voyage laytime operation Loading',
@@ -2647,27 +4025,23 @@ describe('LaytimeCalculationsService lifecycle', () => {
   });
 
   it('keeps Final precedence even when a Draft document matches the voyage operation', async () => {
-    const { service } = buildServiceWithCharterParty(
-      0,
-      undefined,
-      {
-        laytimeOperation: 'Loading',
-        sofDocuments: [
-          {
-            id: 'draft-match',
-            status: 'Draft',
-            uploadDate: new Date('2026-03-03T00:00:00Z'),
-            operation: 'Loading',
-          },
-          {
-            id: 'final-opposite',
-            status: 'Final',
-            uploadDate: new Date('2026-03-04T00:00:00Z'),
-            operation: 'Discharge',
-          },
-        ],
-      },
-    );
+    const { service } = buildServiceWithCharterParty(0, undefined, {
+      laytimeOperation: 'Loading',
+      sofDocuments: [
+        {
+          id: 'draft-match',
+          status: 'Draft',
+          uploadDate: new Date('2026-03-03T00:00:00Z'),
+          operation: 'Loading',
+        },
+        {
+          id: 'final-opposite',
+          status: 'Final',
+          uploadDate: new Date('2026-03-04T00:00:00Z'),
+          operation: 'Discharge',
+        },
+      ],
+    });
 
     await expect(service.calculate(VOYAGE_ID)).rejects.toThrow(
       'No applicable SOF document exists for voyage laytime operation Loading',
@@ -2698,6 +4072,14 @@ describe('LaytimeCalculationsService lifecycle', () => {
           isManualOverride: false,
         },
         {
+          id: 'global-readiness',
+          sofId: 'sof-1',
+          eventTime: new Date('2026-03-03T23:00:00Z'),
+          eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+          operation: null,
+          isManualOverride: false,
+        },
+        {
           id: 'global-weather',
           sofId: 'sof-1',
           eventTime: new Date('2026-03-04T06:00:00Z'),
@@ -2717,7 +4099,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
           id: 'legacy-null-completion',
           sofId: 'sof-1',
           eventTime: new Date('2026-03-04T12:00:00Z'),
-          eventType: voyageOperation === 'Loading' ? 'DISCHARGE_COMPLETED' : 'LOADING_COMPLETED',
+          eventType:
+            voyageOperation === 'Loading'
+              ? 'DISCHARGE_COMPLETED'
+              : 'LOADING_COMPLETED',
           operation: null,
           isManualOverride: false,
         },
@@ -2766,11 +4151,17 @@ describe('LaytimeCalculationsService lifecycle', () => {
       const created = manager.create.mock.calls.find(
         ([entity]) => entity === LaytimeCalculation,
       )?.[1] as LaytimeCalculation;
-      const snapshotEvents = (created.inputSnapshot as Record<string, any>).sofEvents;
+      const snapshotEvents = (created.inputSnapshot as Record<string, any>)
+        .sofEvents;
 
       expect(snapshotEvents).toEqual([
         expect.objectContaining({
           id: 'global-nor',
+          operationClassification: 'global',
+        }),
+        expect.objectContaining({
+          id: 'global-readiness',
+          eventTime: '2026-03-03T23:00:00.000Z',
           operationClassification: 'global',
         }),
         expect.objectContaining({
@@ -2794,13 +4185,14 @@ describe('LaytimeCalculationsService lifecycle', () => {
           operationClassification: 'mismatched-operation',
         }),
       ]);
-      expect(snapshotEvents).toHaveLength(6);
+      expect(snapshotEvents).toHaveLength(7);
       expect(created.inputSnapshot).toEqual(
         expect.objectContaining({
           calculationEventSelection: expect.objectContaining({
             rule: 'exclude-explicit-mismatched-operation-completion-events',
             includedEventIds: [
               'global-nor',
+              'global-readiness',
               'global-weather',
               'global-cargo-started',
               'legacy-null-completion',
@@ -2888,20 +4280,34 @@ describe('LaytimeCalculationsService lifecycle', () => {
     const created = manager.create.mock.calls.find(
       ([entity]) => entity === LaytimeCalculation,
     )?.[1] as LaytimeCalculation;
-    const snapshotEvents = (created.inputSnapshot as Record<string, any>).sofEvents;
+    const snapshotEvents = (created.inputSnapshot as Record<string, any>)
+      .sofEvents;
 
     expect(snapshotEvents).toEqual([
-      expect.objectContaining({ id: 'global-nor', operationClassification: 'global' }),
-      expect.objectContaining({ id: 'legacy-loading', operationClassification: 'legacy-null' }),
-      expect.objectContaining({ id: 'legacy-discharge', operationClassification: 'legacy-null' }),
+      expect.objectContaining({
+        id: 'global-nor',
+        operationClassification: 'global',
+      }),
+      expect.objectContaining({
+        id: 'legacy-loading',
+        operationClassification: 'legacy-null',
+      }),
+      expect.objectContaining({
+        id: 'legacy-discharge',
+        operationClassification: 'legacy-null',
+      }),
     ]);
-    expect((created.inputSnapshot as Record<string, any>).calculationEventSelection).toEqual(
+    expect(
+      (created.inputSnapshot as Record<string, any>).calculationEventSelection,
+    ).toEqual(
       expect.objectContaining({
         includedEventIds: ['global-nor', 'legacy-loading', 'legacy-discharge'],
         excludedEventIds: [],
       }),
     );
-    expect((created.inputSnapshot as Record<string, any>).operationSelection).toEqual(
+    expect(
+      (created.inputSnapshot as Record<string, any>).operationSelection,
+    ).toEqual(
       expect.objectContaining({
         voyageLaytimeOperation: 'Loading',
         hasLoadingCompletion: false,
@@ -2910,6 +4316,202 @@ describe('LaytimeCalculationsService lifecycle', () => {
         includedCompletionEventIds: [],
         excludedCompletionEventIds: [],
       }),
+    );
+  });
+
+  it.each([
+    ['dry_bulk', 'dry_bulk'],
+    ['tanker', 'tanker'],
+    ['legacy null', null],
+  ] as const)(
+    'retains the voyage bulk operation type in parent and child input snapshots for %s',
+    async (_label, bulkOperationType) => {
+      const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+        laytimeOperation: 'Loading',
+        bulkOperationType,
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T01:00:00Z'),
+            operation: 'Discharge',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-completion',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-05T00:00:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-03-05T06:00:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      });
+
+      await service.calculate(VOYAGE_ID);
+
+      const createdCalculations = getCreatedCalculations(manager);
+      const parentCalculation = createdCalculations[0];
+      const loadingChild = createdCalculations.find(
+        (calculation) => calculation.operation === 'Loading',
+      );
+      const dischargeChild = createdCalculations.find(
+        (calculation) => calculation.operation === 'Discharge',
+      );
+
+      expect(
+        (parentCalculation.inputSnapshot as Record<string, any>).voyage,
+      ).toEqual(
+        expect.objectContaining({
+          bulkOperationType,
+        }),
+      );
+      expect(
+        (loadingChild?.inputSnapshot as Record<string, any>).voyage,
+      ).toEqual(
+        expect.objectContaining({
+          bulkOperationType,
+        }),
+      );
+      expect(
+        (dischargeChild?.inputSnapshot as Record<string, any>).voyage,
+      ).toEqual(
+        expect.objectContaining({
+          bulkOperationType,
+        }),
+      );
+    },
+  );
+
+  it('selects dry-bulk hatches-closed completion and persists the completion audit', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        laytimeAllowed: 48,
+        demurrageRate: '12000.00',
+        dispatchRate: null,
+        timeCountingBasis: null,
+        norNoticePeriod: '6 hours',
+      },
+      {
+        laytimeOperation: 'Loading',
+        bulkOperationType: 'dry_bulk',
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: 'Loading',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'global-nor',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-04T00:00:00Z'),
+            eventType: 'NOR_TENDERED',
+            operation: null,
+            isManualOverride: false,
+          },
+          {
+            id: 'cargo-completed',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-05T16:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'hatches-closed',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-05T16:30:00Z'),
+            eventType: 'HATCHES_CLOSED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'cargo-secured',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-05T16:45:00Z'),
+            eventType: 'CARGO_SECURED',
+            operation: null,
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const created = manager.create.mock.calls.find(
+      ([entity]) => entity === LaytimeCalculation,
+    )?.[1] as LaytimeCalculation;
+    const snapshotEvents = (created.inputSnapshot as Record<string, any>)
+      .sofEvents;
+
+    expect(snapshotEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'hatches-closed',
+          eventType: 'HATCHES_CLOSED',
+          eventTime: '2026-03-05T16:30:00.000Z',
+          operation: 'Loading',
+          operationClassification: 'matching-operation',
+        }),
+        expect.objectContaining({
+          id: 'cargo-secured',
+          eventType: 'CARGO_SECURED',
+          eventTime: '2026-03-05T16:45:00.000Z',
+          operation: null,
+          operationClassification: 'legacy-null',
+        }),
+      ]),
+    );
+    expect(
+      (created.decisionSnapshot as Record<string, any>).cargoCompletion,
+    ).toEqual(
+      expect.objectContaining({
+        eventId: 'hatches-closed',
+        eventType: 'HATCHES_CLOSED',
+        eventTime: '2026-03-05T16:30:00.000Z',
+        selectedEventId: 'hatches-closed',
+        selectedEventType: 'HATCHES_CLOSED',
+        selectedTime: '2026-03-05T16:30:00.000Z',
+        bulkOperationType: 'dry_bulk',
+        selectionBasis: 'dry-bulk-hatches-closed',
+        candidateEventIds: [
+          'global-nor',
+          'cargo-completed',
+          'hatches-closed',
+          'cargo-secured',
+        ],
+        excludedEventIds: ['global-nor', 'cargo-completed', 'cargo-secured'],
+      }),
+    );
+    expect(created.usedLaytime).toBe('1 days 10:30:00');
+    expect(created.demurrageAmount).toBe('0.00');
+    expect(created.despatchAmount).toBe('0.00');
+    expect(created.warnings).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          'Dry-bulk completion evidence did not include HATCHES_CLOSED',
+        ),
+      ]),
     );
   });
 
@@ -2926,79 +4528,78 @@ describe('LaytimeCalculationsService lifecycle', () => {
       completionEventType: 'DISCHARGE_COMPLETED',
       completionOperation: 'Discharge' as const,
     },
-  ])('does not warn when only $label evidence is present', async ({
-    voyageOperation,
-    completionEventType,
-    completionOperation,
-  }) => {
-    const { service, manager } = buildServiceWithCharterParty(
-      0,
-      {
-        laytimeAllowed: 48,
-        demurrageRate: '12000.00',
-        dispatchRate: null,
-        timeCountingBasis: null,
-        norNoticePeriod: '6 hours',
-      },
-      {
-        laytimeOperation: voyageOperation,
-        sofEvents: [
-          {
-            id: 'global-nor',
-            sofId: 'sof-1',
-            eventTime: new Date('2026-03-04T00:00:00Z'),
-            eventType: 'NOR_TENDERED',
-            operation: null,
-            isManualOverride: false,
-          },
-          {
-            id: 'explicit-completion',
-            sofId: 'sof-1',
-            eventTime: new Date('2026-03-05T00:00:00Z'),
-            eventType: completionEventType,
-            operation: completionOperation,
-            isManualOverride: false,
-          },
-          {
-            id: 'legacy-completion',
-            sofId: 'sof-1',
-            eventTime: new Date('2026-03-05T06:00:00Z'),
-            eventType:
-              completionEventType === 'LOADING_COMPLETED'
-                ? 'DISCHARGE_COMPLETED'
-                : 'LOADING_COMPLETED',
-            operation: null,
-            isManualOverride: false,
-          },
-        ] as Array<{
-          id: string;
-          sofId: string;
-          eventTime: Date;
-          eventType: string;
-          operation?: 'Loading' | 'Discharge' | null;
-          isManualOverride: boolean;
-        }>,
-      },
-    );
+  ])(
+    'does not warn when only $label evidence is present',
+    async ({ voyageOperation, completionEventType, completionOperation }) => {
+      const { service, manager } = buildServiceWithCharterParty(
+        0,
+        {
+          laytimeAllowed: 48,
+          demurrageRate: '12000.00',
+          dispatchRate: null,
+          timeCountingBasis: null,
+          norNoticePeriod: '6 hours',
+        },
+        {
+          laytimeOperation: voyageOperation,
+          sofEvents: [
+            {
+              id: 'global-nor',
+              sofId: 'sof-1',
+              eventTime: new Date('2026-03-04T00:00:00Z'),
+              eventType: 'NOR_TENDERED',
+              operation: null,
+              isManualOverride: false,
+            },
+            {
+              id: 'explicit-completion',
+              sofId: 'sof-1',
+              eventTime: new Date('2026-03-05T00:00:00Z'),
+              eventType: completionEventType,
+              operation: completionOperation,
+              isManualOverride: false,
+            },
+            {
+              id: 'legacy-completion',
+              sofId: 'sof-1',
+              eventTime: new Date('2026-03-05T06:00:00Z'),
+              eventType:
+                completionEventType === 'LOADING_COMPLETED'
+                  ? 'DISCHARGE_COMPLETED'
+                  : 'LOADING_COMPLETED',
+              operation: null,
+              isManualOverride: false,
+            },
+          ] as Array<{
+            id: string;
+            sofId: string;
+            eventTime: Date;
+            eventType: string;
+            operation?: 'Loading' | 'Discharge' | null;
+            isManualOverride: boolean;
+          }>,
+        },
+      );
 
-    await service.calculate(VOYAGE_ID);
+      await service.calculate(VOYAGE_ID);
 
-    const created = manager.create.mock.calls.find(
-      ([entity]) => entity === LaytimeCalculation,
-    )?.[1] as LaytimeCalculation;
+      const created = manager.create.mock.calls.find(
+        ([entity]) => entity === LaytimeCalculation,
+      )?.[1] as LaytimeCalculation;
 
-    expect(created.warnings).not.toContain(mixedOperationWarning);
-    expect((created.inputSnapshot as Record<string, any>).operationSelection).toEqual(
-      expect.objectContaining({
-        voyageLaytimeOperation: voyageOperation,
-        hasLoadingCompletion:
-          voyageOperation === 'Loading',
-        hasDischargeCompletion:
-          voyageOperation === 'Discharge',
-        mixedOperationEvidence: false,
-      }),
-    );
-  });
+      expect(created.warnings).not.toContain(mixedOperationWarning);
+      expect(
+        (created.inputSnapshot as Record<string, any>).operationSelection,
+      ).toEqual(
+        expect.objectContaining({
+          voyageLaytimeOperation: voyageOperation,
+          hasLoadingCompletion: voyageOperation === 'Loading',
+          hasDischargeCompletion: voyageOperation === 'Discharge',
+          mixedOperationEvidence: false,
+        }),
+      );
+    },
+  );
 
   it('prefers persisted clause rows over normalized charter-party commercial terms', async () => {
     const persistedClauses = [
@@ -3045,7 +4646,7 @@ describe('LaytimeCalculationsService lifecycle', () => {
         decisionSnapshot: expect.objectContaining({
           commencement: expect.objectContaining({
             noticeHours: 4,
-            noticeSource: 'charter_party',
+            noticeSource: 'noticeHours',
           }),
           allowedLaytime: expect.objectContaining({
             clauseParameters: { hours: 96, noticeHours: 4 },
@@ -3166,7 +4767,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
           wibon: expect.objectContaining({
             clauseId: 'persisted-wibon',
             enabled: true,
-            applied: true,
+            configured: true,
+            applied: false,
+            evaluationStatus: 'UNAVAILABLE',
+            reason: 'NO_ASSOCIATED_LOCATION_EVIDENCE',
           }),
         }),
         usedLaytime: '3 days 02:00:00',
@@ -3174,12 +4778,11 @@ describe('LaytimeCalculationsService lifecycle', () => {
       }),
     );
     expect(
-      (wibonCreate.decisionSnapshot as Record<string, unknown>).periods as Array<{
+      (wibonCreate.decisionSnapshot as Record<string, unknown>)
+        .periods as Array<{
         periodType: string;
       }>,
-    ).toEqual([
-      expect.objectContaining({ periodType: 'laytime' }),
-    ]);
+    ).toEqual([expect.objectContaining({ periodType: 'laytime' })]);
 
     const shex = buildServiceWithCharterParty(
       0,
@@ -3203,7 +4806,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
       ([entity]) => entity === LaytimeCalculation,
     )?.[1] as LaytimeCalculation;
     expect(
-      (shexCreate.decisionSnapshot as Record<string, unknown>).periods as Array<{
+      (shexCreate.decisionSnapshot as Record<string, unknown>)
+        .periods as Array<{
         periodType: string;
       }>,
     ).toEqual([
@@ -3214,7 +4818,7 @@ describe('LaytimeCalculationsService lifecycle', () => {
     expect(shexCreate.usedLaytime).toBe('2 days 02:00:00');
   });
 
-  it('records persisted WIPON as a recognized no-op with a limitation note', async () => {
+  it('records persisted WIPON as configured but unapplied without evidence', async () => {
     const weekendNorDocuments = [
       {
         id: 'nor-1',
@@ -3292,12 +4896,212 @@ describe('LaytimeCalculationsService lifecycle', () => {
           wipon: expect.objectContaining({
             clauseId: 'persisted-wipon',
             enabled: true,
-            applied: true,
-            limitation:
-              'Port-limit status is not currently modeled; timing is unchanged.',
+            configured: true,
+            applied: false,
+            evaluationStatus: 'UNAVAILABLE',
+            reason: 'NO_ASSOCIATED_LOCATION_EVIDENCE',
           }),
         }),
         usedLaytime: '3 days 02:00:00',
+      }),
+    );
+  });
+
+  it('snapshots location observations and their candidate-associated validity input', async () => {
+    const observation = {
+      id: 'location-evidence-1',
+      voyageId: VOYAGE_ID,
+      operation: 'Discharge' as const,
+      evidenceTime: new Date('2026-03-04T00:00:00Z'),
+      portRelation: 'INSIDE_PORT_LIMITS' as const,
+      berthRelation: 'AT_BERTH' as const,
+      waitingPlace: 'ANCHORAGE' as const,
+      source: 'MANUAL' as const,
+      sofDocumentId: null,
+      sourceReference: 'Agent email 42',
+      note: 'Agent confirmed berth occupied',
+      norDocumentId: 'nor-1',
+      norTenderedEventId: null,
+      createdByUserId: 'user-1',
+      createdAt: new Date('2026-03-04T01:00:00Z'),
+    };
+    const { service, manager, locationEvidence } = buildServiceWithCharterParty(
+      0,
+      undefined,
+      {
+        locationEvidence: [observation],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    expect(locationEvidence.find).toHaveBeenCalledWith({
+      where: { voyageId: VOYAGE_ID },
+      order: { evidenceTime: 'ASC', createdAt: 'ASC', id: 'ASC' },
+    });
+    const calculation = getCreatedCalculations(manager).find(
+      (entry) => entry.parentCalculationId === null,
+    ) as LaytimeCalculation;
+    expect(calculation.inputSnapshot).toEqual(
+      expect.objectContaining({
+        norTenderLocationEvidence: {
+          availability: 'available',
+          validityEvaluation: 'candidate-associated-v1',
+          observations: [
+            {
+              id: observation.id,
+              voyageId: VOYAGE_ID,
+              operation: 'Discharge',
+              evidenceTime: '2026-03-04T00:00:00.000Z',
+              portRelation: 'INSIDE_PORT_LIMITS',
+              berthRelation: 'AT_BERTH',
+              waitingPlace: 'ANCHORAGE',
+              source: 'MANUAL',
+              sofDocumentId: null,
+              sourceReference: 'Agent email 42',
+              note: 'Agent confirmed berth occupied',
+              norDocumentId: 'nor-1',
+              norTenderedEventId: null,
+              associationBasis: 'explicit-nor-document',
+              createdByUserId: 'user-1',
+              createdAt: '2026-03-04T01:00:00.000Z',
+            },
+          ],
+        },
+      }),
+    );
+    expect(calculation.decisionSnapshot).toEqual(
+      expect.objectContaining({
+        commencement: expect.objectContaining({
+          location: expect.objectContaining({
+            overallStatus: 'PASS',
+            associationBasis: 'explicit-nor-document',
+            selectedEvidence: expect.objectContaining({
+              id: observation.id,
+              evidenceTime: '2026-03-04T00:00:00.000Z',
+            }),
+            berth: expect.objectContaining({
+              status: 'PASS',
+              reason: 'BERTH_REQUIREMENT_SATISFIED',
+            }),
+            port: expect.objectContaining({
+              status: 'PASS',
+              reason: 'PORT_REQUIREMENT_SATISFIED',
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('records unavailable location evidence without inferring a location result', async () => {
+    const { service, manager } = buildService();
+
+    await service.calculate(VOYAGE_ID);
+
+    const calculation = getCreatedCalculations(manager).find(
+      (entry) => entry.parentCalculationId === null,
+    ) as LaytimeCalculation;
+    expect(calculation.inputSnapshot).toEqual(
+      expect.objectContaining({
+        norTenderLocationEvidence: {
+          availability: 'unavailable',
+          validityEvaluation: 'candidate-associated-v1',
+          observations: [],
+        },
+      }),
+    );
+  });
+
+  it('snapshots location rejection reasons while selecting a valid retender', async () => {
+    const baseEvidence = {
+      voyageId: VOYAGE_ID,
+      operation: 'Discharge' as const,
+      portRelation: 'INSIDE_PORT_LIMITS' as const,
+      waitingPlace: 'NONE' as const,
+      source: 'MANUAL' as const,
+      sofDocumentId: null,
+      sourceReference: null,
+      note: null,
+      norTenderedEventId: null,
+      createdByUserId: 'user-1',
+      createdAt: new Date('2026-03-04T14:00:00Z'),
+    };
+    const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+      norDocuments: [
+        {
+          id: 'nor-location-invalid',
+          tenderTime: new Date('2026-03-04T10:00:00Z'),
+        },
+        {
+          id: 'nor-location-retender',
+          tenderTime: new Date('2026-03-04T12:00:00Z'),
+        },
+      ],
+      locationEvidence: [
+        {
+          ...baseEvidence,
+          id: 'evidence-location-invalid',
+          evidenceTime: new Date('2026-03-04T10:00:00Z'),
+          berthRelation: 'NOT_AT_BERTH',
+          norDocumentId: 'nor-location-invalid',
+        },
+        {
+          ...baseEvidence,
+          id: 'evidence-location-retender',
+          evidenceTime: new Date('2026-03-04T12:00:00Z'),
+          berthRelation: 'AT_BERTH',
+          norDocumentId: 'nor-location-retender',
+        },
+      ],
+      sofEvents: [
+        {
+          id: 'ready-location',
+          sofId: 'sof-1',
+          eventTime: new Date('2026-03-04T09:00:00Z'),
+          eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+          operation: 'Discharge',
+          isManualOverride: false,
+        },
+        {
+          id: 'completion-location',
+          sofId: 'sof-1',
+          eventTime: new Date('2026-03-06T06:00:00Z'),
+          eventType: 'CARGO_COMPLETED',
+          operation: 'Discharge',
+          isManualOverride: false,
+        },
+      ],
+    });
+
+    await service.calculate(VOYAGE_ID);
+
+    const calculation = getCreatedCalculations(manager).find(
+      (entry) => entry.parentCalculationId === null,
+    ) as LaytimeCalculation;
+    expect(calculation.decisionSnapshot).toEqual(
+      expect.objectContaining({
+        commencement: expect.objectContaining({
+          norDocumentId: 'nor-location-retender',
+          location: expect.objectContaining({
+            overallStatus: 'PASS',
+            selectedEvidence: expect.objectContaining({
+              id: 'evidence-location-retender',
+            }),
+          }),
+          locationRejectedCandidates: [
+            expect.objectContaining({
+              norDocumentId: 'nor-location-invalid',
+              rejectionReasons: ['NOR_LOCATION_NOT_AT_BERTH'],
+              location: expect.objectContaining({
+                overallStatus: 'INVALID',
+                selectedEvidence: expect.objectContaining({
+                  id: 'evidence-location-invalid',
+                }),
+              }),
+            }),
+          ],
+        }),
       }),
     );
   });
@@ -3480,6 +5284,87 @@ describe('LaytimeCalculationsService lifecycle', () => {
     );
   });
 
+  it('snapshots versioned SHEX inputs and resolved local calendar intervals', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        clauses: [
+          {
+            id: 'persisted-laytime',
+            clauseType: 'laytime_rate',
+            rawText: 'Laytime allowed: 120h',
+            parameters: { hours: 120, noticeHours: 0 },
+          },
+          {
+            id: 'persisted-demurrage',
+            clauseType: 'demurrage_rate',
+            rawText: 'Demurrage: $20,000/day',
+            parameters: { rate: 20000 },
+          },
+          {
+            id: 'persisted-shex-v1',
+            clauseType: 'shex_shinc',
+            rawText: 'Sydney SHEX calendar',
+            parameters: {
+              shex: true,
+              calendarVersion: 1,
+              timeZone: 'Australia/Sydney',
+              holidayDates: [],
+              saturdayExcepted: false,
+            },
+          },
+        ],
+      },
+      {
+        norDocuments: [
+          {
+            id: 'nor-1',
+            tenderTime: new Date('2026-07-04T12:00:00Z'),
+            acceptedTime: new Date('2026-07-04T12:00:00Z'),
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'completion-1',
+            sofId: 'sof-1',
+            eventTime: new Date('2026-07-05T18:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const savedCalculation = manager.create.mock.calls.find(
+      ([entity]) => entity === LaytimeCalculation,
+    )?.[1] as LaytimeCalculation;
+    expect(savedCalculation.decisionSnapshot).toEqual(
+      expect.objectContaining({
+        shexCalendar: {
+          clauseId: 'persisted-shex-v1',
+          calendarVersion: 1,
+          operation: null,
+          shex: true,
+          timeZone: 'Australia/Sydney',
+          saturdayExcepted: false,
+          holidayDates: [],
+          sourceType: 'explicit-contractual-dates',
+          legacyCompatibilityUsed: false,
+          generatedIntervals: [
+            {
+              startTime: '2026-07-04T14:00:00.000Z',
+              endTime: '2026-07-05T14:00:00.000Z',
+              localDate: '2026-07-05',
+              reasons: ['sunday'],
+            },
+          ],
+        },
+      }),
+    );
+  });
+
   it('honours an explicit persisted SHINC clause across a Sunday and contrasts with SHEX', async () => {
     const weekendNorDocuments = [
       {
@@ -3595,7 +5480,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
       }),
     );
     expect(
-      (shincCreate.decisionSnapshot as Record<string, unknown>).periods as Array<{
+      (shincCreate.decisionSnapshot as Record<string, unknown>)
+        .periods as Array<{
         periodType: string;
       }>,
     ).toEqual([
@@ -3632,7 +5518,8 @@ describe('LaytimeCalculationsService lifecycle', () => {
       }),
     );
     expect(
-      (shexCreate.decisionSnapshot as Record<string, unknown>).periods as Array<{
+      (shexCreate.decisionSnapshot as Record<string, unknown>)
+        .periods as Array<{
         periodType: string;
       }>,
     ).toEqual([
@@ -3694,7 +5581,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
       expect.objectContaining({
         charterParty: expect.objectContaining({
           clauses: expect.arrayContaining([
-            expect.objectContaining({ parameters: { hours: 48, noticeHours: 6 } }),
+            expect.objectContaining({
+              parameters: { hours: 48, noticeHours: 6 },
+            }),
           ]),
         }),
       }),
@@ -3711,72 +5600,42 @@ describe('LaytimeCalculationsService lifecycle', () => {
   it.each([
     { operation: 'Loading' as const, childId: 'loading-child' },
     { operation: 'Discharge' as const, childId: 'discharge-child' },
-  ])('creates a %s child calculation with persisted periods', async ({ operation }) => {
-    const { service, manager } = buildService();
-    const parentCalculation = {
-      id: 'parent-calculation',
-      voyageId: VOYAGE_ID,
-      version: 7,
-      status: 'Draft' as const,
-    };
-
-    const child = await (
-      service as unknown as {
-        createOperationChildResult: (input: {
-          parentCalculation: typeof parentCalculation;
-          operation: 'Loading' | 'Discharge';
-          allowedLaytime: string;
-          usedLaytime: string;
-          demurrageAmount: string;
-          despatchAmount: string;
-          inputSnapshot: Record<string, unknown>;
-          decisionSnapshot: Record<string, unknown>;
-          warnings: string[];
-          engineVersion: string | null;
-          periods: Array<{
-            startTime: Date;
-            endTime: Date;
-            periodType: string;
-            appliedClauseId: string | null;
-          }>;
-          calculatedAt?: Date;
-        }) => Promise<LaytimeCalculation>;
-      }
-    ).createOperationChildResult({
-      parentCalculation,
-      operation,
-      allowedLaytime: '2 days 00:00:00',
-      usedLaytime: '1 days 12:00:00',
-      demurrageAmount: '0.00',
-      despatchAmount: '1500.00',
-      inputSnapshot: { child: true },
-      decisionSnapshot: { child: true },
-      warnings: ['child warning'],
-      engineVersion: 'laytime-engine-v1',
-      calculatedAt: new Date('2026-03-05T12:00:00Z'),
-      periods: [
-        {
-          startTime: new Date('2026-03-05T00:00:00Z'),
-          endTime: new Date('2026-03-05T06:00:00Z'),
-          periodType: 'laytime',
-          appliedClauseId: null,
-        },
-        {
-          startTime: new Date('2026-03-05T06:00:00Z'),
-          endTime: new Date('2026-03-05T12:00:00Z'),
-          periodType: 'exception',
-          appliedClauseId: 'clause-1',
-        },
-      ],
-    });
-
-    expect(child).toEqual(
-      expect.objectContaining({
+  ])(
+    'creates a %s child calculation with persisted periods',
+    async ({ operation }) => {
+      const { service, manager } = buildService();
+      const parentCalculation = {
+        id: 'parent-calculation',
         voyageId: VOYAGE_ID,
-        parentCalculationId: parentCalculation.id,
+        version: 7,
+        status: 'Draft' as const,
+      };
+
+      const child = await (
+        service as unknown as {
+          createOperationChildResult: (input: {
+            parentCalculation: typeof parentCalculation;
+            operation: 'Loading' | 'Discharge';
+            allowedLaytime: string;
+            usedLaytime: string;
+            demurrageAmount: string;
+            despatchAmount: string;
+            inputSnapshot: Record<string, unknown>;
+            decisionSnapshot: Record<string, unknown>;
+            warnings: string[];
+            engineVersion: string | null;
+            periods: Array<{
+              startTime: Date;
+              endTime: Date;
+              periodType: string;
+              appliedClauseId: string | null;
+            }>;
+            calculatedAt?: Date;
+          }) => Promise<LaytimeCalculation>;
+        }
+      ).createOperationChildResult({
+        parentCalculation,
         operation,
-        version: parentCalculation.version,
-        status: parentCalculation.status,
         allowedLaytime: '2 days 00:00:00',
         usedLaytime: '1 days 12:00:00',
         demurrageAmount: '0.00',
@@ -3787,6 +5646,77 @@ describe('LaytimeCalculationsService lifecycle', () => {
         engineVersion: 'laytime-engine-v1',
         calculatedAt: new Date('2026-03-05T12:00:00Z'),
         periods: [
+          {
+            startTime: new Date('2026-03-05T00:00:00Z'),
+            endTime: new Date('2026-03-05T06:00:00Z'),
+            periodType: 'laytime',
+            appliedClauseId: null,
+          },
+          {
+            startTime: new Date('2026-03-05T06:00:00Z'),
+            endTime: new Date('2026-03-05T12:00:00Z'),
+            periodType: 'exception',
+            appliedClauseId: 'clause-1',
+          },
+        ],
+      });
+
+      expect(child).toEqual(
+        expect.objectContaining({
+          voyageId: VOYAGE_ID,
+          parentCalculationId: parentCalculation.id,
+          operation,
+          version: parentCalculation.version,
+          status: parentCalculation.status,
+          allowedLaytime: '2 days 00:00:00',
+          usedLaytime: '1 days 12:00:00',
+          demurrageAmount: '0.00',
+          despatchAmount: '1500.00',
+          inputSnapshot: { child: true },
+          decisionSnapshot: { child: true },
+          warnings: ['child warning'],
+          engineVersion: 'laytime-engine-v1',
+          calculatedAt: new Date('2026-03-05T12:00:00Z'),
+          periods: [
+            expect.objectContaining({
+              calculationId: 'new-calculation',
+              periodType: 'laytime',
+            }),
+            expect.objectContaining({
+              calculationId: 'new-calculation',
+              periodType: 'exception',
+            }),
+          ],
+        }),
+      );
+
+      expect(manager.findOne).toHaveBeenCalledWith(LaytimeCalculation, {
+        where: {
+          parentCalculationId: parentCalculation.id,
+          operation,
+        },
+      });
+      expect(manager.create).toHaveBeenCalledWith(
+        LaytimeCalculation,
+        expect.objectContaining({
+          voyageId: VOYAGE_ID,
+          parentCalculationId: parentCalculation.id,
+          operation,
+          version: parentCalculation.version,
+          status: parentCalculation.status,
+          calculatedAt: new Date('2026-03-05T12:00:00Z'),
+        }),
+      );
+      expect(manager.save).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          parentCalculationId: parentCalculation.id,
+          operation,
+        }),
+      );
+      expect(manager.save).toHaveBeenNthCalledWith(
+        2,
+        expect.arrayContaining([
           expect.objectContaining({
             calculationId: 'new-calculation',
             periodType: 'laytime',
@@ -3795,54 +5725,16 @@ describe('LaytimeCalculationsService lifecycle', () => {
             calculationId: 'new-calculation',
             periodType: 'exception',
           }),
-        ],
-      }),
-    );
-
-    expect(manager.findOne).toHaveBeenCalledWith(LaytimeCalculation, {
-      where: {
-        parentCalculationId: parentCalculation.id,
-        operation,
-      },
-    });
-    expect(manager.create).toHaveBeenCalledWith(
-      LaytimeCalculation,
-      expect.objectContaining({
+        ]),
+      );
+      expect(parentCalculation).toEqual({
+        id: 'parent-calculation',
         voyageId: VOYAGE_ID,
-        parentCalculationId: parentCalculation.id,
-        operation,
-        version: parentCalculation.version,
-        status: parentCalculation.status,
-        calculatedAt: new Date('2026-03-05T12:00:00Z'),
-      }),
-    );
-    expect(manager.save).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        parentCalculationId: parentCalculation.id,
-        operation,
-      }),
-    );
-    expect(manager.save).toHaveBeenNthCalledWith(
-      2,
-      expect.arrayContaining([
-        expect.objectContaining({
-          calculationId: 'new-calculation',
-          periodType: 'laytime',
-        }),
-        expect.objectContaining({
-          calculationId: 'new-calculation',
-          periodType: 'exception',
-        }),
-      ]),
-    );
-    expect(parentCalculation).toEqual({
-      id: 'parent-calculation',
-      voyageId: VOYAGE_ID,
-      version: 7,
-      status: 'Draft',
-    });
-  });
+        version: 7,
+        status: 'Draft',
+      });
+    },
+  );
 
   it.each(['Loading', 'Discharge'] as const)(
     'rejects duplicate %s child calculations for the same parent',
@@ -3927,10 +5819,225 @@ describe('LaytimeCalculationsService lifecycle', () => {
     );
   });
 
+  it('persists an explicitly scoped non-reversible V1 parent as a summary only', async () => {
+    const { service, manager, voyagesService } = buildServiceWithCharterParty(
+      0,
+      {
+        laytimeOperationScope: 'LoadingAndDischarge',
+        clauses: [
+          cpClause('loading-allowance', 'laytime_rate', {
+            operation: 'Loading',
+            hours: 72,
+          }),
+          cpClause('discharge-allowance', 'laytime_rate', {
+            operation: 'Discharge',
+            hours: 48,
+          }),
+          cpClause('demurrage', 'demurrage_rate', { rate: 12000 }),
+        ],
+      },
+      {
+        sofDocuments: [
+          {
+            id: 'loading-sof',
+            status: 'Final',
+            uploadDate: new Date('2026-03-01T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-sof',
+            status: 'Final',
+            uploadDate: new Date('2026-03-10T00:00:00Z'),
+            operation: 'Discharge',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-complete',
+            sofId: 'loading-sof',
+            eventTime: new Date('2026-03-06T00:00:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-complete',
+            sofId: 'discharge-sof',
+            eventTime: new Date('2026-03-14T00:00:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parent, loading, discharge] = getCreatedCalculations(manager);
+    expect(parent).toEqual(
+      expect.objectContaining({
+        allowedLaytime: null,
+        usedLaytime: null,
+        demurrageAmount: null,
+        despatchAmount: null,
+        settlementAuthorityStatus: 'PROVISIONAL',
+      }),
+    );
+    expect(parent.decisionSnapshot?.nonReversibleSettlement).toEqual(
+      expect.objectContaining({
+        version: 1,
+        settlementMode: 'separate_operation_results',
+        expectedOperations: ['Loading', 'Discharge'],
+        parentVersion: 1,
+        settlementStatus: 'PROVISIONAL',
+        monetaryAggregation: expect.objectContaining({
+          status: 'AVAILABLE',
+          currency: 'USD',
+          legalNetting: false,
+          claimableAsAggregate: false,
+        }),
+      }),
+    );
+    expect(loading.operation).toBe('Loading');
+    expect(discharge.operation).toBe('Discharge');
+    expect(loading.version).toBe(parent.version);
+    expect(discharge.version).toBe(parent.version);
+    expect(manager.save).toHaveBeenCalledWith([]);
+
+    const firstSettlement = parent.decisionSnapshot
+      ?.nonReversibleSettlement as any;
+    voyagesService.ensureExists.mockResolvedValue({
+      id: VOYAGE_ID,
+      cargoQuantity: '20000.00',
+      laytimeOperation: 'Loading',
+      bulkOperationType: null,
+    });
+    await service.calculate(VOYAGE_ID);
+    const secondParent = getCreatedCalculations(manager)[3];
+    const secondSettlement = secondParent.decisionSnapshot
+      ?.nonReversibleSettlement as any;
+    const withoutGeneratedId = ({ childCalculationId: _id, ...summary }: any) =>
+      summary;
+    expect(withoutGeneratedId(secondSettlement.operations.Loading)).toEqual(
+      withoutGeneratedId(firstSettlement.operations.Loading),
+    );
+    expect(withoutGeneratedId(secondSettlement.operations.Discharge)).toEqual(
+      withoutGeneratedId(firstSettlement.operations.Discharge),
+    );
+    expect(secondSettlement.settlementStatus).toBe(
+      firstSettlement.settlementStatus,
+    );
+  });
+
+  it('atomically finalizes a V1 parent and its exact expected same-version children', async () => {
+    const { service, calculations, manager } = buildService();
+    const settlement = {
+      version: 1,
+      settlementMode: 'separate_operation_results',
+      expectedOperationScope: 'LoadingAndDischarge',
+      expectedOperations: ['Loading', 'Discharge'],
+      settlementStatus: 'PROVISIONAL',
+      finalizationEligible: true,
+      finalizationBlockers: [],
+      operations: {
+        Loading: { childCalculationId: 'loading-child' },
+        Discharge: { childCalculationId: 'discharge-child' },
+      },
+    };
+    const parent = {
+      id: 'summary-parent',
+      voyageId: VOYAGE_ID,
+      version: 3,
+      status: 'Draft',
+      currency: 'USD',
+      parentCalculationId: null,
+      decisionSnapshot: { nonReversibleSettlement: settlement },
+    } as unknown as LaytimeCalculation;
+    const children = [
+      {
+        id: 'loading-child',
+        voyageId: VOYAGE_ID,
+        parentCalculationId: parent.id,
+        operation: 'Loading',
+        version: 3,
+        status: 'Draft',
+        currency: 'USD',
+      },
+      {
+        id: 'discharge-child',
+        voyageId: VOYAGE_ID,
+        parentCalculationId: parent.id,
+        operation: 'Discharge',
+        version: 3,
+        status: 'Draft',
+        currency: 'USD',
+      },
+    ] as LaytimeCalculation[];
+    calculations.findOne.mockResolvedValue(parent);
+    manager.findOneOrFail.mockResolvedValue(parent);
+    manager.find.mockResolvedValue(children);
+
+    await expect(service.finalize(parent.id)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'Final',
+        settlementAuthorityStatus: 'FINAL_AUTHORITATIVE',
+      }),
+    );
+    expect(children).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: 'Final',
+          settlementAuthorityStatus: 'FINAL_AUTHORITATIVE',
+        }),
+      ]),
+    );
+    expect(manager.save).toHaveBeenCalledWith(children);
+  });
+
+  it('does not finalize when an expected child is from another version', async () => {
+    const { service, calculations, manager } = buildService();
+    const parent = {
+      id: 'summary-parent',
+      voyageId: VOYAGE_ID,
+      version: 3,
+      status: 'Draft',
+      currency: 'USD',
+      parentCalculationId: null,
+      decisionSnapshot: {
+        nonReversibleSettlement: {
+          version: 1,
+          expectedOperations: ['Loading'],
+          operations: { Loading: { childCalculationId: 'loading-child' } },
+          finalizationEligible: true,
+          finalizationBlockers: [],
+        },
+      },
+    } as unknown as LaytimeCalculation;
+    calculations.findOne.mockResolvedValue(parent);
+    manager.findOneOrFail.mockResolvedValue(parent);
+    manager.find.mockResolvedValue([
+      {
+        id: 'loading-child',
+        parentCalculationId: parent.id,
+        operation: 'Loading',
+        version: 2,
+        status: 'Draft',
+        currency: 'USD',
+      },
+    ]);
+
+    await expect(service.finalize(parent.id)).rejects.toThrow(
+      'does not belong to this parent calculation version',
+    );
+    expect(parent.status).toBe('Draft');
+  });
+
   it('finalizes only the status of a draft calculation', async () => {
     const { service, calculations } = buildService();
     const calculation = {
       id: 'draft-calculation',
+      voyageId: VOYAGE_ID,
       status: 'Draft',
       allowedLaytime: '2 days 00:00:00',
       usedLaytime: '2 days 01:00:00',
@@ -3963,11 +6070,161 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
   it('rejects finalizing an already final calculation', async () => {
     const { service, calculations } = buildService();
-    calculations.findOne.mockResolvedValue({ id: 'final-calculation', status: 'Final' });
+    calculations.findOne.mockResolvedValue({
+      id: 'final-calculation',
+      voyageId: VOYAGE_ID,
+      status: 'Final',
+    });
 
     await expect(service.finalize('final-calculation')).rejects.toThrow(
       ConflictException,
     );
     expect(calculations.save).not.toHaveBeenCalled();
+  });
+
+  it('captures one Charter Party currency on the parent, child, and monetary snapshots', async () => {
+    const { service, manager } = buildService();
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parent, childCalculation] = getCreatedCalculations(manager);
+    expect(parent.currency).toBe('USD');
+    expect(childCalculation.currency).toBe('USD');
+    expect(parent.inputSnapshot).toMatchObject({
+      charterParty: { settlementCurrency: 'USD' },
+      currencyAuthority: {
+        currency: 'USD',
+        source: 'charter_party_settlement_currency',
+        status: 'AVAILABLE',
+      },
+    });
+    expect(childCalculation.decisionSnapshot).toMatchObject({
+      calculationCurrency: {
+        currency: 'USD',
+        source: 'charter_party_settlement_currency',
+        authorityStatus: 'AVAILABLE',
+      },
+      demurrage: {
+        ratePerDay: 12000,
+        rateBasis: 'per_day',
+        currency: 'USD',
+        amountCurrency: 'USD',
+      },
+      despatch: {
+        rateCurrency: 'USD',
+        amountCurrency: 'USD',
+      },
+    });
+  });
+
+  it('keeps time evidence but blocks V1 authority when currency is missing', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        laytimeOperationScope: 'Loading',
+        settlementCurrency: null,
+      },
+      { laytimeOperation: 'Loading' },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parent, loading] = getCreatedCalculations(manager);
+    expect(parent).toMatchObject({
+      currency: null,
+      settlementAuthorityStatus: 'NONAUTHORITATIVE',
+      allowedLaytime: null,
+      usedLaytime: null,
+    });
+    expect(loading.allowedLaytime).not.toBeNull();
+    expect(loading.usedLaytime).not.toBeNull();
+    expect(parent.decisionSnapshot?.nonReversibleSettlement).toMatchObject({
+      reasonCode: 'CURRENCY_AUTHORITY_REQUIRED',
+      finalizationEligible: false,
+      monetaryAggregation: {
+        status: 'CURRENCY_AUTHORITY_REQUIRED',
+        currency: null,
+      },
+    });
+  });
+
+  it('blocks otherwise authoritative reversible money when currency is missing', () => {
+    const { service } = buildService();
+    const settlement = {
+      version: 1,
+      settlementStatus: 'FINAL_AUTHORITATIVE',
+      reasonCode: 'SETTLED',
+      reason: 'Settled.',
+      demurrageAmount: 12_000,
+      despatchAmount: 0,
+      loadingDemurrage: { clauseId: 'loading-rate', rate: 12_000 },
+      dischargeDemurrage: { clauseId: 'discharge-rate', rate: 12_000 },
+      loadingDespatch: null,
+      dischargeDespatch: null,
+      warnings: [],
+    };
+
+    const result = (service as any).applyReversibleCurrencyAuthority(
+      settlement,
+      null,
+    );
+
+    expect(result).toMatchObject({
+      settlementStatus: 'NONAUTHORITATIVE',
+      reasonCode: 'CURRENCY_AUTHORITY_REQUIRED',
+      currency: null,
+      currencyAuthorityStatus: 'CURRENCY_AUTHORITY_REQUIRED',
+      demurrageAmount: 12_000,
+      loadingDemurrage: { currency: null, rateBasis: 'per_day' },
+    });
+  });
+
+  it('refuses V1 finalization when the calculation version has no currency', async () => {
+    const { service, calculations, manager } = buildService();
+    const parent = {
+      id: 'currencyless-parent',
+      voyageId: VOYAGE_ID,
+      version: 1,
+      status: 'Draft',
+      currency: null,
+      parentCalculationId: null,
+      decisionSnapshot: {
+        nonReversibleSettlement: {
+          version: 1,
+          expectedOperations: ['Loading'],
+          operations: { Loading: { childCalculationId: 'loading-child' } },
+          finalizationEligible: true,
+          finalizationBlockers: [],
+        },
+      },
+    } as unknown as LaytimeCalculation;
+    calculations.findOne.mockResolvedValue(parent);
+    manager.findOneOrFail.mockResolvedValue(parent);
+
+    await expect(service.finalize(parent.id)).rejects.toThrow(
+      'CURRENCY_AUTHORITY_REQUIRED',
+    );
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('captures currency changes only on a new immutable calculation version', async () => {
+    const { service, manager, charterParty, charterParties } = buildService();
+
+    await service.calculate(VOYAGE_ID);
+    const firstParent = getCreatedCalculations(manager)[0];
+    charterParty.settlementCurrency = 'EUR';
+    charterParties.findOne.mockResolvedValue({ ...charterParty });
+    await service.calculate(VOYAGE_ID);
+    const calculations = getCreatedCalculations(manager);
+    const secondParent = calculations[2];
+
+    expect(firstParent.currency).toBe('USD');
+    expect(firstParent.inputSnapshot).toMatchObject({
+      charterParty: { settlementCurrency: 'USD' },
+    });
+    expect(secondParent.currency).toBe('EUR');
+    expect(secondParent.inputSnapshot).toMatchObject({
+      charterParty: { settlementCurrency: 'EUR' },
+    });
   });
 });

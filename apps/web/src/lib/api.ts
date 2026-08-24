@@ -1,6 +1,66 @@
+import { getApps, initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+
 // API client for the Demurrage Defender backend
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000/api/v1";
+
+async function getAccessToken(): Promise<string> {
+  const authMode = import.meta.env.VITE_AUTH_MODE;
+
+  if (authMode === "development") {
+    const token = import.meta.env.VITE_DEVELOPMENT_AUTH_TOKEN;
+
+    if (!token) {
+      throw new Error(
+        "VITE_DEVELOPMENT_AUTH_TOKEN is required in development authentication mode.",
+      );
+    }
+
+    return token;
+  }
+
+  if (authMode !== "firebase") {
+    throw new Error(
+      'VITE_AUTH_MODE must be either "firebase" or "development".',
+    );
+  }
+
+  const firebaseConfig = {
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+    appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  };
+
+  if (Object.values(firebaseConfig).some((value) => !value)) {
+    throw new Error("Firebase web authentication configuration is incomplete.");
+  }
+
+  const app = getApps()[0] ?? initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  await auth.authStateReady();
+
+  if (!auth.currentUser) {
+    throw new Error("Authentication is required.");
+  }
+
+  return auth.currentUser.getIdToken();
+}
+
+const fetch = async (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> => {
+  const headers = new Headers(init?.headers ?? {});
+  headers.set("Authorization", `Bearer ${await getAccessToken()}`);
+  headers.delete("x-organization-id");
+
+  return globalThis.fetch(input, {
+    ...init,
+    headers,
+  });
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -35,11 +95,32 @@ export interface Voyage {
   loadPort: string;
   dischargePort: string;
   laytimeOperation?: "Loading" | "Discharge";
+  bulkOperationType?: "dry_bulk" | "tanker" | null;
   laycanStart: string;
   laycanEnd: string;
   eta?: string;
   status?: string;
   [key: string]: unknown;
+}
+
+export type VoyageRiskLevel = "critical" | "elevated" | "optimal";
+
+export interface VoyageListItem extends Voyage {
+  vessel?: Vessel | null;
+  supplier: string | null;
+  receiver: string | null;
+  risk: VoyageRiskLevel;
+  exposure: number;
+  openDisputeCount: number;
+  amountUnderDispute: number;
+  calculationStale: boolean;
+  laycanExpired: boolean;
+  laytimeAllowed?: string | number | null;
+  demurrageRate?: string | number | null;
+  dispatchRate?: string | number | null;
+  timeCountingBasis?: string | null;
+  norNoticePeriod?: string | null;
+  despatchCredit?: number | null;
 }
 
 export interface Paginated<T> {
@@ -75,14 +156,61 @@ export interface SofEvent {
   [key: string]: unknown;
 }
 
+export type NorPortRelation =
+  | "INSIDE_PORT_LIMITS"
+  | "OUTSIDE_PORT_LIMITS"
+  | "UNKNOWN";
+export type NorBerthRelation = "AT_BERTH" | "NOT_AT_BERTH" | "UNKNOWN";
+export type NorWaitingPlace =
+  | "ANCHORAGE"
+  | "PILOT_STATION"
+  | "CUSTOMARY_WAITING_PLACE"
+  | "OTHER"
+  | "NONE"
+  | "UNKNOWN";
+
+export interface NorTenderLocationEvidence {
+  id: string;
+  voyageId: string;
+  operation: "Loading" | "Discharge";
+  evidenceTime: string;
+  portRelation: NorPortRelation;
+  berthRelation: NorBerthRelation;
+  waitingPlace: NorWaitingPlace;
+  source: "MANUAL" | "SOF" | "OCR" | "AIS";
+  sofDocumentId?: string | null;
+  sourceReference?: string | null;
+  note?: string | null;
+  norDocumentId?: string | null;
+  norTenderedEventId?: string | null;
+  createdByUserId: string;
+  createdAt: string;
+}
+
+export interface CreateNorTenderLocationEvidenceDto {
+  evidenceTime: string;
+  operation: "Loading" | "Discharge";
+  portRelation: NorPortRelation;
+  berthRelation: NorBerthRelation;
+  waitingPlace: NorWaitingPlace;
+  source: "MANUAL" | "SOF";
+  sofDocumentId?: string;
+  sourceReference?: string;
+  note?: string;
+  norDocumentId?: string;
+  norTenderedEventId?: string;
+}
+
 export interface LaytimeCalculation {
   id: string;
   voyageId: string;
   version: number;
-  allowedLaytime: string;
-  usedLaytime: string;
-  demurrageAmount: string;
-  despatchAmount: string;
+  allowedLaytime: string | null;
+  usedLaytime: string | null;
+  demurrageAmount: string | null;
+  despatchAmount: string | null;
+  settlementAuthorityStatus?: ReversibleSettlementStatus | null;
+  currency?: string | null;
   status: "Draft" | "Final";
   calculatedAt: string;
   warnings?: string[] | null;
@@ -137,6 +265,82 @@ export interface ReversibleLaytimeRuleSnapshot {
   clauseParameters?: Record<string, unknown> | null;
   rawText?: string | null;
   warnings?: string[] | null;
+  contractStatus?: "absent" | "disabled" | "legacy" | "v1" | "invalid" | "ambiguous";
+  settlementVersion?: 1 | null;
+  allowanceMode?: "sum_operation_allowances" | null;
+  conflictingClauseIds?: string[];
+}
+
+export type ReversibleSettlementStatus =
+  | "FINAL_AUTHORITATIVE"
+  | "PROVISIONAL"
+  | "NONAUTHORITATIVE"
+  | "LEGACY";
+
+export interface ReversibleSettlementSnapshot {
+  version?: 1 | null;
+  allowanceMode?: "sum_operation_allowances" | null;
+  cargoQuantityBasis?: "voyage_cargo_quantity" | null;
+  thresholdMode?: "combined_pool" | null;
+  settlementStatus?: ReversibleSettlementStatus;
+  reasonCode?: string;
+  reason?: string;
+  reversibleClauseId?: string | null;
+  loadingChildCalculationId?: string | null;
+  dischargeChildCalculationId?: string | null;
+  loadingAllowance?: {
+    clauseId?: string;
+    source?: "operation-specific" | "global-fallback";
+    mechanism?: "hours" | "days" | "rate";
+    allowedSeconds?: number;
+    [key: string]: unknown;
+  } | null;
+  dischargeAllowance?: {
+    clauseId?: string;
+    source?: "operation-specific" | "global-fallback";
+    mechanism?: "hours" | "days" | "rate";
+    allowedSeconds?: number;
+    [key: string]: unknown;
+  } | null;
+  loadingCountableInputSeconds?: number | null;
+  dischargeCountableInputSeconds?: number | null;
+  combinedAllowedSeconds?: number | null;
+  combinedUsedSeconds?: number;
+  combinedOverrunSeconds?: number;
+  combinedSavedSeconds?: number;
+  demurrageRate?: number | null;
+  despatchRate?: number | null;
+  despatchTimeBasis?: "all_time_saved" | "working_time_saved" | null;
+  demurrageAmount?: number;
+  despatchAmount?: number;
+  currency?: string | null;
+  currencySource?: "charter_party_settlement_currency";
+  currencyAuthorityStatus?: "AVAILABLE" | "CURRENCY_AUTHORITY_REQUIRED";
+  threshold?: {
+    operation?: "Loading" | "Discharge";
+    timestamp?: string;
+    cumulativeSeconds?: number;
+  } | null;
+  timeline?: Array<Record<string, unknown>>;
+  warnings?: string[];
+  [key: string]: unknown;
+}
+
+export function reversibleSettlementStatusLabel(
+  status?: ReversibleSettlementStatus | null,
+): string {
+  switch (status) {
+    case "FINAL_AUTHORITATIVE":
+      return "FINAL - AUTHORITATIVE";
+    case "PROVISIONAL":
+      return "PROVISIONAL";
+    case "NONAUTHORITATIVE":
+      return "NON-AUTHORITATIVE";
+    case "LEGACY":
+      return "LEGACY";
+    default:
+      return "NOT AVAILABLE";
+  }
 }
 
 export interface ReversibleLaytimeOperationAnalysis {
@@ -188,12 +392,76 @@ export interface LaytimeDecisionSnapshot {
   } | null;
   reversibleLaytimeRule?: ReversibleLaytimeRuleSnapshot | null;
   reversibleLaytimeAnalysis?: ReversibleLaytimeAnalysisSnapshot | null;
+  reversibleSettlement?: ReversibleSettlementSnapshot | null;
+  nonReversibleSettlement?: NonReversibleSettlementSnapshot | null;
   [key: string]: unknown;
+}
+
+export interface NonReversibleOperationSettlementSnapshot {
+  operation?: "Loading" | "Discharge";
+  childCalculationId?: string;
+  childLifecycle?: "Draft";
+  childVersion?: number | null;
+  allowedSeconds?: number;
+  usedSeconds?: number;
+  balanceType?: "DEMURRAGE" | "DESPATCH" | "BALANCED";
+  savedSeconds?: number;
+  excessSeconds?: number;
+  demurrageAmount?: number;
+  despatchAmount?: number;
+  despatchBasis?: "all_time_saved" | "working_time_saved" | null;
+  authorityStatus?: ReversibleSettlementStatus;
+  currency?: string | null;
+}
+
+export interface NonReversibleSettlementSnapshot {
+  version?: 1 | null;
+  settlementMode?: "separate_operation_results" | "legacy_primary_operation";
+  expectedOperationScope?: LaytimeOperationScope | null;
+  expectedOperations?: Array<"Loading" | "Discharge">;
+  settlementStatus?: ReversibleSettlementStatus;
+  reasonCode?: string;
+  operations?: Partial<Record<"Loading" | "Discharge", NonReversibleOperationSettlementSnapshot>>;
+  missingOperations?: Array<"Loading" | "Discharge">;
+  monetaryAggregation?: {
+    status?: "AVAILABLE" | "CURRENCY_AUTHORITY_REQUIRED" | "CURRENCY_MISMATCH";
+    currency?: string | null;
+    grossDemurrage?: number | null;
+    grossDespatch?: number | null;
+    netExposure?: number | null;
+    netDirection?: "NET_PAYABLE" | "NET_RECEIVABLE" | "BALANCED" | null;
+    legalNetting?: false;
+    claimableAsAggregate?: false;
+  };
+  finalizationBlockers?: string[];
 }
 
 export interface LaytimeCalculationResult {
   calculation: LaytimeCalculation;
   warnings: string[];
+}
+
+export interface LaytimeCalculationAudit {
+  calculation: {
+    id: string;
+    voyageId: string;
+    version: number;
+    status: "Draft" | "Final";
+    calculatedAt: string;
+    allowedLaytime: string | null;
+    usedLaytime: string | null;
+    excessLaytime: string | null;
+    savedLaytime: string | null;
+    demurrageAmount: string | null;
+    despatchAmount: string | null;
+    settlementAuthorityStatus?: ReversibleSettlementStatus | null;
+    currency?: string | null;
+  };
+  auditAvailable: boolean;
+  engineVersion: string | null;
+  warnings: string[];
+  inputs: Record<string, unknown> | null;
+  decisions: Record<string, unknown> | null;
 }
 
 export interface LaytimeOperationResult {
@@ -206,6 +474,7 @@ export interface LaytimeOperationResult {
   usedLaytime: string;
   demurrageAmount: string;
   despatchAmount: string;
+  currency?: string | null;
   status: "Draft" | "Final";
   calculatedAt: string;
   engineVersion?: string | null;
@@ -232,9 +501,13 @@ export interface CpClause {
 export interface CharterParty {
   id: string;
   voyageId: string;
+  laytimeOperationScope?: LaytimeOperationScope | null;
+  settlementCurrency?: string | null;
   clauses?: CpClause[] | null;
   [key: string]: unknown;
 }
+
+export type LaytimeOperationScope = "Loading" | "Discharge" | "LoadingAndDischarge";
 
 export interface CreateCpClauseDto {
   clauseType: string;
@@ -260,6 +533,24 @@ export async function getVoyageCharterParty(voyageId: string): Promise<CharterPa
 
   const result = await parseResponse(response);
   return unwrapData<CharterParty>(result);
+}
+
+export async function updateCharterParty(
+  charterPartyId: string,
+  dto: {
+    laytimeOperationScope?: LaytimeOperationScope;
+    settlementCurrency?: string | null;
+  },
+): Promise<CharterParty> {
+  const response = await fetch(
+    `${API_BASE}/charter-parties/${encodeURIComponent(charterPartyId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dto),
+    },
+  );
+  return unwrapData<CharterParty>(await parseResponse(response));
 }
 
 export async function createCpClause(
@@ -337,6 +628,7 @@ export interface BulkDispute {
   voyageId: string;
   type: string;
   amountDisputed: number | string;
+  currency?: string | null;
   status?: string;
   createdDate?: string;
   createdAt?: string;
@@ -422,15 +714,43 @@ export interface CreateVoyageDto {
   laycanEnd: string;
   eta?: string;
   laytimeOperation?: "Loading" | "Discharge";
+  bulkOperationType?: "dry_bulk" | "tanker" | null;
   laytimeAllowed?: number;
   demurrageRate?: number;
   dispatchRate?: number;
   timeCountingBasis?: string;
+  shexCalendar?: VoyageShexCalendarDto;
   norNoticePeriod?: string;
+  loadingTerms?: VoyageCommercialTermsDto;
+  dischargeTerms?: VoyageCommercialTermsDto;
   status?: "Planned" | "Active" | "Completed" | "Cancelled";
 }
 
-export interface UpdateVoyageDto extends Partial<CreateVoyageDto> {}
+export interface VoyageCommercialTermsDto {
+  laytimeAllowed?: number;
+  demurrageRate?: number;
+  dispatchRate?: number;
+  timeCountingBasis?: string;
+  shexCalendar?: VoyageShexCalendarDto;
+  norNoticePeriod?: string;
+  weatherWorking?: boolean;
+  wibon?: boolean;
+  wipon?: boolean;
+}
+
+export interface VoyageShexCalendarDto {
+  calendarVersion: 1;
+  timeZone: string;
+  holidayDates: string[];
+  saturdayExcepted: boolean;
+}
+
+export interface UpdateVoyageDto {
+  cargoQuantity?: number;
+  cargoType?: string;
+  dischargePort?: string;
+  eta?: string;
+}
 
 export interface ApiError {
   message: string;
@@ -659,7 +979,7 @@ export async function getVesselVoyages(vesselId: string): Promise<Voyage[]> {
     throw error;
   }
 }
-export async function getVoyages(): Promise<Voyage[]> {
+export async function getVoyages(): Promise<VoyageListItem[]> {
   try {
     const response = await fetch(`${API_BASE}/voyages`);
 
@@ -671,7 +991,7 @@ export async function getVoyages(): Promise<Voyage[]> {
       return [];
     }
 
-    return voyages as Voyage[];
+    return voyages as VoyageListItem[];
   } catch (error) {
     console.error("Failed to fetch voyages:", error);
     throw error;
@@ -699,6 +1019,40 @@ export async function createVoyage(
     return unwrapData<Voyage>(result);
   } catch (error) {
     console.error("Failed to create voyage:", error);
+    throw error;
+  }
+}
+
+export async function updateVoyage(
+  voyageId: string,
+  dto: UpdateVoyageDto,
+): Promise<Voyage> {
+  if (!voyageId) {
+    const error: ApiError = {
+      message: "Voyage ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/voyages/${encodeURIComponent(voyageId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(dto),
+      }
+    );
+
+    const result = await parseResponse(response);
+
+    return unwrapData<Voyage>(result);
+  } catch (error) {
+    console.error(`Failed to update voyage ${voyageId}:`, error);
     throw error;
   }
 }
@@ -867,6 +1221,43 @@ export async function updateSofEvent(
   return unwrapData<SofEvent>(result);
 }
 
+export async function getNorTenderLocationEvidence(
+  voyageId: string,
+  params?: {
+    page?: number;
+    limit?: number;
+    operation?: "Loading" | "Discharge";
+  },
+): Promise<Paginated<NorTenderLocationEvidence>> {
+  if (!voyageId) {
+    throw { message: "Voyage ID is required.", status: 400 } as ApiError;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/nor-tender-location-evidence${buildQueryString(params)}`,
+  );
+  return (await parseResponse(response)) as Paginated<NorTenderLocationEvidence>;
+}
+
+export async function createNorTenderLocationEvidence(
+  voyageId: string,
+  dto: CreateNorTenderLocationEvidenceDto,
+): Promise<NorTenderLocationEvidence> {
+  if (!voyageId) {
+    throw { message: "Voyage ID is required.", status: 400 } as ApiError;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/nor-tender-location-evidence`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dto),
+    },
+  );
+  return unwrapData<NorTenderLocationEvidence>(await parseResponse(response));
+}
+
 export async function getLaytimeCalculations(
   voyageId: string,
   params?: { page?: number; limit?: number }
@@ -911,6 +1302,26 @@ export async function getLaytimeOperationResults(
   }
 
   return (result?.data ?? []) as LaytimeOperationResult[];
+}
+
+export async function getLaytimeCalculationAudit(
+  calculationId: string,
+): Promise<LaytimeCalculationAudit> {
+  if (!calculationId) {
+    const error: ApiError = {
+      message: "Calculation ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/laytime-calculations/${encodeURIComponent(calculationId)}/audit`,
+  );
+
+  const result = await parseResponse(response);
+  return unwrapData<LaytimeCalculationAudit>(result);
 }
 
 export async function runLaytimeCalculation(

@@ -2,7 +2,7 @@ import { DataSource } from 'typeorm';
 import { databaseEntities } from '.';
 
 describe('database entities', () => {
-  it('registers all 27 tables defined in the database design document', async () => {
+  it('registers the database-design tables plus audited NOR location evidence', async () => {
     const dataSource = new DataSource({
       type: 'postgres',
       database: 'metadata-only',
@@ -35,6 +35,7 @@ describe('database entities', () => {
       'knowledge_base_chunks',
       'laytime_calculations',
       'nor_documents',
+      'nor_tender_location_evidence',
       'organizations',
       'shipment_containers',
       'shipments',
@@ -45,5 +46,25 @@ describe('database entities', () => {
       'voyage_counterparties',
       'voyages',
     ]);
+
+    const column = (table: string, property: string) =>
+      dataSource.entityMetadatas
+        .find(({ tableName }) => tableName === table)
+        ?.columns.find(({ propertyName }) => propertyName === property);
+    expect(column('charter_parties', 'settlementCurrency')).toMatchObject({
+      databaseName: 'settlement_currency',
+      isNullable: true,
+      length: '3',
+    });
+    expect(column('laytime_calculations', 'currency')).toMatchObject({
+      databaseName: 'currency',
+      isNullable: true,
+      length: '3',
+    });
+    expect(column('dispute_cases_bulk', 'currency')).toMatchObject({
+      databaseName: 'currency',
+      isNullable: true,
+      length: '3',
+    });
   });
 });

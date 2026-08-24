@@ -1,4 +1,5 @@
 import { projectLaytimeExpiry } from './laytime-expiry-projection';
+import { resolveShexCalendarContract } from './shex-calendar';
 
 const HOUR_SECONDS = 60 * 60;
 
@@ -7,7 +8,7 @@ describe('projectLaytimeExpiry', () => {
     const result = projectLaytimeExpiry({
       completionTime: new Date('2026-03-07T18:00:00Z'),
       remainingCountableSeconds: 12 * HOUR_SECONDS,
-      calendarRules: { shex: true },
+      calendarContract: resolveShexCalendarContract({ shex: true }),
     });
 
     expect(result).toEqual({
@@ -17,6 +18,8 @@ describe('projectLaytimeExpiry', () => {
         {
           start: new Date('2026-03-08T00:00:00Z'),
           end: new Date('2026-03-09T00:00:00Z'),
+          localDate: '2026-03-08',
+          reasons: ['sunday'],
         },
       ],
     });
@@ -26,7 +29,7 @@ describe('projectLaytimeExpiry', () => {
     const result = projectLaytimeExpiry({
       completionTime: new Date('2026-03-07T18:00:00Z'),
       remainingCountableSeconds: 12 * HOUR_SECONDS,
-      calendarRules: { shex: false },
+      calendarContract: resolveShexCalendarContract({ shex: false }),
     });
 
     expect(result).toEqual({
@@ -42,7 +45,7 @@ describe('projectLaytimeExpiry', () => {
     const result = projectLaytimeExpiry({
       completionTime,
       remainingCountableSeconds: 0,
-      calendarRules: { shex: true },
+      calendarContract: resolveShexCalendarContract({ shex: true }),
     });
 
     expect(result).toEqual({
@@ -56,7 +59,7 @@ describe('projectLaytimeExpiry', () => {
     const result = projectLaytimeExpiry({
       completionTime: new Date('2026-03-08T12:00:00Z'),
       remainingCountableSeconds: 6 * HOUR_SECONDS,
-      calendarRules: { shex: true },
+      calendarContract: resolveShexCalendarContract({ shex: true }),
     });
 
     expect(result).toEqual({
@@ -66,6 +69,8 @@ describe('projectLaytimeExpiry', () => {
         {
           start: new Date('2026-03-08T12:00:00Z'),
           end: new Date('2026-03-09T00:00:00Z'),
+          localDate: '2026-03-08',
+          reasons: ['sunday'],
         },
       ],
     });
@@ -75,7 +80,7 @@ describe('projectLaytimeExpiry', () => {
     const result = projectLaytimeExpiry({
       completionTime: new Date('2026-03-06T00:00:00Z'),
       remainingCountableSeconds: 10 * 24 * HOUR_SECONDS,
-      calendarRules: { shex: true },
+      calendarContract: resolveShexCalendarContract({ shex: true }),
     });
 
     expect(result.theoreticalExpiry).toEqual(
@@ -86,28 +91,69 @@ describe('projectLaytimeExpiry', () => {
       {
         start: new Date('2026-03-08T00:00:00Z'),
         end: new Date('2026-03-09T00:00:00Z'),
+        localDate: '2026-03-08',
+        reasons: ['sunday'],
       },
       {
         start: new Date('2026-03-15T00:00:00Z'),
         end: new Date('2026-03-16T00:00:00Z'),
+        localDate: '2026-03-15',
+        reasons: ['sunday'],
       },
     ]);
   });
 
   it('does not mutate its inputs', () => {
     const completionTime = new Date('2026-03-07T18:00:00Z');
-    const calendarRules = { shex: true, saturdayExcepted: false };
+    const calendarContract = resolveShexCalendarContract({ shex: true });
     const completionValue = completionTime.getTime();
-    const rulesValue = { ...calendarRules };
+    const rulesValue = { ...calendarContract };
 
     projectLaytimeExpiry({
       completionTime,
       remainingCountableSeconds: 12 * HOUR_SECONDS,
-      calendarRules,
+      calendarContract,
     });
 
     expect(completionTime.getTime()).toBe(completionValue);
-    expect(calendarRules).toEqual(rulesValue);
+    expect(calendarContract).toEqual(rulesValue);
+  });
+
+  it('uses one versioned calendar for holiday, Saturday, and Sunday projection', () => {
+    const result = projectLaytimeExpiry({
+      completionTime: new Date('2026-12-24T12:00:00Z'),
+      remainingCountableSeconds: 24 * HOUR_SECONDS,
+      calendarContract: resolveShexCalendarContract({
+        shex: true,
+        calendarVersion: 1,
+        timeZone: 'UTC',
+        holidayDates: ['2026-12-25'],
+        saturdayExcepted: true,
+      }),
+    });
+
+    expect(result.theoreticalExpiry).toEqual(
+      new Date('2026-12-28T12:00:00Z'),
+    );
+    expect(result.projectedExceptedIntervals).toEqual([
+      {
+        start: new Date('2026-12-25T00:00:00Z'),
+        end: new Date('2026-12-26T00:00:00Z'),
+        localDate: '2026-12-25',
+        reasons: ['contractual-holiday'],
+      },
+      {
+        start: new Date('2026-12-26T00:00:00Z'),
+        end: new Date('2026-12-27T00:00:00Z'),
+        localDate: '2026-12-26',
+        reasons: ['saturday'],
+      },
+      {
+        start: new Date('2026-12-27T00:00:00Z'),
+        end: new Date('2026-12-28T00:00:00Z'),
+        localDate: '2026-12-27',
+        reasons: ['sunday'],
+      },
+    ]);
   });
 });
-

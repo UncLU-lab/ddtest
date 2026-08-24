@@ -18,6 +18,7 @@ export type Shipment = {
   laycanStart?: string;
   laycanEnd?: string;
   laytimeOperation?: string;
+  bulkOperationType?: "dry_bulk" | "tanker" | null;
   laytimeAllowed?: string;
   demurrageRate?: string;
   dispatchRate?: string;

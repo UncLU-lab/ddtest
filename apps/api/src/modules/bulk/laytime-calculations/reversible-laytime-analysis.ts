@@ -29,8 +29,18 @@ export type ReversibleLaytimeRuleEvidence = {
   clauseId: string | null;
   clauseType: 'reversible_laytime';
   enabled: boolean | null;
+  contractStatus:
+    | 'absent'
+    | 'disabled'
+    | 'legacy'
+    | 'v1'
+    | 'invalid'
+    | 'ambiguous';
+  settlementVersion: 1 | null;
+  allowanceMode: 'sum_operation_allowances' | null;
   clauseParameters: Record<string, unknown> | null;
   rawText: string | null;
+  conflictingClauseIds: string[];
   warnings: string[];
 };
 
@@ -47,8 +57,8 @@ export type ReversibleLaytimeAnalysis = {
 function summarizeChild(
   child: ReversibleLaytimeChildResult,
 ): ReversibleLaytimeOperationAnalysis {
-  const allowedSeconds = Math.max(0, Math.round(child.allowedSeconds));
-  const usedSeconds = Math.max(0, Math.round(child.usedSeconds));
+  const allowedSeconds = Math.max(0, child.allowedSeconds);
+  const usedSeconds = Math.max(0, child.usedSeconds);
 
   return {
     allowedSeconds,
@@ -71,13 +81,19 @@ export function resolveReversibleLaytimeRule(
   );
 
   const warnings: string[] = [];
-  if (reversibleClauses.length > 1) {
+  const activeClauses = reversibleClauses.filter(
+    (candidate) => candidate.parameters.enabled === true,
+  );
+  const ambiguous = activeClauses.length > 1;
+  if (ambiguous) {
     warnings.push(
-      'Multiple "reversible_laytime" clauses found; the first one was used.',
+      'Multiple active "reversible_laytime" clauses found; no authoritative settlement contract was selected.',
     );
   }
 
-  const clause = reversibleClauses[0];
+  const clause = ambiguous
+    ? undefined
+    : activeClauses[0] ?? reversibleClauses[0];
   const enabled =
     clause && typeof clause.parameters.enabled === 'boolean'
       ? clause.parameters.enabled
@@ -85,12 +101,39 @@ export function resolveReversibleLaytimeRule(
         ? null
         : null;
 
+  const hasV1Fields =
+    clause?.parameters.settlementVersion !== undefined ||
+    clause?.parameters.allowanceMode !== undefined;
+  const validV1 =
+    clause?.parameters.settlementVersion === 1 &&
+    clause?.parameters.allowanceMode === 'sum_operation_allowances';
+  const contractStatus: ReversibleLaytimeRuleEvidence['contractStatus'] =
+    ambiguous
+      ? 'ambiguous'
+      : !clause
+        ? 'absent'
+        : enabled === false
+          ? 'disabled'
+          : enabled !== true
+            ? 'invalid'
+            : validV1
+              ? 'v1'
+              : hasV1Fields
+                ? 'invalid'
+                : 'legacy';
+
   return {
     clauseId: clause?.id ?? null,
     clauseType: 'reversible_laytime',
     enabled,
+    contractStatus,
+    settlementVersion: validV1 ? 1 : null,
+    allowanceMode: validV1 ? 'sum_operation_allowances' : null,
     clauseParameters: clause ? { ...clause.parameters } : null,
     rawText: clause?.rawText ?? null,
+    conflictingClauseIds: ambiguous
+      ? activeClauses.map((candidate) => candidate.id)
+      : [],
     warnings,
   };
 }

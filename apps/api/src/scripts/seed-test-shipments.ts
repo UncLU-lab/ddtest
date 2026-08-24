@@ -2,7 +2,9 @@ import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { DataSource, IsNull, Repository } from 'typeorm';
+import { createDatabaseConfig } from '../config/database.config';
+import { TenantDatabaseContextService } from '../database/tenant-database-context.service';
 import { normalizeCommercialTermsToClauses } from '../modules/bulk/charter-party-terms';
 import { CharterParty } from '../modules/bulk/entities/charter-party.entity';
 import { CpClause } from '../modules/bulk/entities/cp-clause.entity';
@@ -16,6 +18,8 @@ import { LaytimeCalculationsService } from '../modules/bulk/laytime-calculations
 import { SofDocumentsService } from '../modules/bulk/sof-documents/sof-documents.service';
 import { CharterPartiesService } from '../modules/bulk/charter-parties/charter-parties.service';
 import { VoyagesService } from '../modules/bulk/voyages/voyages.service';
+import { User } from '../modules/cross-cutting/entities/user.entity';
+import { TenantContextService } from '../modules/cross-cutting/tenant-context/tenant-context.service';
 
 const logger = new Logger('SeedTestShipments');
 const DEFAULT_ORGANIZATION_ID = '00000000-0000-0000-0000-000000000001';
@@ -561,9 +565,7 @@ const scenarios: ScenarioDefinition[] = [
       usedLaytime: '1 days 00:00:00',
       demurrageAmount: '0.00',
       despatchAmount: '6000.00',
-      auditChecks: [
-        { path: ['wibon', 'applied'], expected: true },
-      ],
+      auditChecks: [{ path: ['wibon', 'applied'], expected: true }],
     },
   }),
   buildCommonScenario('CODEX-TEST-08', 'WIPON enabled', {
@@ -621,7 +623,8 @@ const scenarios: ScenarioDefinition[] = [
         { path: ['wipon', 'applied'], expected: true },
         {
           path: ['wipon', 'limitation'],
-          expected: 'Port-limit status is not currently modeled; timing is unchanged.',
+          expected:
+            'Port-limit status is not currently modeled; timing is unchanged.',
         },
       ],
     },
@@ -757,7 +760,9 @@ function toJson(value: unknown): string {
 }
 
 function isSameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(normalizeJson(left)) === JSON.stringify(normalizeJson(right));
+  return (
+    JSON.stringify(normalizeJson(left)) === JSON.stringify(normalizeJson(right))
+  );
 }
 
 function normalizeJson(value: unknown): unknown {
@@ -769,7 +774,9 @@ function normalizeJson(value: unknown): unknown {
     return Object.keys(value as Record<string, unknown>)
       .sort()
       .reduce<Record<string, unknown>>((accumulator, key) => {
-        accumulator[key] = normalizeJson((value as Record<string, unknown>)[key]);
+        accumulator[key] = normalizeJson(
+          (value as Record<string, unknown>)[key],
+        );
         return accumulator;
       }, {});
   }
@@ -794,7 +801,29 @@ async function main(): Promise<void> {
   process.env.DB_ENABLED = process.env.DB_ENABLED ?? 'true';
   process.env.NODE_ENV = process.env.NODE_ENV ?? 'development';
 
-  const { AppModule } = require('../app.module');
+  if (
+    process.env.NODE_ENV === 'production' ||
+    process.env.AUTH_MODE !== 'development'
+  ) {
+    throw new Error(
+      'The test-shipment seed requires explicit non-production AUTH_MODE=development configuration.',
+    );
+  }
+
+  const provisioningDataSource = new DataSource(
+    createDatabaseConfig({ useApplicationRole: false }),
+  );
+  await provisioningDataSource.initialize();
+  let developmentUser: User;
+  try {
+    developmentUser = await ensureDevelopmentUser(
+      provisioningDataSource.getRepository(User),
+    );
+  } finally {
+    await provisioningDataSource.destroy();
+  }
+
+  const { AppModule } = await import('../app.module.js');
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: false,
     abortOnError: false,
@@ -806,41 +835,62 @@ async function main(): Promise<void> {
     const charterPartyRepo = app.get<Repository<CharterParty>>(
       getRepositoryToken(CharterParty),
     );
-    const cpClauseRepo = app.get<Repository<CpClause>>(getRepositoryToken(CpClause));
-    const norRepo = app.get<Repository<NorDocument>>(getRepositoryToken(NorDocument));
+    const cpClauseRepo = app.get<Repository<CpClause>>(
+      getRepositoryToken(CpClause),
+    );
+    const norRepo = app.get<Repository<NorDocument>>(
+      getRepositoryToken(NorDocument),
+    );
     const sofDocumentRepo = app.get<Repository<SofDocument>>(
       getRepositoryToken(SofDocument),
     );
-    const sofEventRepo = app.get<Repository<SofEvent>>(getRepositoryToken(SofEvent));
+    const sofEventRepo = app.get<Repository<SofEvent>>(
+      getRepositoryToken(SofEvent),
+    );
     const calculationRepo = app.get<Repository<LaytimeCalculation>>(
       getRepositoryToken(LaytimeCalculation),
     );
+    const tenantContext = app.get(TenantContextService);
+    const databaseContext = app.get(TenantDatabaseContextService);
     const voyagesService = app.get(VoyagesService);
     const charterPartiesService = app.get(CharterPartiesService);
     const sofDocumentsService = app.get(SofDocumentsService);
     const calculationsService = app.get(LaytimeCalculationsService);
 
-    const results: Array<Record<string, unknown>> = [];
+    const results = await tenantContext.run(
+      {
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        userId: developmentUser.id,
+        providerIdentity: developmentUser.firebaseUid,
+        authenticationProvider: 'development',
+      },
+      () =>
+        databaseContext.runInTransaction(async () => {
+          const seeded: Array<Record<string, unknown>> = [];
 
-    for (const scenario of scenarios) {
-      logger.log(`Starting ${scenario.reference}`);
-      const result = await seedScenario({
-        scenario,
-        vesselRepo,
-        voyageRepo,
-        charterPartyRepo,
-        cpClauseRepo,
-        norRepo,
-        sofDocumentRepo,
-        sofEventRepo,
-        calculationRepo,
-        voyagesService,
-        charterPartiesService,
-        sofDocumentsService,
-        calculationsService,
-      });
-      results.push(result);
-    }
+          for (const scenario of scenarios) {
+            logger.log(`Starting ${scenario.reference}`);
+            const result = await seedScenario({
+              scenario,
+              vesselRepo,
+              voyageRepo,
+              charterPartyRepo,
+              cpClauseRepo,
+              norRepo,
+              sofDocumentRepo,
+              sofEventRepo,
+              calculationRepo,
+              voyagesService,
+              charterPartiesService,
+              sofDocumentsService,
+              calculationsService,
+            });
+            seeded.push(result);
+          }
+
+          return seeded;
+        }),
+    );
 
     logger.log(`Seeded or verified ${results.length} CODEX test voyages.`);
     for (const result of results) {
@@ -849,6 +899,46 @@ async function main(): Promise<void> {
   } finally {
     await app.close();
   }
+}
+
+async function ensureDevelopmentUser(
+  userRepo: Repository<User>,
+): Promise<User> {
+  const firebaseUid = process.env.AUTH_DEVELOPMENT_FIREBASE_UID;
+
+  if (!firebaseUid) {
+    throw new Error('AUTH_DEVELOPMENT_FIREBASE_UID is required for seeding.');
+  }
+
+  const existing = await userRepo.findOne({ where: { firebaseUid } });
+
+  if (existing) {
+    if (
+      existing.organizationId &&
+      existing.organizationId !== DEFAULT_ORGANIZATION_ID
+    ) {
+      throw new Error(
+        'The configured development user already belongs to another organization.',
+      );
+    }
+
+    if (!existing.organizationId) {
+      existing.organizationId = DEFAULT_ORGANIZATION_ID;
+      return userRepo.save(existing);
+    }
+
+    return existing;
+  }
+
+  return userRepo.save(
+    userRepo.create({
+      firebaseUid,
+      organizationId: DEFAULT_ORGANIZATION_ID,
+      email:
+        process.env.AUTH_DEVELOPMENT_EMAIL ?? 'developer@localhost.invalid',
+      fullName: process.env.AUTH_DEVELOPMENT_NAME ?? 'Local Developer',
+    }),
+  );
 }
 
 async function seedScenario(deps: {
@@ -892,14 +982,21 @@ async function seedScenario(deps: {
     scenario,
   );
   await ensureNor(norRepo, voyage.id, scenario);
-  const sofDocument = await ensureSofDocument(sofDocumentRepo, voyage.id, scenario);
+  const sofDocument = await ensureSofDocument(
+    sofDocumentRepo,
+    voyage.id,
+    scenario,
+  );
   await ensureSofEvents(sofEventRepo, sofDocument.id, scenario);
 
-  const existingCalculations = await calculationsService.findForVoyage(voyage.id, {
-    page: 1,
-    skip: 0,
-    limit: 1,
-  } as never);
+  const existingCalculations = await calculationsService.findForVoyage(
+    voyage.id,
+    {
+      page: 1,
+      skip: 0,
+      limit: 1,
+    } as never,
+  );
 
   let calculation = existingCalculations.data[0] ?? null;
   const createdNow = !calculation;
@@ -951,7 +1048,9 @@ async function ensureVessel(
   vesselRepo: Repository<Vessel>,
   scenario: ScenarioDefinition,
 ): Promise<Vessel> {
-  const existing = await vesselRepo.findOne({ where: { imo: scenario.vessel.imo } });
+  const existing = await vesselRepo.findOne({
+    where: { imo: scenario.vessel.imo },
+  });
   if (existing) {
     return existing;
   }
@@ -959,6 +1058,7 @@ async function ensureVessel(
   return vesselRepo.save(
     vesselRepo.create({
       ...scenario.vessel,
+      organizationId: DEFAULT_ORGANIZATION_ID,
       createdAt: scenario.voyageCreatedAt,
       updatedAt: scenario.voyageUpdatedAt,
     }),
@@ -1062,7 +1162,11 @@ async function ensureCharterPartyAndClauses(
     );
   }
 
-  await ensureExtraClauses(cpClauseRepo, charterParty.id, scenario.extraClauses);
+  await ensureExtraClauses(
+    cpClauseRepo,
+    charterParty.id,
+    scenario.extraClauses,
+  );
 
   return charterPartyRepo.findOneOrFail({
     where: { id: charterParty.id },
@@ -1080,9 +1184,14 @@ async function ensureExtraClauses(
   });
 
   for (const clause of extraClauses) {
-    const found = existing.find((item) => item.clauseType === clause.clauseType);
+    const found = existing.find(
+      (item) => item.clauseType === clause.clauseType,
+    );
     if (found) {
-      if (found.rawText !== clause.rawText || !isSameJson(found.parameters, clause.parameters)) {
+      if (
+        found.rawText !== clause.rawText ||
+        !isSameJson(found.parameters, clause.parameters)
+      ) {
         throw new Error(
           `Existing extra clause ${found.id} does not match the expected ${clause.clauseType} seed data.`,
         );
@@ -1139,7 +1248,11 @@ async function ensureSofDocument(
   });
 
   if (existing) {
-    if (existing.operation !== scenario.sofDocument.operation || existing.status !== scenario.sofDocument.status || existing.filePath !== scenario.sofDocument.filePath) {
+    if (
+      existing.operation !== scenario.sofDocument.operation ||
+      existing.status !== scenario.sofDocument.status ||
+      existing.filePath !== scenario.sofDocument.filePath
+    ) {
       throw new Error(
         `Existing SOF document ${existing.id} on ${scenario.reference} does not match the expected seed data.`,
       );
@@ -1253,7 +1366,9 @@ async function verifyScenario(deps: {
 
   const voyageRecord = await voyagesService.findOne(voyage.id);
   const summary = await voyagesService.findSummary(voyage.id);
-  const charterPartyRecord = await charterPartiesService.findForVoyage(voyage.id);
+  const charterPartyRecord = await charterPartiesService.findForVoyage(
+    voyage.id,
+  );
   const sofPage = await sofDocumentsService.findForVoyage(voyage.id, {
     page: 1,
     skip: 0,
@@ -1371,7 +1486,10 @@ async function verifyScenario(deps: {
   );
 }
 
-function assertScenarioVoyage(voyage: Voyage, scenario: ScenarioDefinition): void {
+function assertScenarioVoyage(
+  voyage: Voyage,
+  scenario: ScenarioDefinition,
+): void {
   assertValue(
     voyage.vesselId.length > 0,
     scenario.reference,
@@ -1407,9 +1525,13 @@ function assertSnapshotPath(
   expected: unknown,
   reference: string,
 ): void {
-  const snapshot = path[0] === 'weatherWorking' || path[0] === 'demurrage' || path[0] === 'wibon' || path[0] === 'wipon'
-    ? decisionSnapshot
-    : inputSnapshot;
+  const snapshot =
+    path[0] === 'weatherWorking' ||
+    path[0] === 'demurrage' ||
+    path[0] === 'wibon' ||
+    path[0] === 'wipon'
+      ? decisionSnapshot
+      : inputSnapshot;
   let value: unknown = snapshot;
   for (const key of path) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {

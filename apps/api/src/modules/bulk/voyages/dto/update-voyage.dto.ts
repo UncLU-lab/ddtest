@@ -1,5 +1,32 @@
-import { PartialType } from '@nestjs/mapped-types';
-import { CreateVoyageDto } from './create-voyage.dto';
+import { Type } from 'class-transformer';
+import {
+  IsDateString,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Length,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
-// Inherits laytimeOperation and the rest of the create-voyage validation rules.
-export class UpdateVoyageDto extends PartialType(CreateVoyageDto) {}
+export class UpdateVoyageDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  cargoQuantity?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  cargoType?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(5, 10)
+  dischargePort?: string;
+
+  @IsOptional()
+  @IsDateString({ strict: true })
+  eta?: string;
+}

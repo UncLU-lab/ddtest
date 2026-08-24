@@ -12,8 +12,10 @@ export const SUPPORTED_COMMERCIAL_CLAUSE_TYPES = [
   'weather_working',
   'wibon',
   'wipon',
+  'wifpon',
   'reversible_laytime',
   'atutc',
+  'nor_commencement_schedule',
 ] as const;
 
 export interface CommercialTermsSource {
@@ -22,6 +24,12 @@ export interface CommercialTermsSource {
   demurrageRate?: number | string | null;
   dispatchRate?: number | string | null;
   timeCountingBasis?: string | null;
+  shexCalendar?: {
+    calendarVersion: 1;
+    timeZone: string;
+    holidayDates: string[];
+    saturdayExcepted: boolean;
+  } | null;
   norNoticePeriod?: string | null;
 }
 
@@ -101,7 +109,17 @@ export function normalizeCommercialTermsToClauses(
       id: `${source.id}:shex_shinc`,
       clauseType: 'shex_shinc',
       rawText: `Time counting basis: ${basis}`,
-      parameters: { shex: basis === 'SHEX' },
+      parameters: {
+        shex: basis === 'SHEX',
+        ...(basis === 'SHEX' && source.shexCalendar
+          ? {
+              calendarVersion: source.shexCalendar.calendarVersion,
+              timeZone: source.shexCalendar.timeZone,
+              holidayDates: [...source.shexCalendar.holidayDates],
+              saturdayExcepted: source.shexCalendar.saturdayExcepted,
+            }
+          : {}),
+      },
     });
   }
 

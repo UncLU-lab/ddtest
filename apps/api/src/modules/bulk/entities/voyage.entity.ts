@@ -32,11 +32,17 @@ export const CARGO_QUANTITY_UNITS = ['MT', 'BBL', 'M3'] as const;
 export type CargoQuantityUnit = (typeof CARGO_QUANTITY_UNITS)[number];
 export const LAYTIME_OPERATIONS = ['Loading', 'Discharge'] as const;
 export type LaytimeOperation = (typeof LAYTIME_OPERATIONS)[number];
+export const BULK_OPERATION_TYPES = ['dry_bulk', 'tanker'] as const;
+export type BulkOperationType = (typeof BULK_OPERATION_TYPES)[number];
 
 @Entity('voyages')
 @Check(
   'chk_voyages_status',
   `"status" IN (${VOYAGE_STATUSES.map((status) => `'${status}'`).join(', ')})`,
+)
+@Check(
+  'chk_voyages_bulk_operation_type',
+  `"bulk_operation_type" IS NULL OR "bulk_operation_type" IN ('dry_bulk', 'tanker')`,
 )
 @Index('idx_voyages_vessel', ['vesselId'])
 @Index('idx_voyages_status', ['status'])
@@ -49,7 +55,6 @@ export class Voyage extends UuidEntity {
   @Column({
     name: 'organization_id',
     type: 'uuid',
-    default: '00000000-0000-0000-0000-000000000001',
   })
   organizationId!: string;
 
@@ -118,6 +123,14 @@ export class Voyage extends UuidEntity {
     default: 'Discharge',
   })
   laytimeOperation!: LaytimeOperation;
+
+  @Column({
+    name: 'bulk_operation_type',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  bulkOperationType?: BulkOperationType | null;
 
   @Column({
     name: 'calculation_time_zone',

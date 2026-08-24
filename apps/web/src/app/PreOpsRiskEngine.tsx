@@ -11,11 +11,9 @@ import {
 } from "lucide-react";
 
 import {
-  createCpClause,
   createVoyage,
-  getVoyageCharterParty,
   getVessels,
-  type ClauseOperation,
+  type VoyageCommercialTermsDto,
 } from "../lib/api";
 import {
   useShipments,
@@ -32,32 +30,6 @@ type BackendVoyageStatus =
   | "Active"
   | "Completed"
   | "Cancelled";
-
-type OperationClausePayload = {
-  clauseType: string;
-  rawText: string;
-  parameters: Record<string, unknown>;
-  operation: ClauseOperation;
-};
-
-type ClauseWriteFailure = {
-  clauseType: string;
-  operation: ClauseOperation;
-  message: string;
-};
-
-type PartialOperationTermsState = {
-  voyageId: string;
-  charterPartyId?: string;
-  draft: ShipmentDraft;
-  intendedClauses: OperationClausePayload[];
-  succeededKeys: string[];
-  failedClauses: ClauseWriteFailure[];
-  lastError: string;
-  updatedAt: string;
-};
-
-const OPERATION_TERMS_STATE_KEY = "demurrage-defender:pending-operation-terms";
 
 function toIsoDateString(value?: string) {
   const trimmed = String(value ?? "").trim();
@@ -131,6 +103,47 @@ function parseNoticeHours(value?: string | null): number | undefined {
   return Number.isFinite(hours) ? hours : undefined;
 }
 
+function isValidHolidayDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  return candidate.getUTCFullYear() === year &&
+    candidate.getUTCMonth() === month - 1 &&
+    candidate.getUTCDate() === day;
+}
+
+function validateShexCalendar(
+  label: string,
+  terms: ShipmentCommercialTermsDraft,
+): string | null {
+  if (terms.timeCountingBasis.trim().toUpperCase() !== "SHEX") {
+    return null;
+  }
+
+  if (!terms.shexCalendar.timeZone.trim()) {
+    return `${label}: a contractual SHEX timezone is required.`;
+  }
+
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: terms.shexCalendar.timeZone });
+  } catch {
+    return `${label}: the contractual SHEX timezone must be a valid IANA timezone.`;
+  }
+
+  if (terms.shexCalendar.holidayDates.some((date) => !isValidHolidayDate(date))) {
+    return `${label}: every SHEX holiday must be a valid YYYY-MM-DD date.`;
+  }
+
+  if (new Set(terms.shexCalendar.holidayDates).size !== terms.shexCalendar.holidayDates.length) {
+    return `${label}: duplicate SHEX holiday dates are not allowed.`;
+  }
+
+  return null;
+}
+
 function validateCommercialTermsBlock(
   label: string,
   terms?: ShipmentCommercialTermsDraft | null,
@@ -174,6 +187,11 @@ function validateCommercialTermsBlock(
     }
   }
 
+  const shexCalendarError = validateShexCalendar(label, terms);
+  if (shexCalendarError) {
+    return shexCalendarError;
+  }
+
   const toggleFields: (keyof Pick<
     ShipmentCommercialTermsDraft,
     "weatherWorking" | "wibon" | "wipon"
@@ -194,307 +212,66 @@ function validateCommercialTermsBlock(
   return null;
 }
 
-function buildClausePayloads(
-  operation: ClauseOperation,
+function toVoyageCommercialTermsDto(
   terms?: ShipmentCommercialTermsDraft | null,
-  globalTerms?: ShipmentDraft | null,
-): OperationClausePayload[] {
-  const scopeLabel = operation;
-  const payloads: OperationClausePayload[] = [];
-
+): VoyageCommercialTermsDto | undefined {
   if (!terms) {
-    return payloads;
+    return undefined;
   }
 
   const laytimeAllowed = parseOptionalNumber(terms.laytimeAllowed);
-  const noticeHours =
-    parseNoticeHours(terms.norNoticePeriod) ??
-    parseNoticeHours(globalTerms?.norNoticePeriod);
-  const noticeText =
-    isFilled(terms.norNoticePeriod)
-      ? terms.norNoticePeriod
-      : globalTerms?.norNoticePeriod;
+  const demurrageRate = parseOptionalNumber(terms.demurrageRate);
+  const dispatchRate = parseOptionalNumber(terms.dispatchRate);
+  const timeCountingBasis = terms.timeCountingBasis?.trim() || undefined;
+  const norNoticePeriod = terms.norNoticePeriod?.trim() || undefined;
+  const weatherWorking = normalizeEnabledValue(terms.weatherWorking);
+  const wibon = normalizeEnabledValue(terms.wibon);
+  const wipon = normalizeEnabledValue(terms.wipon);
+
+  const dto: VoyageCommercialTermsDto = {};
 
   if (laytimeAllowed !== undefined) {
-    const parameters: Record<string, unknown> = {
-      hours: laytimeAllowed,
-    };
-
-    if (noticeHours !== undefined) {
-      parameters.noticeHours = noticeHours;
-    }
-
-    payloads.push({
-      clauseType: "laytime_rate",
-      rawText: [
-        `${scopeLabel} laytime allowed: ${laytimeAllowed}h`,
-        noticeHours !== undefined ? `NOR notice: ${noticeText}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-      parameters: { ...parameters, operation },
-      operation,
-    });
+    dto.laytimeAllowed = laytimeAllowed;
   }
 
-  const demurrageRate = parseOptionalNumber(terms.demurrageRate);
   if (demurrageRate !== undefined) {
-    payloads.push({
-      clauseType: "demurrage_rate",
-      rawText: `${scopeLabel} demurrage: $${demurrageRate.toLocaleString()}/day`,
-      parameters: { rate: demurrageRate, operation },
-      operation,
-    });
+    dto.demurrageRate = demurrageRate;
   }
 
-  const dispatchRate = parseOptionalNumber(terms.dispatchRate);
   if (dispatchRate !== undefined) {
-    payloads.push({
-      clauseType: "despatch",
-      rawText: `${scopeLabel} despatch: $${dispatchRate.toLocaleString()}/day`,
-      parameters: { rate: dispatchRate, operation },
-      operation,
-    });
+    dto.dispatchRate = dispatchRate;
   }
 
-  const basis = String(terms.timeCountingBasis ?? "").trim().toUpperCase();
-  if (basis === "SHEX" || basis === "SHINC") {
-    payloads.push({
-      clauseType: "shex_shinc",
-      rawText: `${scopeLabel} time counting basis: ${basis}`,
-      parameters: { shex: basis === "SHEX", operation },
-      operation,
-    });
+  if (timeCountingBasis !== undefined) {
+    dto.timeCountingBasis = timeCountingBasis;
   }
 
-  for (const [clauseType, key] of [
-    ["weather_working", "weatherWorking"],
-    ["wibon", "wibon"],
-    ["wipon", "wipon"],
-  ] as const) {
-    const enabled = normalizeEnabledValue(terms[key]);
-    if (enabled === undefined) {
-      continue;
-    }
-
-    payloads.push({
-      clauseType,
-      rawText: `${scopeLabel} ${clauseType.replace(/_/g, " ")}: ${enabled ? "enabled" : "disabled"}`,
-      parameters: { enabled, operation },
-      operation,
-    });
-  }
-
-  return payloads;
-}
-
-function buildClauseKey(
-  charterPartyId: string,
-  payload: OperationClausePayload,
-) {
-  return `${charterPartyId}:${payload.clauseType}:${payload.operation}`;
-}
-
-function getExistingClauseKeys(
-  charterPartyId: string,
-  clauses?: any[] | null,
-) {
-  const keys = new Set<string>();
-
-  for (const clause of clauses ?? []) {
-    const operation =
-      clause?.parameters?.operation ??
-      clause?.operation ??
-      null;
-
-    if (operation !== "Loading" && operation !== "Discharge") {
-      continue;
-    }
-
-    keys.add(
-      `${charterPartyId}:${clause.clauseType}:${operation}`,
-    );
-  }
-
-  return keys;
-}
-
-function formatOperationClauseLabel(payload: OperationClausePayload) {
-  return `${payload.operation} ${payload.clauseType.replace(/_/g, " ")}`;
-}
-
-function serializePendingOperationTerms(
-  state: PartialOperationTermsState | null,
-) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  if (!state) {
-    window.sessionStorage.removeItem(OPERATION_TERMS_STATE_KEY);
-    return;
-  }
-
-  window.sessionStorage.setItem(
-    OPERATION_TERMS_STATE_KEY,
-    JSON.stringify(state),
-  );
-}
-
-function hydratePendingOperationTermsState() {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  const raw = window.sessionStorage.getItem(OPERATION_TERMS_STATE_KEY);
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as PartialOperationTermsState;
-
-    if (!parsed?.voyageId || !Array.isArray(parsed?.intendedClauses)) {
-      return null;
-    }
-
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-async function reconcileOperationSpecificTerms(
-  voyageId: string,
-  draft: ShipmentDraft,
-): Promise<PartialOperationTermsState | null> {
-  const clausePayloads = [
-    ...buildClausePayloads(
-      "Loading",
-      draft.loadingTerms ?? null,
-      draft,
-    ),
-    ...buildClausePayloads(
-      "Discharge",
-      draft.dischargeTerms ?? null,
-      draft,
-    ),
-  ];
-
-  if (clausePayloads.length === 0) {
-    return null;
-  }
-
-  let charterParty: Awaited<ReturnType<typeof getVoyageCharterParty>> | null =
-    null;
-
-  try {
-    charterParty = await getVoyageCharterParty(voyageId);
-  } catch (error: any) {
-    return {
-      voyageId,
-      draft,
-      intendedClauses: clausePayloads,
-      succeededKeys: [],
-      failedClauses: clausePayloads.map((payload) => ({
-        clauseType: payload.clauseType,
-        operation: payload.operation,
-        message:
-          error?.message ??
-          "Unable to load charter party for operation-specific clause reconciliation.",
-      })),
-      lastError:
-        error?.message ??
-        "Unable to load charter party for operation-specific clause reconciliation.",
-      updatedAt: new Date().toISOString(),
+  if (timeCountingBasis?.toUpperCase() === "SHEX") {
+    dto.shexCalendar = {
+      calendarVersion: 1,
+      timeZone: terms.shexCalendar.timeZone.trim(),
+      holidayDates: [...terms.shexCalendar.holidayDates].sort(),
+      saturdayExcepted: terms.shexCalendar.saturdayExcepted === "Yes",
     };
   }
 
-  const charterPartyId = charterParty.id;
-  const succeededKeys = new Set<string>();
-  let existingKeys = getExistingClauseKeys(
-    charterPartyId,
-    charterParty.clauses ?? [],
-  );
-  const failedClauses: ClauseWriteFailure[] = [];
-
-  for (const payload of clausePayloads) {
-    const key = buildClauseKey(charterPartyId, payload);
-
-    if (existingKeys.has(key)) {
-      succeededKeys.add(key);
-      continue;
-    }
-
-    try {
-      await createCpClause(charterPartyId, {
-        clauseType: payload.clauseType,
-        rawText: payload.rawText,
-        parameters: payload.parameters,
-      });
-      succeededKeys.add(key);
-      existingKeys.add(key);
-      continue;
-    } catch (error: any) {
-      try {
-        charterParty = await getVoyageCharterParty(voyageId);
-        existingKeys = getExistingClauseKeys(
-          charterParty.id,
-          charterParty.clauses ?? [],
-        );
-
-        if (existingKeys.has(key)) {
-          succeededKeys.add(key);
-          continue;
-        }
-      } catch {
-        // Keep the original failure below.
-      }
-
-      failedClauses.push({
-        clauseType: payload.clauseType,
-        operation: payload.operation,
-        message:
-          error?.message ??
-          `Unable to save ${payload.operation} ${payload.clauseType}.`,
-      });
-    }
+  if (norNoticePeriod !== undefined) {
+    dto.norNoticePeriod = norNoticePeriod;
   }
 
-  try {
-    charterParty = await getVoyageCharterParty(voyageId);
-    existingKeys = getExistingClauseKeys(
-      charterParty.id,
-      charterParty.clauses ?? [],
-    );
-  } catch {
-    // Use the reconciliation result we already have.
+  if (weatherWorking !== undefined) {
+    dto.weatherWorking = weatherWorking;
   }
 
-  const missingClauses = clausePayloads.filter((payload) => {
-    const key = buildClauseKey(
-      charterParty?.id ?? charterPartyId,
-      payload,
-    );
-    return !existingKeys.has(key) && !succeededKeys.has(key);
-  });
-
-  if (failedClauses.length > 0 || missingClauses.length > 0) {
-    return {
-      voyageId,
-      charterPartyId,
-      draft,
-      intendedClauses: clausePayloads,
-      succeededKeys: Array.from(succeededKeys),
-      failedClauses,
-      lastError:
-        failedClauses[failedClauses.length - 1]?.message ??
-        "Some operation-specific Charter Party terms could not be saved.",
-      updatedAt: new Date().toISOString(),
-    };
+  if (wibon !== undefined) {
+    dto.wibon = wibon;
   }
 
-  return null;
+  if (wipon !== undefined) {
+    dto.wipon = wipon;
+  }
+
+  return Object.keys(dto).length > 0 ? dto : undefined;
 }
 
 function SectionEyebrow({
@@ -968,7 +745,6 @@ export default function PreOpsRiskEngine() {
 
   const {
     draft,
-    addShipment,
     clearDraft,
     reload,
   } = useShipments();
@@ -986,57 +762,7 @@ export default function PreOpsRiskEngine() {
     useState<Scenario>("likely");
 
   const [creating, setCreating] = useState(false);
-  const [retryingOperationTerms, setRetryingOperationTerms] = useState(false);
-  const [partialOperationTerms, setPartialOperationTerms] =
-    useState<PartialOperationTermsState | null>(() =>
-      hydratePendingOperationTermsState(),
-    );
   const [postSubmitError, setPostSubmitError] = useState<string | null>(null);
-
-  const storePartialOperationTerms = (
-    nextState: PartialOperationTermsState | null,
-  ) => {
-    setPartialOperationTerms(nextState);
-    serializePendingOperationTerms(nextState);
-  };
-
-  const getMissingClauseSummaries = (
-    state: PartialOperationTermsState,
-  ) => {
-    const succeeded = new Set(state.succeededKeys);
-
-    return state.intendedClauses.filter((payload) => {
-      const key = buildClauseKey(state.charterPartyId ?? state.voyageId, payload);
-
-      return !succeeded.has(key);
-    });
-  };
-
-  const reconcilePendingTerms = async (
-    targetState: PartialOperationTermsState,
-  ) => {
-    const reconciliation = await reconcileOperationSpecificTerms(
-      targetState.voyageId,
-      targetState.draft,
-    );
-
-    if (!reconciliation) {
-      storePartialOperationTerms(null);
-      return true;
-    }
-
-    storePartialOperationTerms({
-      ...targetState,
-      charterPartyId:
-        reconciliation.charterPartyId ?? targetState.charterPartyId,
-      succeededKeys: reconciliation.succeededKeys,
-      failedClauses: reconciliation.failedClauses,
-      lastError: reconciliation.lastError,
-      updatedAt: reconciliation.updatedAt,
-    });
-
-    return false;
-  };
 
   const navigateToShipmentDetail = (voyageId: string, draftSnapshot: ShipmentDraft) => {
     reload();
@@ -1047,10 +773,10 @@ export default function PreOpsRiskEngine() {
   };
 
   const onProceed = async () => {
-    if (creating || retryingOperationTerms) return;
+    if (creating) return;
 
-    if (partialOperationTerms) {
-      return;
+    if (postSubmitError) {
+      setPostSubmitError(null);
     }
 
     setCreating(true);
@@ -1065,6 +791,7 @@ export default function PreOpsRiskEngine() {
             demurrageRate: draft.demurrageRate,
             dispatchRate: draft.dispatchRate,
             timeCountingBasis: draft.timeCountingBasis,
+            shexCalendar: draft.shexCalendar,
             norNoticePeriod: draft.norNoticePeriod,
             weatherWorking: "",
             wibon: "",
@@ -1173,6 +900,10 @@ export default function PreOpsRiskEngine() {
           draft.laytimeOperation ||
           "Discharge",
 
+        bulkOperationType:
+          draft.bulkOperationType ||
+          undefined,
+
         eta:
           toIsoDateString(draft.eta),
 
@@ -1195,17 +926,32 @@ export default function PreOpsRiskEngine() {
           draft.timeCountingBasis?.trim() ||
           undefined,
 
+        shexCalendar:
+          draft.timeCountingBasis?.trim().toUpperCase() === "SHEX"
+            ? {
+                calendarVersion: 1 as const,
+                timeZone: draft.shexCalendar.timeZone.trim(),
+                holidayDates: [...draft.shexCalendar.holidayDates].sort(),
+                saturdayExcepted: draft.shexCalendar.saturdayExcepted === "Yes",
+              }
+            : undefined,
+
         norNoticePeriod:
           draft.norNoticePeriod?.trim() ||
           undefined,
 
+        loadingTerms:
+          toVoyageCommercialTermsDto(
+            draft.loadingTerms ?? null,
+          ),
+
+        dischargeTerms:
+          toVoyageCommercialTermsDto(
+            draft.dischargeTerms ?? null,
+          ),
+
         status: mapDraftVoyageStatus(),
       };
-
-      console.log(
-        "Creating voyage with DTO:",
-        dto
-      );
 
       const createdVoyage =
         await createVoyage(dto);
@@ -1221,22 +967,6 @@ export default function PreOpsRiskEngine() {
         );
       }
 
-      const operationTermsState =
-        await reconcileOperationSpecificTerms(voyageId, draft);
-
-      if (operationTermsState) {
-        storePartialOperationTerms({
-          ...operationTermsState,
-          draft,
-          voyageId,
-        });
-        setPostSubmitError(
-          "Shipment created, but some operation-specific Charter Party terms could not be saved.",
-        );
-        reload();
-        return;
-      }
-
       navigateToShipmentDetail(voyageId, draft);
     } catch (error: any) {
       console.error(
@@ -1244,57 +974,13 @@ export default function PreOpsRiskEngine() {
         error
       );
 
-      alert(
+      setPostSubmitError(
         error?.message ||
           "Failed to create shipment."
       );
     } finally {
       setCreating(false);
     }
-  };
-
-  const retryMissingTerms = async () => {
-    if (!partialOperationTerms || retryingOperationTerms) {
-      return;
-    }
-
-    setRetryingOperationTerms(true);
-    setPostSubmitError(null);
-
-    try {
-      const reconciled = await reconcilePendingTerms(partialOperationTerms);
-
-      if (reconciled) {
-        navigateToShipmentDetail(
-          partialOperationTerms.voyageId,
-          partialOperationTerms.draft,
-        );
-        return;
-      }
-
-      setPostSubmitError(
-        "Some operation-specific Charter Party terms still need attention.",
-      );
-    } catch (error: any) {
-      setPostSubmitError(
-        error?.message ??
-          "Unable to retry missing operation-specific Charter Party terms.",
-      );
-    } finally {
-      setRetryingOperationTerms(false);
-    }
-  };
-
-  const continueWithoutMissingTerms = () => {
-    if (!partialOperationTerms) {
-      return;
-    }
-
-    storePartialOperationTerms(null);
-    navigateToShipmentDetail(
-      partialOperationTerms.voyageId,
-      partialOperationTerms.draft,
-    );
   };
 
   const onBackToShipment = () => {
@@ -2003,135 +1689,31 @@ export default function PreOpsRiskEngine() {
           </div>
 
             <div className="flex flex-col gap-2">
-              {partialOperationTerms ? (
-                <div
-                  className="rounded-xl border p-[12px_13px]"
-                  style={{
-                    borderColor: "#F59E0B",
-                    borderWidth: "0.75px",
-                    backgroundColor: "#FFFBEB",
-                  }}
-                >
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle size={15} color="#B45309" />
-                    <div className="min-w-0">
-                      <p
-                        style={{
-                          fontSize: "12px",
-                          fontWeight: 500,
-                          color: "#7B341E",
-                          marginBottom: "4px",
-                        }}
-                      >
-                        Shipment created, but some operation-specific Charter Party terms could not be saved.
-                      </p>
-                      <p
-                        style={{
-                          fontSize: "11px",
-                          color: "#92400E",
-                          lineHeight: 1.4,
-                          marginBottom: "8px",
-                        }}
-                      >
-                        Voyage ID {partialOperationTerms.voyageId}. {getMissingClauseSummaries(partialOperationTerms).length} term group(s) still need retry.
-                      </p>
+              <button
+                onClick={onProceed}
+                disabled={creating}
+                className="w-full flex items-center justify-center gap-1.5 rounded-lg"
+                style={{
+                  height: "38px",
+                  fontSize: "13px",
+                  fontWeight: 500,
+                  color: "#ffffff",
+                  backgroundColor: creating
+                    ? "#93A3C7"
+                    : "#1A4ED8",
+                  border: "none",
+                }}
+              >
+                {creating
+                  ? "Creating..."
+                  : "Go to ops timeline"}
 
-                      <div
-                        style={{
-                          fontSize: "11px",
-                          color: "#92400E",
-                          lineHeight: 1.5,
-                          marginBottom: "8px",
-                        }}
-                      >
-                        <p>
-                          Saved:{" "}
-                          {partialOperationTerms.intendedClauses
-                            .filter((payload) =>
-                              partialOperationTerms.succeededKeys.includes(
-                                buildClauseKey(
-                                  partialOperationTerms.charterPartyId ??
-                                    partialOperationTerms.voyageId,
-                                  payload,
-                                ),
-                              ),
-                            )
-                            .map(formatOperationClauseLabel)
-                            .join(", ") || "None yet"}
-                        </p>
-                        <p>
-                          Pending:{" "}
-                          {getMissingClauseSummaries(partialOperationTerms)
-                            .map(formatOperationClauseLabel)
-                            .join(", ") || "None"}
-                        </p>
-                      </div>
-
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          onClick={retryMissingTerms}
-                          disabled={retryingOperationTerms}
-                          className="inline-flex items-center justify-center gap-1.5 rounded-md border"
-                          style={{
-                            height: "34px",
-                            padding: "0 10px",
-                            fontSize: "12px",
-                            color: "#7B341E",
-                            borderColor: "#F59E0B",
-                            borderWidth: "0.5px",
-                            backgroundColor: "#ffffff",
-                          }}
-                        >
-                          {retryingOperationTerms
-                            ? "Retrying..."
-                            : "Retry missing terms"}
-                        </button>
-
-                        <button
-                          onClick={continueWithoutMissingTerms}
-                          className="inline-flex items-center justify-center gap-1.5 rounded-md"
-                          style={{
-                            height: "34px",
-                            padding: "0 10px",
-                            fontSize: "12px",
-                            color: "#ffffff",
-                            backgroundColor: "#B45309",
-                            border: "none",
-                          }}
-                        >
-                          Continue to shipment
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  onClick={onProceed}
-                  disabled={creating}
-                  className="w-full flex items-center justify-center gap-1.5 rounded-lg"
-                  style={{
-                    height: "38px",
-                    fontSize: "13px",
-                    fontWeight: 500,
-                    color: "#ffffff",
-                    backgroundColor: creating
-                      ? "#93A3C7"
-                      : "#1A4ED8",
-                    border: "none",
-                  }}
-                >
-                  {creating
-                    ? "Creating..."
-                    : "Go to ops timeline"}
-
-                  {!creating && (
-                    <ArrowUpRight
-                      size={13}
-                    />
-                  )}
-                </button>
-              )}
+                {!creating && (
+                  <ArrowUpRight
+                    size={13}
+                  />
+                )}
+              </button>
 
               {postSubmitError && (
                 <div

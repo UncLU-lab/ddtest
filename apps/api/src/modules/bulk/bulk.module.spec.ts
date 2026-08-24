@@ -2,6 +2,7 @@ import { Global, INestApplication, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { TenantDatabaseContextService } from '../../database/tenant-database-context.service';
 import { BulkModule } from './bulk.module';
 import { CalculationPeriod } from './entities/calculation-period.entity';
 import { CharterParty } from './entities/charter-party.entity';
@@ -10,6 +11,7 @@ import { CpClause } from './entities/cp-clause.entity';
 import { DisputeCaseBulk } from './entities/dispute-case-bulk.entity';
 import { LaytimeCalculation } from './entities/laytime-calculation.entity';
 import { NorDocument } from './entities/nor-document.entity';
+import { NorTenderLocationEvidence } from './entities/nor-tender-location-evidence.entity';
 import { SofDocument } from './entities/sof-document.entity';
 import { SofEvent } from './entities/sof-event.entity';
 import { Vessel } from './entities/vessel.entity';
@@ -24,6 +26,7 @@ const ENTITIES = [
   DisputeCaseBulk,
   LaytimeCalculation,
   NorDocument,
+  NorTenderLocationEvidence,
   SofDocument,
   SofEvent,
   Vessel,
@@ -62,6 +65,8 @@ const EXPECTED_ROUTES = [
   'GET /voyages/:voyageId/nor-documents',
   'POST /voyages/:voyageId/nor-documents',
   'PATCH /nor-documents/:norId',
+  'GET /voyages/:voyageId/nor-tender-location-evidence',
+  'POST /voyages/:voyageId/nor-tender-location-evidence',
   'GET /voyages/:voyageId/laytime-calculations',
   'POST /voyages/:voyageId/laytime-calculations',
   'GET /laytime-calculations/:calculationId',
@@ -82,8 +87,14 @@ const EXPECTED_ROUTES = [
 /** Stands in for the connection the global DatabaseModule would provide. */
 @Global()
 @Module({
-  providers: [{ provide: DataSource, useValue: { transaction: jest.fn() } }],
-  exports: [DataSource],
+  providers: [
+    { provide: DataSource, useValue: { transaction: jest.fn() } },
+    {
+      provide: TenantDatabaseContextService,
+      useValue: { transaction: jest.fn(), createRepositoryProxy: jest.fn() },
+    },
+  ],
+  exports: [DataSource, TenantDatabaseContextService],
 })
 class FakeDataSourceModule {}
 

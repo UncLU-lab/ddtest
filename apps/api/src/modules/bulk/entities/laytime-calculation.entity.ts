@@ -12,6 +12,8 @@ import { intervalTransformer } from '../laytime/interval.util';
 import { CalculationPeriod } from './calculation-period.entity';
 import { Voyage } from './voyage.entity';
 import type { LaytimeOperation } from './voyage.entity';
+import type { LaytimeSettlementAuthorityStatus } from '../laytime-calculations/laytime-settlement-authority';
+import type { SettlementCurrency } from '../currency/settlement-currency';
 
 export const LAYTIME_CALCULATION_STATUSES = ['Draft', 'Final'] as const;
 export type LaytimeCalculationStatus =
@@ -55,15 +57,17 @@ export class LaytimeCalculation extends UuidEntity {
     name: 'allowed_laytime',
     type: 'interval',
     transformer: intervalTransformer,
+    nullable: true,
   })
-  allowedLaytime!: string;
+  allowedLaytime!: string | null;
 
   @Column({
     name: 'used_laytime',
     type: 'interval',
     transformer: intervalTransformer,
+    nullable: true,
   })
-  usedLaytime!: string;
+  usedLaytime!: string | null;
 
   @Column({
     name: 'demurrage_amount',
@@ -71,8 +75,9 @@ export class LaytimeCalculation extends UuidEntity {
     precision: 12,
     scale: 2,
     default: 0,
+    nullable: true,
   })
-  demurrageAmount!: string;
+  demurrageAmount!: string | null;
 
   @Column({
     name: 'despatch_amount',
@@ -80,8 +85,21 @@ export class LaytimeCalculation extends UuidEntity {
     precision: 12,
     scale: 2,
     default: 0,
+    nullable: true,
   })
-  despatchAmount!: string;
+  despatchAmount!: string | null;
+
+  @Column({
+    name: 'settlement_authority_status',
+    type: 'varchar',
+    length: 30,
+    nullable: true,
+  })
+  settlementAuthorityStatus?: LaytimeSettlementAuthorityStatus | null;
+
+  /** Contractual currency captured immutably for this calculation version. */
+  @Column({ type: 'varchar', length: 3, nullable: true, update: false })
+  currency?: SettlementCurrency | null;
 
   @Column({ type: 'varchar', length: 20, default: 'Draft' })
   status!: LaytimeCalculationStatus;

@@ -6,34 +6,56 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
+import { EntityManager, In, IsNull, Repository } from 'typeorm';
+import { TenantDatabaseContextService } from '../../../database/tenant-database-context.service';
 import { Paginated, paginate } from '../../../common/dto/paginated';
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 import { CalculationPeriod } from '../entities/calculation-period.entity';
 import { CharterParty } from '../entities/charter-party.entity';
 import { LaytimeCalculation } from '../entities/laytime-calculation.entity';
 import { NorDocument } from '../entities/nor-document.entity';
+import { NorTenderLocationEvidence } from '../entities/nor-tender-location-evidence.entity';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
 import {
   normalizeCommercialTermsToClauses,
   resolveClausesForOperation,
 } from '../charter-party-terms';
-import { LAYTIME_ENGINE_VERSION, runLaytimeEngine } from '../laytime/laytime.engine';
+import {
+  LAYTIME_ENGINE_VERSION,
+  runLaytimeEngine,
+} from '../laytime/laytime.engine';
 import {
   EngineClause,
   LaytimeEngineError,
   type LaytimeEngineResult,
 } from '../laytime/laytime.types';
+import type { NorLocationQualificationResult } from '../laytime/nor-location-qualification';
 import { secondsToInterval } from '../laytime/interval.util';
-import { type LaytimeOperation } from '../entities/voyage.entity';
+import {
+  type BulkOperationType,
+  type LaytimeOperation,
+} from '../entities/voyage.entity';
 import { VoyagesService } from '../voyages/voyages.service';
+import { TenantContextService } from '../../cross-cutting/tenant-context/tenant-context.service';
 import {
   analyzeReversibleLaytime,
   resolveReversibleLaytimeRule,
   type ReversibleLaytimeAnalysis,
   type ReversibleLaytimeRuleEvidence,
 } from './reversible-laytime-analysis';
+import { randomUUID } from 'node:crypto';
+import {
+  resolveReversibleLaytimeSettlement,
+  type ReversibleAllowanceInput,
+  type ReversibleSettlementResult,
+  type ReversibleSettlementRuleInput,
+} from './reversible-laytime-settlement';
+import {
+  resolveNonReversibleSettlement,
+  type NonReversibleSettlementResult,
+} from './non-reversible-laytime-settlement';
+import type { SettlementCurrency } from '../currency/settlement-currency';
 
 /** A calculation plus the engine notes that produced it. */
 export interface CalculationResult {
@@ -122,6 +144,7 @@ type OperationChildAudit = {
 };
 
 type PreparedOperationChildCalculation = {
+  childCalculationId: string;
   operation: LaytimeOperation;
   childClauses: ResolvedClause[];
   childClauseWarnings: string[];
@@ -133,7 +156,11 @@ type PreparedOperationChildCalculation = {
 };
 
 type CreateOperationChildResultInput = {
-  parentCalculation: Pick<LaytimeCalculation, 'id' | 'voyageId' | 'version' | 'status'>;
+  id?: string;
+  parentCalculation: Pick<
+    LaytimeCalculation,
+    'id' | 'voyageId' | 'version' | 'status'
+  >;
   operation: Exclude<LaytimeOperation, null>;
   allowedLaytime: string;
   usedLaytime: string;
@@ -143,6 +170,8 @@ type CreateOperationChildResultInput = {
   decisionSnapshot: Record<string, unknown>;
   warnings: string[];
   engineVersion: string | null;
+  settlementAuthorityStatus?: LaytimeCalculation['settlementAuthorityStatus'];
+  currency: SettlementCurrency | null;
   periods: Array<{
     startTime: Date;
     endTime: Date;
@@ -154,6 +183,8 @@ type CreateOperationChildResultInput = {
 
 const GLOBAL_SOF_EVENT_TYPES = new Set([
   'NOR_TENDERED',
+  'VESSEL_READY_IN_ALL_RESPECTS',
+  'FREE_PRATIQUE_GRANTED',
   'RAIN_STOPPAGE',
   'RAIN_COMMENCED',
   'WEATHER_STOPPAGE',
@@ -187,12 +218,14 @@ export interface CalculationAuditResponse {
     version: number;
     status: LaytimeCalculation['status'];
     calculatedAt: Date;
-    allowedLaytime: string;
-    usedLaytime: string;
+    allowedLaytime: string | null;
+    usedLaytime: string | null;
     excessLaytime: string | null;
     savedLaytime: string | null;
-    demurrageAmount: string;
-    despatchAmount: string;
+    demurrageAmount: string | null;
+    despatchAmount: string | null;
+    settlementAuthorityStatus: LaytimeCalculation['settlementAuthorityStatus'];
+    currency: SettlementCurrency | null;
   };
   auditAvailable: boolean;
   engineVersion: string | null;
@@ -216,8 +249,11 @@ export class LaytimeCalculationsService {
     private readonly sofDocuments: Repository<SofDocument>,
     @InjectRepository(SofEvent)
     private readonly sofEvents: Repository<SofEvent>,
+    @InjectRepository(NorTenderLocationEvidence)
+    private readonly norTenderLocationEvidence: Repository<NorTenderLocationEvidence>,
     private readonly voyagesService: VoyagesService,
-    private readonly dataSource: DataSource,
+    private readonly databaseContext: TenantDatabaseContextService,
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   async findForVoyage(
@@ -237,11 +273,15 @@ export class LaytimeCalculationsService {
   }
 
   async findOne(id: string): Promise<LaytimeCalculation> {
-    const calculation = await this.calculations.findOne({ where: { id } });
+    const calculation = await this.calculations.findOne({
+      where: { id },
+    });
 
     if (!calculation) {
       throw new NotFoundException(`Laytime calculation ${id} not found`);
     }
+
+    await this.voyagesService.ensureExists(calculation.voyageId);
 
     return calculation;
   }
@@ -305,15 +345,43 @@ export class LaytimeCalculationsService {
    */
   async getAudit(id: string): Promise<CalculationAuditResponse> {
     const calculation = await this.findOne(id);
-    const allowedSeconds = this.readSnapshotNumber(
-      calculation.decisionSnapshot,
-      'allowedLaytime',
-      'allowedSeconds',
-    );
-    const usedSeconds = this.readSnapshotNumber(
-      calculation.decisionSnapshot,
-      'netUsedSeconds',
-    );
+    const decisionSnapshot = calculation.decisionSnapshot as
+      | Record<string, unknown>
+      | null
+      | undefined;
+    const reversibleSettlement =
+      decisionSnapshot &&
+      typeof decisionSnapshot === 'object' &&
+      !Array.isArray(decisionSnapshot)
+        ? (decisionSnapshot.reversibleSettlement as
+            | Record<string, unknown>
+            | undefined)
+        : undefined;
+    const useReversibleSettlementTotals =
+      reversibleSettlement?.settlementStatus !== 'LEGACY' &&
+      typeof reversibleSettlement?.combinedAllowedSeconds === 'number';
+    const nonReversibleSettlement = decisionSnapshot
+      ?.nonReversibleSettlement as Record<string, unknown> | undefined;
+    const useNonReversibleSummary = nonReversibleSettlement?.version === 1;
+    const allowedSeconds =
+      useNonReversibleSummary
+        ? undefined
+        : useReversibleSettlementTotals
+        ? this.readSnapshotNumber(reversibleSettlement, 'combinedAllowedSeconds')
+        : this.readSnapshotNumber(
+            calculation.decisionSnapshot,
+            'allowedLaytime',
+            'allowedSeconds',
+          );
+    const usedSeconds =
+      useNonReversibleSummary
+        ? undefined
+        : useReversibleSettlementTotals
+        ? this.readSnapshotNumber(reversibleSettlement, 'combinedUsedSeconds')
+        : this.readSnapshotNumber(
+            calculation.decisionSnapshot,
+            'netUsedSeconds',
+          );
 
     return {
       calculation: {
@@ -321,6 +389,9 @@ export class LaytimeCalculationsService {
         voyageId: calculation.voyageId,
         version: calculation.version,
         status: calculation.status,
+        settlementAuthorityStatus:
+          calculation.settlementAuthorityStatus ?? null,
+        currency: calculation.currency ?? null,
         calculatedAt: calculation.calculatedAt,
         allowedLaytime: calculation.allowedLaytime,
         usedLaytime: calculation.usedLaytime,
@@ -365,10 +436,15 @@ export class LaytimeCalculationsService {
         `Voyage ${voyageId} has no charter party; attach one before calculating laytime`,
       );
     }
+    const settlementCurrency = charterParty.settlementCurrency ?? null;
 
-    const [norDocuments, sofSource] = await Promise.all([
+    const [norDocuments, sofSource, locationEvidence] = await Promise.all([
       this.norDocuments.find({ where: { voyageId } }),
       this.loadSofEvents(voyageId, warnings),
+      this.norTenderLocationEvidence.find({
+        where: { voyageId },
+        order: { evidenceTime: 'ASC', createdAt: 'ASC', id: 'ASC' },
+      }),
     ]);
     const documentSelection = this.selectSofDocumentsForEngine(
       voyage.laytimeOperation,
@@ -404,11 +480,14 @@ export class LaytimeCalculationsService {
     let result;
     try {
       result = runLaytimeEngine({
+        voyageId: voyage.id,
         cargoQuantity: Number(voyage.cargoQuantity),
         clauses: engineClauses,
         norDocuments,
         sofEvents,
+        norTenderLocationEvidence: locationEvidence,
         operation: voyage.laytimeOperation,
+        bulkOperationType: voyage.bulkOperationType ?? null,
       });
     } catch (error) {
       if (error instanceof LaytimeEngineError) {
@@ -425,6 +504,7 @@ export class LaytimeCalculationsService {
       norDocuments,
       sofSource.documents,
       sofSource.events,
+      locationEvidence,
     );
     const operationChildren: OperationChildAudit = {
       requestedOperations: this.sortOperations(childPlans.requestedOperations),
@@ -456,11 +536,43 @@ export class LaytimeCalculationsService {
         : null,
       reversibleLaytimeRule.enabled === true,
     );
+    const reversibleSettlement = this.applyReversibleCurrencyAuthority(
+      this.resolveReversibleSettlement(
+        reversibleLaytimeRule,
+        clauses,
+        Number(voyage.cargoQuantity),
+        loadingChild,
+        dischargeChild,
+      ),
+      settlementCurrency,
+    );
+    const nonReversibleSettlement =
+      reversibleLaytimeRule.enabled === true ||
+      !charterParty.laytimeOperationScope
+        ? null
+        : resolveNonReversibleSettlement({
+            expectedOperationScope:
+              charterParty.laytimeOperationScope ?? null,
+            settlementCurrency,
+            children: childPlans.created.map((plan) => ({
+              operation: plan.operation,
+              childCalculationId: plan.childCalculationId,
+              allowedSeconds: plan.childResult.allowedSeconds,
+              usedSeconds: plan.childResult.usedSeconds,
+              demurrageAmount: plan.childResult.demurrageAmount,
+              despatchAmount: plan.childResult.despatchAmount,
+              despatchBasis:
+                plan.childResult.despatchTimeBasis.requestedTimeBasis,
+              clauseIds: plan.childClauses.map((clause) => clause.id),
+              currency: settlementCurrency,
+            })),
+          });
     const inputSnapshot = this.buildInputSnapshot(
       voyage,
       charterParty,
       clauses,
       norDocuments,
+      locationEvidence,
       sofSource.documents,
       loadedSofEvents,
       documentSelection,
@@ -476,9 +588,80 @@ export class LaytimeCalculationsService {
       result,
       reversibleLaytimeRule,
       reversibleLaytimeAnalysis,
+      reversibleSettlement,
     );
+    if (nonReversibleSettlement) {
+      decisionSnapshot.nonReversibleSettlement = nonReversibleSettlement;
+    } else if (
+      reversibleLaytimeRule.enabled !== true &&
+      !charterParty.laytimeOperationScope
+    ) {
+      decisionSnapshot.nonReversibleSettlement = {
+        version: null,
+        settlementMode: 'legacy_primary_operation',
+        expectedOperationScope: null,
+        expectedOperations: [],
+        settlementStatus: 'LEGACY',
+        reasonCode: 'NON_REVERSIBLE_EXPECTED_OPERATION_SCOPE_REQUIRED',
+        finalizationEligible: false,
+        finalizationBlockers: [
+          'Expected laytime operation scope is not configured.',
+        ],
+        monetaryAggregation: {
+          status: 'CURRENCY_AUTHORITY_REQUIRED',
+          authoritativeCurrency: null,
+          grossDemurrage: null,
+          grossDespatch: null,
+          netExposure: null,
+        },
+      };
+    }
+    const parentResult = nonReversibleSettlement
+      ? {
+          allowedLaytime: null,
+          usedLaytime: null,
+          demurrageAmount: null,
+          despatchAmount: null,
+        }
+      :
+      reversibleSettlement?.settlementStatus === 'FINAL_AUTHORITATIVE' ||
+      reversibleSettlement?.settlementStatus === 'PROVISIONAL' ||
+      reversibleSettlement?.settlementStatus === 'NONAUTHORITATIVE'
+      ? {
+          allowedLaytime: secondsToInterval(
+            reversibleSettlement.combinedAllowedSeconds ?? 0,
+          ),
+          usedLaytime: secondsToInterval(
+            reversibleSettlement.combinedAllowedSeconds === null
+              ? 0
+              : reversibleSettlement.combinedUsedSeconds,
+          ),
+          demurrageAmount:
+            reversibleSettlement.settlementStatus === 'FINAL_AUTHORITATIVE'
+              ? reversibleSettlement.demurrageAmount.toFixed(2)
+              : '0.00',
+          despatchAmount:
+            reversibleSettlement.settlementStatus === 'FINAL_AUTHORITATIVE'
+              ? reversibleSettlement.despatchAmount.toFixed(2)
+              : '0.00',
+        }
+      : {
+          allowedLaytime: secondsToInterval(result.allowedSeconds),
+          usedLaytime: secondsToInterval(result.usedSeconds),
+          demurrageAmount: result.demurrageAmount.toFixed(2),
+          despatchAmount: result.despatchAmount.toFixed(2),
+        };
+    if (reversibleSettlement?.warnings.length) {
+      calculationWarnings.push(...reversibleSettlement.warnings);
+    }
+    if (nonReversibleSettlement?.warnings.length) {
+      calculationWarnings.push(...nonReversibleSettlement.warnings);
+    }
     const preparedChildCalculations = childPlans.created.map((plan) => {
-      const childCalculationWarnings = [...plan.childWarnings, ...plan.childResult.warnings];
+      const childCalculationWarnings = [
+        ...plan.childWarnings,
+        ...plan.childResult.warnings,
+      ];
       const childInputSnapshot = this.buildChildInputSnapshot(
         voyage,
         inputSnapshot,
@@ -509,6 +692,7 @@ export class LaytimeCalculationsService {
       };
 
       return {
+        id: plan.childCalculationId,
         operation: plan.operation,
         allowedLaytime: secondsToInterval(plan.childResult.allowedSeconds),
         usedLaytime: secondsToInterval(plan.childResult.usedSeconds),
@@ -518,78 +702,184 @@ export class LaytimeCalculationsService {
         decisionSnapshot: childDecisionSnapshot,
         warnings: childCalculationWarnings,
         engineVersion: LAYTIME_ENGINE_VERSION,
+        currency: settlementCurrency,
+        settlementAuthorityStatus:
+          nonReversibleSettlement?.expectedOperations.includes(plan.operation)
+            ? ('PROVISIONAL' as const)
+            : null,
         periods: plan.childResult.periods,
         calculatedAt: new Date(),
       };
     });
 
-    const calculation = await this.dataSource.transaction(async (manager) => {
-      const { maximum } = (await manager
-        .createQueryBuilder(LaytimeCalculation, 'calculation')
-        .select('MAX(calculation.version)', 'maximum')
-        .where('calculation.voyageId = :voyageId', { voyageId })
-        .andWhere('calculation.parentCalculationId IS NULL')
-        .getRawOne<{ maximum: number | null }>()) ?? { maximum: null };
+    const calculation = await this.databaseContext.transaction(
+      async (manager) => {
+        const { maximum } = (await manager
+          .createQueryBuilder(LaytimeCalculation, 'calculation')
+          .select('MAX(calculation.version)', 'maximum')
+          .where('calculation.voyageId = :voyageId', { voyageId })
+          .andWhere('calculation.parentCalculationId IS NULL')
+          .getRawOne<{ maximum: number | null }>()) ?? { maximum: null };
 
-      const saved = await manager.save(
-        manager.create(LaytimeCalculation, {
-          voyageId,
-          parentCalculationId: null,
-          operation: null,
-          version: (maximum ?? 0) + 1,
-          allowedLaytime: secondsToInterval(result.allowedSeconds),
-          usedLaytime: secondsToInterval(result.usedSeconds),
-          demurrageAmount: result.demurrageAmount.toFixed(2),
-          despatchAmount: result.despatchAmount.toFixed(2),
-          status: 'Draft' as const,
-          inputSnapshot,
-          decisionSnapshot,
-          warnings: calculationWarnings,
-          engineVersion: LAYTIME_ENGINE_VERSION,
-        }),
-      );
-
-      await manager.save(
-        result.periods.map((period) =>
-          manager.create(CalculationPeriod, {
-            calculationId: saved.id,
-            startTime: period.startTime,
-            endTime: period.endTime,
-            periodType: period.periodType as CalculationPeriod['periodType'],
-            appliedClauseId: period.appliedClauseId,
+        const nextVersion = (maximum ?? 0) + 1;
+        if (nonReversibleSettlement) {
+          nonReversibleSettlement.parentVersion = nextVersion;
+          for (const operation of nonReversibleSettlement.expectedOperations) {
+            const operationSummary =
+              nonReversibleSettlement.operations[operation];
+            if (operationSummary) operationSummary.childVersion = nextVersion;
+          }
+        }
+        const saved = await manager.save(
+          manager.create(LaytimeCalculation, {
+            voyageId,
+            parentCalculationId: null,
+            operation: null,
+            version: nextVersion,
+            allowedLaytime: parentResult.allowedLaytime,
+            usedLaytime: parentResult.usedLaytime,
+            demurrageAmount: parentResult.demurrageAmount,
+            despatchAmount: parentResult.despatchAmount,
+            status: 'Draft' as const,
+            settlementAuthorityStatus:
+              nonReversibleSettlement?.settlementStatus ??
+              reversibleSettlement?.settlementStatus ??
+              (reversibleLaytimeRule.enabled !== true &&
+              !charterParty.laytimeOperationScope
+                ? 'LEGACY'
+                : null),
+            currency: settlementCurrency,
+            inputSnapshot,
+            decisionSnapshot,
+            warnings: calculationWarnings,
+            engineVersion: LAYTIME_ENGINE_VERSION,
           }),
-        ),
-      );
-
-      for (const childCalculation of preparedChildCalculations) {
-        await this.createOperationChildResult(
-          {
-            parentCalculation: saved,
-            ...childCalculation,
-          },
-          manager,
         );
-      }
 
-      return manager.findOneOrFail(LaytimeCalculation, {
-        where: { id: saved.id },
-        relations: { periods: true },
-      });
-    });
+        const parentPeriods =
+          reversibleLaytimeRule.contractStatus === 'v1' ||
+          nonReversibleSettlement
+            ? []
+            : result.periods;
+        await manager.save(
+          parentPeriods.map((period) =>
+            manager.create(CalculationPeriod, {
+              calculationId: saved.id,
+              startTime: period.startTime,
+              endTime: period.endTime,
+              periodType: period.periodType as CalculationPeriod['periodType'],
+              appliedClauseId: period.appliedClauseId,
+            }),
+          ),
+        );
+
+        for (const childCalculation of preparedChildCalculations) {
+          await this.createOperationChildResult(
+            {
+              parentCalculation: saved,
+              ...childCalculation,
+            },
+            manager,
+          );
+        }
+
+        return manager.findOneOrFail(LaytimeCalculation, {
+          where: { id: saved.id },
+          relations: { periods: true },
+        });
+      },
+    );
 
     return { calculation, warnings: calculationWarnings };
   }
 
   async finalize(id: string): Promise<LaytimeCalculation> {
-    const calculation = await this.findOne(id);
-
-    if (calculation.status === 'Final') {
+    const existing = await this.findOne(id);
+    if (existing.status === 'Final') {
       throw new ConflictException(`Laytime calculation ${id} is already final`);
     }
+    const existingSettlement = existing.decisionSnapshot
+      ?.nonReversibleSettlement as { version?: unknown } | undefined;
+    const reversibleSettlement = existing.decisionSnapshot
+      ?.reversibleSettlement as ReversibleSettlementResult | undefined;
+    if (existingSettlement?.version !== 1) {
+      if (reversibleSettlement?.version === 1) {
+        if (!existing.currency) {
+          throw new ConflictException(
+            'CURRENCY_AUTHORITY_REQUIRED: A V1 settlement cannot be finalized without captured calculation currency.',
+          );
+        }
+        if (reversibleSettlement.settlementStatus !== 'FINAL_AUTHORITATIVE') {
+          throw new ConflictException(
+            `Reversible settlement cannot be finalized: ${reversibleSettlement.reasonCode}.`,
+          );
+        }
+        existing.status = 'Final';
+        existing.settlementAuthorityStatus = 'FINAL_AUTHORITATIVE';
+        return this.calculations.save(existing);
+      }
+      existing.status = 'Final';
+      return this.calculations.save(existing);
+    }
 
-    calculation.status = 'Final';
+    return this.databaseContext.transaction(async (manager) => {
+      const calculation = await manager.findOneOrFail(LaytimeCalculation, {
+        where: { id },
+      });
+      const settlement = calculation.decisionSnapshot
+        ?.nonReversibleSettlement as
+        | NonReversibleSettlementResult
+        | undefined;
 
-    return this.calculations.save(calculation);
+      if (!settlement) throw new ConflictException('Settlement evidence is unavailable.');
+      if (calculation.parentCalculationId) {
+        throw new ConflictException(
+          'A non-reversible operation result must be finalized through its voyage settlement parent.',
+        );
+      }
+      if (!settlement.finalizationEligible) {
+        throw new ConflictException(
+          `Non-reversible settlement cannot be finalized: ${settlement.finalizationBlockers.join(' ')}`,
+        );
+      }
+      if (!calculation.currency) {
+        throw new ConflictException(
+          'CURRENCY_AUTHORITY_REQUIRED: A V1 settlement cannot be finalized without captured calculation currency.',
+        );
+      }
+
+      const children = await manager.find(LaytimeCalculation, {
+        where: { parentCalculationId: calculation.id },
+      });
+      const expectedChildren = settlement.expectedOperations.map((operation) => {
+        const summary = settlement.operations[operation];
+        const child = children.find(
+          (candidate) =>
+            candidate.operation === operation &&
+            candidate.id === summary?.childCalculationId,
+        );
+        if (
+          !child ||
+          child.parentCalculationId !== calculation.id ||
+          child.version !== calculation.version
+          || child.currency !== calculation.currency
+        ) {
+          throw new ConflictException(
+            `${operation} child calculation does not belong to this parent calculation version.`,
+          );
+        }
+        return child;
+      });
+
+      calculation.status = 'Final';
+      calculation.settlementAuthorityStatus = 'FINAL_AUTHORITATIVE';
+      for (const child of expectedChildren) {
+        child.status = 'Final';
+        child.settlementAuthorityStatus = 'FINAL_AUTHORITATIVE';
+      }
+      await manager.save(expectedChildren);
+      return manager.save(calculation);
+    });
   }
 
   /**
@@ -631,10 +921,16 @@ export class LaytimeCalculationsService {
   }
 
   private buildInputSnapshot(
-    voyage: { id: string; cargoQuantity: string; laytimeOperation: LaytimeOperation },
+    voyage: {
+      id: string;
+      cargoQuantity: string;
+      laytimeOperation: LaytimeOperation;
+      bulkOperationType?: string | null;
+    },
     charterParty: CharterParty,
     clauses: ResolvedClause[],
     norDocuments: NorDocument[],
+    locationEvidence: NorTenderLocationEvidence[],
     sofDocuments: SofDocument[],
     sofEvents: SofEvent[],
     sofDocumentSelection: SofDocumentSelection,
@@ -647,6 +943,7 @@ export class LaytimeCalculationsService {
         id: voyage.id,
         cargoQuantity: voyage.cargoQuantity,
         laytimeOperation: voyage.laytimeOperation,
+        bulkOperationType: voyage.bulkOperationType ?? null,
       },
       calculationEventSelection: {
         rule: calculationEventSelection.rule,
@@ -691,6 +988,8 @@ export class LaytimeCalculationsService {
         : null,
       charterParty: {
         id: charterParty.id,
+        laytimeOperationScope: charterParty.laytimeOperationScope ?? null,
+        settlementCurrency: charterParty.settlementCurrency ?? null,
         clauses: clauses.map((clause) => ({
           id: clause.id,
           clauseType: clause.clauseType,
@@ -698,11 +997,44 @@ export class LaytimeCalculationsService {
           parameters: this.cloneJson(clause.parameters),
         })),
       },
+      currencyAuthority: {
+        currency: charterParty.settlementCurrency ?? null,
+        source: 'charter_party_settlement_currency',
+        status: charterParty.settlementCurrency
+          ? 'AVAILABLE'
+          : 'CURRENCY_AUTHORITY_REQUIRED',
+      },
       norDocuments: norDocuments.map((nor) => ({
         id: nor.id,
         tenderTime: nor.tenderTime.toISOString(),
         acceptedTime: nor.acceptedTime?.toISOString() ?? null,
       })),
+      norTenderLocationEvidence: {
+        availability: locationEvidence.length > 0 ? 'available' : 'unavailable',
+        validityEvaluation: 'candidate-associated-v1',
+        observations: locationEvidence.map((observation) => ({
+          id: observation.id,
+          voyageId: observation.voyageId,
+          operation: observation.operation,
+          evidenceTime: observation.evidenceTime.toISOString(),
+          portRelation: observation.portRelation,
+          berthRelation: observation.berthRelation,
+          waitingPlace: observation.waitingPlace,
+          source: observation.source,
+          sofDocumentId: observation.sofDocumentId ?? null,
+          sourceReference: observation.sourceReference ?? null,
+          note: observation.note ?? null,
+          norDocumentId: observation.norDocumentId ?? null,
+          norTenderedEventId: observation.norTenderedEventId ?? null,
+          associationBasis: observation.norDocumentId
+            ? 'explicit-nor-document'
+            : observation.norTenderedEventId
+              ? 'explicit-sof-nor-tendered-event'
+              : 'timestamp-operation-observation',
+          createdByUserId: observation.createdByUserId,
+          createdAt: observation.createdAt.toISOString(),
+        })),
+      },
       sofDocuments: sofDocuments.map((document) => ({
         id: document.id,
         status: document.status,
@@ -761,7 +1093,9 @@ export class LaytimeCalculationsService {
           excludedEventIds: [...eventSelection.excludedEventIds],
           matchingEventIds: [...eventSelection.matchingEventIds],
           legacyNullEventIds: [...eventSelection.legacyNullEventIds],
-          oppositeOperationEventIds: [...eventSelection.oppositeOperationEventIds],
+          oppositeOperationEventIds: [
+            ...eventSelection.oppositeOperationEventIds,
+          ],
           usedLegacyFallback: eventSelection.usedLegacyFallback,
           matchingCompletionEventId: eventSelection.matchingCompletionEventId,
           selectedCompletionEventId: eventSelection.selectedCompletionEventId,
@@ -771,12 +1105,18 @@ export class LaytimeCalculationsService {
   }
 
   private async buildOperationChildCalculations(
-    voyage: { id: string; cargoQuantity: string; laytimeOperation: LaytimeOperation },
+    voyage: {
+      id: string;
+      cargoQuantity: string;
+      laytimeOperation: LaytimeOperation;
+      bulkOperationType?: BulkOperationType | null;
+    },
     charterParty: CharterParty,
     parentClauses: ResolvedClause[],
     norDocuments: NorDocument[],
     sofDocuments: SofDocument[],
     sofEvents: SofEvent[],
+    locationEvidence: NorTenderLocationEvidence[],
   ): Promise<{
     requestedOperations: LaytimeOperation[];
     created: PreparedOperationChildCalculation[];
@@ -784,7 +1124,10 @@ export class LaytimeCalculationsService {
   }> {
     const requestedOperations: LaytimeOperation[] = [];
     const created: PreparedOperationChildCalculation[] = [];
-    const skippedOperations: Array<{ operation: LaytimeOperation; reason: string }> = [];
+    const skippedOperations: Array<{
+      operation: LaytimeOperation;
+      reason: string;
+    }> = [];
 
     for (const operation of ['Loading', 'Discharge'] as const) {
       requestedOperations.push(operation);
@@ -795,6 +1138,7 @@ export class LaytimeCalculationsService {
         norDocuments,
         sofDocuments,
         sofEvents,
+        locationEvidence,
         operation,
       );
 
@@ -822,6 +1166,7 @@ export class LaytimeCalculationsService {
         norDocuments,
         sofDocuments,
         sofEvents,
+        locationEvidence,
         fallbackOperation,
         { allowLegacyFallback: true },
       );
@@ -844,26 +1189,31 @@ export class LaytimeCalculationsService {
   }
 
   private buildOperationChildCalculation(
-    voyage: { id: string; cargoQuantity: string; laytimeOperation: LaytimeOperation },
+    voyage: {
+      id: string;
+      cargoQuantity: string;
+      laytimeOperation: LaytimeOperation;
+      bulkOperationType?: BulkOperationType | null;
+    },
     charterParty: CharterParty,
     parentClauses: ResolvedClause[],
     norDocuments: NorDocument[],
     sofDocuments: SofDocument[],
     sofEvents: SofEvent[],
+    locationEvidence: NorTenderLocationEvidence[],
     operation: LaytimeOperation,
     options?: { allowLegacyFallback?: boolean },
-  ):
-    | PreparedOperationChildCalculation
-    | { skipReason: string } {
+  ): PreparedOperationChildCalculation | { skipReason: string } {
     const childWarnings: string[] = [];
 
     let childDocumentSelection: OperationSpecificSelectionAudit['documentSelection'];
     try {
-      childDocumentSelection = this.selectOperationSpecificSofDocumentsForEngine(
-        operation,
-        sofDocuments,
-        childWarnings,
-      );
+      childDocumentSelection =
+        this.selectOperationSpecificSofDocumentsForEngine(
+          operation,
+          sofDocuments,
+          childWarnings,
+        );
     } catch (error) {
       if (error instanceof UnprocessableEntityException) {
         return {
@@ -900,7 +1250,9 @@ export class LaytimeCalculationsService {
       };
     }
 
-    const sourceClauses = this.filterEngineClauses(this.resolveClauses(charterParty));
+    const sourceClauses = this.filterEngineClauses(
+      this.resolveClauses(charterParty),
+    );
     const childClauses = resolveClausesForOperation(
       sourceClauses.length > 0 ? sourceClauses : parentClauses,
       operation,
@@ -908,18 +1260,22 @@ export class LaytimeCalculationsService {
     ).map((clause) => ({
       id: clause.id,
       clauseType: clause.clauseType,
-      rawText: 'rawText' in clause ? (clause as ResolvedClause).rawText : undefined,
+      rawText:
+        'rawText' in clause ? (clause as ResolvedClause).rawText : undefined,
       parameters: this.cloneJson(clause.parameters),
     })) as ResolvedClause[];
 
     let childResult: ReturnType<typeof runLaytimeEngine>;
     try {
       childResult = runLaytimeEngine({
+        voyageId: voyage.id,
         cargoQuantity: Number(voyage.cargoQuantity),
         clauses: childClauses,
         norDocuments,
         sofEvents: childEventSelection.events,
+        norTenderLocationEvidence: locationEvidence,
         operation,
+        bulkOperationType: voyage.bulkOperationType ?? null,
       });
     } catch (error) {
       if (error instanceof LaytimeEngineError) {
@@ -931,6 +1287,7 @@ export class LaytimeCalculationsService {
     }
 
     return {
+      childCalculationId: randomUUID(),
       operation,
       childClauses,
       childClauseWarnings: [...childWarnings],
@@ -956,7 +1313,7 @@ export class LaytimeCalculationsService {
           clause.parameters.operation === 'Loading' ||
           clause.parameters.operation === 'Discharge'
             ? 'operation-specific'
-          : 'global-fallback',
+            : 'global-fallback',
       })),
       duplicateWarnings: [...duplicateWarnings],
     };
@@ -969,7 +1326,9 @@ export class LaytimeCalculationsService {
     sofEvents: SofEvent[],
     result: {
       commencedAt: Date;
+      commencement: LaytimeEngineResult['commencement'];
       completedAt: Date;
+      cargoCompletion: LaytimeEngineResult['cargoCompletion'];
       demurrageStartedAt: Date | null;
       weatherDeductedSeconds: number;
       allowedSeconds: number;
@@ -983,15 +1342,25 @@ export class LaytimeCalculationsService {
         endTime: Date;
         periodType: string;
         appliedClauseId: string | null;
+        calendarDates?: Array<{
+          localDate: string;
+          reasons: string[];
+        }>;
       }>;
       ignoredExceptions: Array<{
         startTime: Date;
         endTime: Date;
         appliedClauseId: string | null;
+        calendarDates?: Array<{
+          localDate: string;
+          reasons: string[];
+        }>;
       }>;
+      shexCalendar: LaytimeEngineResult['shexCalendar'];
     },
     reversibleLaytimeRule?: ReversibleLaytimeRuleEvidence,
     reversibleLaytimeAnalysis?: ReversibleLaytimeAnalysis,
+    reversibleSettlement?: ReversibleSettlementResult | null,
   ): Record<string, unknown> {
     const firstClause = (type: string) =>
       clauses.find((clause) => clause.clauseType === type);
@@ -999,23 +1368,16 @@ export class LaytimeCalculationsService {
     const demurrageClause = firstClause('demurrage_rate');
     const despatchClause = firstClause('despatch');
     const weatherWorkingClause = firstClause('weather_working');
-    const wibonClause = firstClause('wibon');
-    const wiponClause = firstClause('wipon');
-    const earliestNor = [...norDocuments].sort(
-      (a, b) => a.tenderTime.getTime() - b.tenderTime.getTime(),
-    )[0];
-    const fallbackNorEvent = [...sofEvents]
-      .filter((event) => event.eventType === 'NOR_TENDERED')
-      .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime())[0];
-    const completion = [...sofEvents]
-      .filter((event) => COMPLETION_EVENT_TYPES.has(event.eventType))
-      .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime())
-      .at(-1);
-    const noticeHours = this.readNumber(laytimeClause?.parameters, [
-      'noticeHours',
-      'notice_hours',
-      'turnTimeHours',
-    ]);
+    const wibonClause = result.commencement.location.berth.clauseId
+      ? clauses.find(
+          (clause) => clause.id === result.commencement.location.berth.clauseId,
+        )
+      : undefined;
+    const wiponClause = result.commencement.location.port.clauseId
+      ? clauses.find(
+          (clause) => clause.id === result.commencement.location.port.clauseId,
+        )
+      : undefined;
     const demurrageRate = this.readNumber(demurrageClause?.parameters, [
       'rate',
       'ratePerDay',
@@ -1032,29 +1394,111 @@ export class LaytimeCalculationsService {
       'multiplier',
     ]);
 
-    return {
-      commencement: {
-        basis: earliestNor
-          ? earliestNor.acceptedTime
-            ? 'nor_accepted'
-            : 'nor_tendered'
-          : 'sof_nor_tendered',
-        norDocumentId: earliestNor?.id ?? null,
-        norTenderedEventId: earliestNor ? null : (fallbackNorEvent?.id ?? null),
-        tenderTime: earliestNor?.tenderTime.toISOString() ?? null,
-        acceptedTime: earliestNor?.acceptedTime?.toISOString() ?? null,
-        baseTime: earliestNor
-          ? (earliestNor.acceptedTime ?? earliestNor.tenderTime).toISOString()
-          : (fallbackNorEvent?.eventTime.toISOString() ?? null),
-        noticeHours: noticeHours ?? 6,
-        noticeSource: noticeHours === undefined ? 'default' : 'charter_party',
-        commencedAt: result.commencedAt.toISOString(),
+    const snapshot: Record<string, unknown> = {
+      calculationCurrency: {
+        currency: charterParty.settlementCurrency ?? null,
+        source: 'charter_party_settlement_currency',
+        authorityStatus: charterParty.settlementCurrency
+          ? 'AVAILABLE'
+          : 'CURRENCY_AUTHORITY_REQUIRED',
+        finalAuthorityBlocker: charterParty.settlementCurrency
+          ? null
+          : 'CURRENCY_AUTHORITY_REQUIRED',
       },
-      cargoCompletion: completion
+      commencement: {
+        basis: result.commencement.basis,
+        norDocumentId: result.commencement.norDocumentId,
+        norTenderedEventId: result.commencement.norTenderedEventId,
+        tenderTime: result.commencement.tenderTime.toISOString(),
+        acceptedTime: result.commencement.acceptedTime?.toISOString() ?? null,
+        baseTime: result.commencement.baseTime.toISOString(),
+        commencementRule: result.commencement.commencementRule,
+        noticeHours: result.commencement.noticeHours,
+        noticeSource: result.commencement.noticeSource,
+        scheduleClauseId: result.commencement.scheduleClauseId,
+        scheduleBasis: result.commencement.scheduleBasis,
+        scheduleCutoffReference: result.commencement.scheduleCutoffReference,
+        scheduleGoverningTime:
+          result.commencement.scheduleGoverningTime?.toISOString() ?? null,
+        scheduleCutoffTime: result.commencement.scheduleCutoffTime,
+        scheduleLegacyCompatibilityUsed:
+          result.commencement.scheduleLegacyCompatibilityUsed,
+        scheduleTimeZone: result.commencement.scheduleTimeZone,
+        scheduleWorkingDays: result.commencement.scheduleWorkingDays
+          ? [...result.commencement.scheduleWorkingDays]
+          : null,
+        scheduleLocalNorDate: result.commencement.scheduleLocalNorDate,
+        scheduleLocalNorTime: result.commencement.scheduleLocalNorTime,
+        scheduleSelectedWorkingDate:
+          result.commencement.scheduleSelectedWorkingDate,
+        scheduleSelectedLocalCommencementTime:
+          result.commencement.scheduleSelectedLocalCommencementTime,
+        scheduleSkippedDates: result.commencement.scheduleSkippedDates.map(
+          (entry) => ({ ...entry }),
+        ),
+        commencedAt: result.commencement.commencedAt.toISOString(),
+        readinessEventId: result.commencement.readinessEventId,
+        readinessTime: result.commencement.readinessTime?.toISOString() ?? null,
+        readinessSource: result.commencement.readinessSource,
+        validityStatus: result.commencement.validityStatus,
+        validityBasis: result.commencement.validityBasis,
+        validityWarnings: [...result.commencement.validityWarnings],
+        freePratique: {
+          ...result.commencement.freePratique,
+          grantedTime:
+            result.commencement.freePratique.grantedTime?.toISOString() ?? null,
+          warnings: [...result.commencement.freePratique.warnings],
+        },
+        location: this.serializeLocationQualification(
+          result.commencement.location,
+        ),
+        rejectedNorCandidates: result.commencement.rejectedNorCandidates.map(
+          (candidate) => ({
+            ...candidate,
+            tenderTime: candidate.tenderTime.toISOString(),
+            warnings: [...candidate.warnings],
+            freePratique: {
+              ...candidate.freePratique,
+              grantedTime:
+                candidate.freePratique.grantedTime?.toISOString() ?? null,
+              warnings: [...candidate.freePratique.warnings],
+            },
+          }),
+        ),
+        freePratiqueRejectedCandidates:
+          result.commencement.freePratiqueRejectedCandidates.map(
+            (candidate) => ({
+              ...candidate,
+              tenderTime: candidate.tenderTime.toISOString(),
+              freePratique: {
+                ...candidate.freePratique,
+                grantedTime:
+                  candidate.freePratique.grantedTime?.toISOString() ?? null,
+                warnings: [...candidate.freePratique.warnings],
+              },
+            }),
+          ),
+        locationRejectedCandidates:
+          result.commencement.locationRejectedCandidates.map((candidate) => ({
+            ...candidate,
+            tenderTime: candidate.tenderTime.toISOString(),
+            rejectionReasons: [...candidate.rejectionReasons],
+            location: this.serializeLocationQualification(candidate.location),
+          })),
+      },
+      cargoCompletion: result.cargoCompletion
         ? {
-            eventId: completion.id,
-            eventType: completion.eventType,
-            eventTime: completion.eventTime.toISOString(),
+            eventId: result.cargoCompletion.selectedEventId,
+            eventType: result.cargoCompletion.selectedEventType,
+            eventTime: result.cargoCompletion.completionTime.toISOString(),
+            selectedEventId: result.cargoCompletion.selectedEventId,
+            selectedEventType: result.cargoCompletion.selectedEventType,
+            selectedTime: result.cargoCompletion.completionTime.toISOString(),
+            bulkOperationType: result.cargoCompletion.bulkOperationType,
+            selectionBasis: result.cargoCompletion.selectionBasis,
+            candidateEventIds: [...result.cargoCompletion.candidateEventIds],
+            excludedEventIds: [...result.cargoCompletion.excludedEventIds],
+            warnings: [...result.cargoCompletion.warnings],
           }
         : null,
       allowedLaytime: {
@@ -1091,7 +1535,32 @@ export class LaytimeCalculationsService {
         endTime: period.endTime.toISOString(),
         periodType: period.periodType,
         appliedClauseId: period.appliedClauseId,
+        calendarDates: period.calendarDates
+          ? period.calendarDates.map((entry) => ({
+              localDate: entry.localDate,
+              reasons: [...entry.reasons],
+            }))
+          : undefined,
       })),
+      shexCalendar: {
+        clauseId: result.shexCalendar.clauseId,
+        calendarVersion: result.shexCalendar.calendarVersion,
+        operation: result.shexCalendar.operation,
+        shex: result.shexCalendar.shex,
+        timeZone: result.shexCalendar.timeZone,
+        saturdayExcepted: result.shexCalendar.saturdayExcepted,
+        holidayDates: [...result.shexCalendar.holidayDates],
+        sourceType: result.shexCalendar.sourceType,
+        legacyCompatibilityUsed: result.shexCalendar.legacyCompatibilityUsed,
+        generatedIntervals: result.shexCalendar.generatedIntervals.map(
+          (interval) => ({
+            startTime: interval.startTime.toISOString(),
+            endTime: interval.endTime.toISOString(),
+            localDate: interval.localDate,
+            reasons: [...interval.reasons],
+          }),
+        ),
+      },
       netUsedSeconds: result.usedSeconds,
       demurrage: {
         clauseId: demurrageClause?.id ?? null,
@@ -1099,15 +1568,24 @@ export class LaytimeCalculationsService {
           ? this.cloneJson(demurrageClause.parameters)
           : null,
         ratePerDay: demurrageRate ?? null,
+        rateBasis: 'per_day',
+        currency: charterParty.settlementCurrency ?? null,
         excessSeconds: Math.max(0, result.usedSeconds - result.allowedSeconds),
         startedAt: result.demurrageStartedAt?.toISOString() ?? null,
         ignoredExceptions: result.ignoredExceptions.map((exception) => ({
           startTime: exception.startTime.toISOString(),
           endTime: exception.endTime.toISOString(),
           appliedClauseId: exception.appliedClauseId,
+          calendarDates: exception.calendarDates
+            ? exception.calendarDates.map((entry) => ({
+                localDate: entry.localDate,
+                reasons: [...entry.reasons],
+              }))
+            : undefined,
           reason: 'already_on_demurrage',
         })),
         amount: result.demurrageAmount,
+        amountCurrency: charterParty.settlementCurrency ?? null,
       },
       weatherWorking: weatherWorkingClause
         ? {
@@ -1119,7 +1597,8 @@ export class LaytimeCalculationsService {
             applied:
               this.readBoolean(weatherWorkingClause.parameters, ['enabled']) ===
               true,
-            totalWeatherTimeDeductedBeforeDemurrage: result.weatherDeductedSeconds,
+            totalWeatherTimeDeductedBeforeDemurrage:
+              result.weatherDeductedSeconds,
           }
         : null,
       despatch: {
@@ -1128,6 +1607,7 @@ export class LaytimeCalculationsService {
           ? this.cloneJson(despatchClause.parameters)
           : null,
         explicitRate: explicitDespatchRate ?? null,
+        rateCurrency: charterParty.settlementCurrency ?? null,
         multiplier: despatchMultiplier ?? null,
         pricingBasis:
           explicitDespatchRate !== undefined
@@ -1142,41 +1622,416 @@ export class LaytimeCalculationsService {
         savedSeconds: Math.max(0, result.allowedSeconds - result.usedSeconds),
         timeBasis: result.despatchTimeBasis,
         amount: result.despatchAmount,
+        amountCurrency: charterParty.settlementCurrency ?? null,
       },
       wibon: wibonClause
         ? {
             clauseId: wibonClause.id,
             clauseParameters: this.cloneJson(wibonClause.parameters),
-            enabled: this.readBoolean(wibonClause.parameters, ['enabled']) ?? null,
-            applied:
-              this.readBoolean(wibonClause.parameters, ['enabled']) === true,
+            enabled:
+              this.readBoolean(wibonClause.parameters, ['enabled']) ?? null,
+            configured: true,
+            applied: result.commencement.location.berth.waiverApplied,
+            evaluationStatus: result.commencement.location.berth.status,
+            reason: result.commencement.location.berth.reason,
           }
-        : null,
+        : {
+            clauseId: null,
+            clauseParameters: null,
+            enabled: null,
+            configured: false,
+            applied: false,
+            evaluationStatus: result.commencement.location.berth.status,
+            reason: result.commencement.location.berth.reason,
+          },
       wipon: wiponClause
         ? {
             clauseId: wiponClause.id,
             clauseParameters: this.cloneJson(wiponClause.parameters),
-            enabled: this.readBoolean(wiponClause.parameters, ['enabled']) ?? null,
-            applied:
-              this.readBoolean(wiponClause.parameters, ['enabled']) === true,
-            limitation:
-              'Port-limit status is not currently modeled; timing is unchanged.',
+            enabled:
+              this.readBoolean(wiponClause.parameters, ['enabled']) ?? null,
+            configured: true,
+            applied: result.commencement.location.port.waiverApplied,
+            evaluationStatus: result.commencement.location.port.status,
+            reason: result.commencement.location.port.reason,
           }
-        : null,
+        : {
+            clauseId: null,
+            clauseParameters: null,
+            enabled: null,
+            configured: false,
+            applied: false,
+            evaluationStatus: result.commencement.location.port.status,
+            reason: result.commencement.location.port.reason,
+          },
       atutc: this.cloneJson(result.atutc),
       reversibleLaytimeRule: reversibleLaytimeRule
         ? {
             clauseId: reversibleLaytimeRule.clauseId,
             clauseType: reversibleLaytimeRule.clauseType,
             enabled: reversibleLaytimeRule.enabled,
-            clauseParameters: this.cloneJson(reversibleLaytimeRule.clauseParameters),
+            contractStatus: reversibleLaytimeRule.contractStatus,
+            settlementVersion: reversibleLaytimeRule.settlementVersion,
+            allowanceMode: reversibleLaytimeRule.allowanceMode,
+            clauseParameters: this.cloneJson(
+              reversibleLaytimeRule.clauseParameters,
+            ),
             rawText: reversibleLaytimeRule.rawText,
+            conflictingClauseIds: [
+              ...reversibleLaytimeRule.conflictingClauseIds,
+            ],
             warnings: [...reversibleLaytimeRule.warnings],
           }
         : null,
       reversibleLaytimeAnalysis: reversibleLaytimeAnalysis
         ? this.cloneJson(reversibleLaytimeAnalysis)
         : null,
+      reversibleSettlement: reversibleSettlement
+        ? this.cloneJson(reversibleSettlement)
+        : null,
+    };
+
+    if (reversibleSettlement && reversibleLaytimeRule?.contractStatus === 'v1') {
+      snapshot.referencePrimaryOperation = {
+        commencement: snapshot.commencement,
+        cargoCompletion: snapshot.cargoCompletion,
+        allowedLaytime: snapshot.allowedLaytime,
+        netUsedSeconds: snapshot.netUsedSeconds,
+        demurrage: snapshot.demurrage,
+        despatch: snapshot.despatch,
+        periods: snapshot.periods,
+      };
+      snapshot.commencement = null;
+      snapshot.cargoCompletion = null;
+      snapshot.allowedLaytime = {
+        source: 'reversible-settlement-v1',
+        allowedSeconds: reversibleSettlement.combinedAllowedSeconds,
+        allowedLaytime:
+          reversibleSettlement.combinedAllowedSeconds === null
+            ? null
+            : secondsToInterval(reversibleSettlement.combinedAllowedSeconds),
+      };
+      snapshot.periods = [];
+      snapshot.netUsedSeconds = reversibleSettlement.combinedUsedSeconds;
+      snapshot.demurrage = {
+        source: 'reversible-settlement-v1',
+        ratePerDay: reversibleSettlement.demurrageRate,
+        rateBasis: 'per_day',
+        currency: charterParty.settlementCurrency ?? null,
+        excessSeconds: reversibleSettlement.combinedOverrunSeconds,
+        startedAt: reversibleSettlement.threshold?.timestamp.toISOString() ?? null,
+        amount: reversibleSettlement.demurrageAmount,
+        amountCurrency: charterParty.settlementCurrency ?? null,
+      };
+      snapshot.despatch = {
+        source: 'reversible-settlement-v1',
+        ratePerDay: reversibleSettlement.despatchRate,
+        rateCurrency: charterParty.settlementCurrency ?? null,
+        timeBasis: reversibleSettlement.despatchTimeBasis,
+        savedSeconds: reversibleSettlement.combinedSavedSeconds,
+        amount: reversibleSettlement.despatchAmount,
+        amountCurrency: charterParty.settlementCurrency ?? null,
+      };
+    }
+
+    return snapshot;
+  }
+
+  private serializeLocationQualification(
+    qualification: NorLocationQualificationResult,
+  ): Record<string, unknown> {
+    return {
+      ...qualification,
+      selectedEvidence: qualification.selectedEvidence
+        ? {
+            ...qualification.selectedEvidence,
+            evidenceTime:
+              qualification.selectedEvidence.evidenceTime.toISOString(),
+            createdAt: qualification.selectedEvidence.createdAt.toISOString(),
+          }
+        : null,
+      conflictingEvidenceIds: [...qualification.conflictingEvidenceIds],
+      ignoredUnassociatedEvidenceIds: [
+        ...qualification.ignoredUnassociatedEvidenceIds,
+      ],
+      ineligibleAfterTenderEvidenceIds: [
+        ...qualification.ineligibleAfterTenderEvidenceIds,
+      ],
+      berth: { ...qualification.berth },
+      port: { ...qualification.port },
+      warnings: [...qualification.warnings],
+    };
+  }
+
+  private resolveReversibleSettlement(
+    rule: ReversibleLaytimeRuleEvidence,
+    clauses: ResolvedClause[],
+    cargoQuantity: number,
+    loadingChild: PreparedOperationChildCalculation | undefined,
+    dischargeChild: PreparedOperationChildCalculation | undefined,
+  ): ReversibleSettlementResult | null {
+    if (rule.contractStatus === 'absent' || rule.contractStatus === 'disabled') {
+      return null;
+    }
+
+    const contractStatus: ReversibleSettlementRuleInput['contractStatus'] =
+      rule.contractStatus === 'v1' ||
+      rule.contractStatus === 'legacy' ||
+      rule.contractStatus === 'ambiguous'
+        ? rule.contractStatus
+        : 'invalid';
+    const settlementRule: ReversibleSettlementRuleInput = {
+      clauseId: rule.clauseId,
+      contractStatus,
+      settlementVersion: rule.settlementVersion,
+      allowanceMode: rule.allowanceMode,
+    };
+
+    return resolveReversibleLaytimeSettlement({
+      rule: settlementRule,
+      cargoQuantity,
+      allowances: {
+        Loading: this.resolveReversibleAllowance(
+          clauses,
+          'Loading',
+          cargoQuantity,
+        ),
+        Discharge: this.resolveReversibleAllowance(
+          clauses,
+          'Discharge',
+          cargoQuantity,
+        ),
+      },
+      operations: {
+        Loading: this.toReversibleOperationInput(loadingChild),
+        Discharge: this.toReversibleOperationInput(dischargeChild),
+      },
+    });
+  }
+
+  private applyReversibleCurrencyAuthority(
+    settlement: ReversibleSettlementResult | null,
+    currency: SettlementCurrency | null,
+  ): ReversibleSettlementResult | null {
+    if (!settlement) return null;
+
+    settlement.currency = currency;
+    settlement.currencySource = 'charter_party_settlement_currency';
+    settlement.currencyAuthorityStatus = currency
+      ? 'AVAILABLE'
+      : 'CURRENCY_AUTHORITY_REQUIRED';
+    settlement.claimEligibilityImpact = currency
+      ? 'AUTHORITATIVE_CURRENCY_AVAILABLE'
+      : 'LAYTIME_CALCULATION_CURRENCY_REQUIRED';
+    for (const rate of [
+      settlement.loadingDemurrage,
+      settlement.dischargeDemurrage,
+      settlement.loadingDespatch,
+      settlement.dischargeDespatch,
+    ]) {
+      if (rate) {
+        rate.rateBasis = 'per_day';
+        rate.currency = currency;
+      }
+    }
+
+    if (
+      !currency &&
+      settlement.version === 1 &&
+      settlement.settlementStatus === 'FINAL_AUTHORITATIVE'
+    ) {
+      settlement.settlementStatus = 'NONAUTHORITATIVE';
+      settlement.reasonCode = 'CURRENCY_AUTHORITY_REQUIRED';
+      settlement.reason =
+        'The Charter Party settlement currency was not configured for this calculation version.';
+      settlement.warnings.push(
+        'CURRENCY_AUTHORITY_REQUIRED: Time results remain available, but the commercial settlement is not authoritative.',
+      );
+    }
+
+    return settlement;
+  }
+
+  private resolveReversibleAllowance(
+    clauses: ResolvedClause[],
+    operation: 'Loading' | 'Discharge',
+    cargoQuantity: number,
+  ): ReversibleAllowanceInput | null {
+    const operationClauses = clauses.filter(
+      (clause) =>
+        clause.clauseType === 'laytime_rate' &&
+        clause.parameters.operation === operation,
+    );
+    const globalClauses = clauses.filter(
+      (clause) =>
+        clause.clauseType === 'laytime_rate' &&
+        clause.parameters.operation !== 'Loading' &&
+        clause.parameters.operation !== 'Discharge',
+    );
+    const clause =
+      operationClauses.length === 1
+        ? operationClauses[0]
+        : operationClauses.length === 0 && globalClauses.length === 1
+          ? globalClauses[0]
+          : undefined;
+    if (!clause) return null;
+
+    const hours = this.readStrictNumber(clause.parameters, 'hours');
+    const days = this.readStrictNumber(clause.parameters, 'days');
+    const rateEntries = ['rate', 'ratePerDay', 'rate_per_day']
+      .map((key) => ({ key, value: this.readStrictNumber(clause.parameters, key) }))
+      .filter((entry): entry is { key: string; value: number } => entry.value !== null);
+    const mechanisms = [
+      hours !== null ? 'hours' : null,
+      days !== null ? 'days' : null,
+      rateEntries.length > 0 ? 'rate' : null,
+    ].filter((value): value is 'hours' | 'days' | 'rate' => value !== null);
+    if (mechanisms.length !== 1 || rateEntries.length > 1) return null;
+
+    const mechanism = mechanisms[0];
+    const allowedSeconds =
+      mechanism === 'hours'
+        ? (hours as number) * 3600
+        : mechanism === 'days'
+          ? (days as number) * 86400
+          : (cargoQuantity / rateEntries[0].value) * 86400;
+    if (!Number.isFinite(allowedSeconds) || allowedSeconds <= 0) return null;
+
+    return {
+      clauseId: clause.id,
+      source:
+        clause.parameters.operation === operation
+          ? 'operation-specific'
+          : 'global-fallback',
+      mechanism,
+      parameters: this.cloneJson(clause.parameters),
+      allowedSeconds,
+    };
+  }
+
+  private toReversibleOperationInput(
+    child: PreparedOperationChildCalculation | undefined,
+  ) {
+    if (!child) return null;
+    const demurrage = this.resolveChildDemurragePricing(child);
+    const despatch = this.resolveChildDespatchPricing(child);
+
+    return {
+      operation: child.operation as 'Loading' | 'Discharge',
+      childCalculationId: child.childCalculationId,
+      timeline: child.childResult.preDemurragePeriods,
+      demurrage,
+      despatch: despatch
+        ? {
+            clauseId: despatch.clauseId ?? '',
+            rate: despatch.rate,
+            timeBasis: despatch.timeBasis,
+          }
+        : null,
+    };
+  }
+
+  private readStrictNumber(
+    parameters: Record<string, unknown>,
+    key: string,
+  ): number | null {
+    const value = parameters[key];
+    return typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? value
+      : null;
+  }
+
+  private resolveChildDemurragePricing(
+    child: PreparedOperationChildCalculation | undefined,
+  ): { clauseId: string | null; rate: number | null } | null {
+    if (!child) {
+      return null;
+    }
+
+    const clause = child.childClauses.find(
+      (candidate) => candidate.clauseType === 'demurrage_rate',
+    );
+
+    if (!clause) {
+      return {
+        clauseId: null,
+        rate: null,
+      };
+    }
+
+    return {
+      clauseId: clause.id,
+      rate:
+        this.readNumber(clause.parameters, [
+          'rate',
+          'ratePerDay',
+          'rate_per_day',
+          'amount',
+        ]) ?? null,
+    };
+  }
+
+  private resolveChildDespatchPricing(
+    child: PreparedOperationChildCalculation | undefined,
+  ): {
+    clauseId: string | null;
+    rate: number | null;
+    source: 'explicit_rate' | 'multiplier' | 'half_demurrage_fallback';
+    timeBasis: 'all_time_saved' | 'working_time_saved';
+  } | null {
+    if (!child) {
+      return null;
+    }
+
+    const clause = child.childClauses.find(
+      (candidate) => candidate.clauseType === 'despatch',
+    );
+
+    if (!clause) {
+      return null;
+    }
+
+    const explicitRate = this.readNumber(clause.parameters, [
+      'rate',
+      'ratePerDay',
+      'rate_per_day',
+      'amount',
+    ]);
+    const multiplier = this.readNumber(clause.parameters, ['multiplier']);
+    const demurrageRate = this.resolveChildDemurragePricing(child)?.rate;
+    const timeBasis = child.childResult.despatchTimeBasis.effectiveTimeBasis;
+
+    if (explicitRate !== undefined) {
+      return {
+        clauseId: clause.id,
+        rate: explicitRate,
+        source: 'explicit_rate',
+        timeBasis,
+      };
+    }
+
+    if (multiplier !== undefined) {
+      if (demurrageRate === null || demurrageRate === undefined) {
+        return null;
+      }
+
+      return {
+        clauseId: clause.id,
+        rate: demurrageRate * multiplier,
+        source: 'multiplier',
+        timeBasis,
+      };
+    }
+
+    if (demurrageRate === null || demurrageRate === undefined) {
+      return null;
+    }
+
+    return {
+      clauseId: clause.id,
+      rate: demurrageRate / 2,
+      source: 'half_demurrage_fallback',
+      timeBasis,
     };
   }
 
@@ -1304,7 +2159,8 @@ export class LaytimeCalculationsService {
       (document) => document.operation === voyageOperation,
     );
     const legacyNullDocuments = sofDocuments.filter(
-      (document) => document.operation === null || document.operation === undefined,
+      (document) =>
+        document.operation === null || document.operation === undefined,
     );
     const oppositeOperationDocuments = sofDocuments.filter(
       (document) =>
@@ -1334,10 +2190,14 @@ export class LaytimeCalculationsService {
       voyageLaytimeOperation: voyageOperation,
       candidateDocumentIds,
       includedDocumentIds: includedDocuments.map((document) => document.id),
-      excludedDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      excludedDocumentIds: oppositeOperationDocuments.map(
+        (document) => document.id,
+      ),
       matchingDocumentIds: matchingDocuments.map((document) => document.id),
       legacyNullDocumentIds: legacyNullDocuments.map((document) => document.id),
-      oppositeOperationDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      oppositeOperationDocumentIds: oppositeOperationDocuments.map(
+        (document) => document.id,
+      ),
       rule: 'matching-operation-plus-legacy-null',
     };
   }
@@ -1385,10 +2245,14 @@ export class LaytimeCalculationsService {
     return {
       candidateDocumentIds,
       includedDocumentIds: includedDocuments.map((document) => document.id),
-      excludedDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      excludedDocumentIds: oppositeOperationDocuments.map(
+        (document) => document.id,
+      ),
       matchingDocumentIds: matchingDocuments.map((document) => document.id),
       legacyNullDocumentIds: legacyNullDocuments.map((document) => document.id),
-      oppositeOperationDocumentIds: oppositeOperationDocuments.map((document) => document.id),
+      oppositeOperationDocumentIds: oppositeOperationDocuments.map(
+        (document) => document.id,
+      ),
       usedLegacyFallback,
     };
   }
@@ -1450,11 +2314,12 @@ export class LaytimeCalculationsService {
       (event) => !excludedEventIds.has(event.id),
     );
 
-    const selectedCompletionEventId = [
-      ...includedEvents
-        .filter((event) => COMPLETION_EVENT_TYPES.has(event.eventType))
-        .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime()),
-    ].at(-1)?.id ?? null;
+    const selectedCompletionEventId =
+      [
+        ...includedEvents
+          .filter((event) => COMPLETION_EVENT_TYPES.has(event.eventType))
+          .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime()),
+      ].at(-1)?.id ?? null;
 
     const matchingCompletionEventId =
       matchingCompletionEvents
@@ -1469,7 +2334,9 @@ export class LaytimeCalculationsService {
         excludedEventIds: [...excludedEventIds],
         matchingEventIds: matchingEvents.map((event) => event.id),
         legacyNullEventIds: legacyNullEvents.map((event) => event.id),
-        oppositeOperationEventIds: oppositeOperationEvents.map((event) => event.id),
+        oppositeOperationEventIds: oppositeOperationEvents.map(
+          (event) => event.id,
+        ),
         usedLegacyFallback,
         matchingCompletionEventId,
         selectedCompletionEventId,
@@ -1497,6 +2364,7 @@ export class LaytimeCalculationsService {
 
       const saved = await entityManager.save(
         entityManager.create(LaytimeCalculation, {
+          id: input.id ?? randomUUID(),
           voyageId: input.parentCalculation.voyageId,
           parentCalculationId: input.parentCalculation.id,
           operation: input.operation,
@@ -1510,22 +2378,21 @@ export class LaytimeCalculationsService {
           decisionSnapshot: input.decisionSnapshot,
           warnings: input.warnings,
           engineVersion: input.engineVersion,
+          settlementAuthorityStatus: input.settlementAuthorityStatus ?? null,
+          currency: input.currency,
           calculatedAt: input.calculatedAt ?? new Date(),
         }),
       );
 
       const savedPeriods = await entityManager.save(
         input.periods.map((period) =>
-          entityManager.create(
-            CalculationPeriod,
-            {
-              calculationId: saved.id,
-              startTime: period.startTime,
-              endTime: period.endTime,
-              periodType: period.periodType,
-              appliedClauseId: period.appliedClauseId,
-            } as any,
-          ),
+          entityManager.create(CalculationPeriod, {
+            calculationId: saved.id,
+            startTime: period.startTime,
+            endTime: period.endTime,
+            periodType: period.periodType,
+            appliedClauseId: period.appliedClauseId,
+          } as any),
         ),
       );
 
@@ -1543,7 +2410,7 @@ export class LaytimeCalculationsService {
       return persist(manager);
     }
 
-    return this.dataSource.transaction(persist);
+    return this.databaseContext.transaction(persist);
   }
 
   private buildOperationSelectionAudit(
@@ -1567,7 +2434,9 @@ export class LaytimeCalculationsService {
         event.eventType === 'DISCHARGE_COMPLETED' &&
         event.operation === 'Discharge',
     );
-    const completionEvents = loadedSofEvents.filter(isExplicitOperationCompletion);
+    const completionEvents = loadedSofEvents.filter(
+      isExplicitOperationCompletion,
+    );
 
     return {
       voyageLaytimeOperation: voyageOperation,
@@ -1591,7 +2460,9 @@ export class LaytimeCalculationsService {
     const rank = (operation: LaytimeOperation) =>
       operation === 'Loading' ? 0 : operation === 'Discharge' ? 1 : 2;
 
-    return [...new Set(operations)].sort((left, right) => rank(left) - rank(right));
+    return [...new Set(operations)].sort(
+      (left, right) => rank(left) - rank(right),
+    );
   }
 
   private cloneJson<T>(value: T): T {

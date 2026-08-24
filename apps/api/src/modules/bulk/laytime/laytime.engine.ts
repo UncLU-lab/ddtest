@@ -17,6 +17,24 @@ import {
 } from './interval-overlap';
 import { secondsToDays } from './interval.util';
 import { projectLaytimeExpiry } from './laytime-expiry-projection';
+import { selectCargoCompletion } from './cargo-completion-selection';
+import { resolveNorCommencementCandidate } from './nor-commencement-candidate';
+import { selectCommencementRule } from './commencement-rule';
+import {
+  NorCommencementSchedule,
+  resolveNorCommencementSchedule,
+} from './nor-commencement-schedule';
+import { resolveClausesForOperation } from '../charter-party-terms';
+import { type SelectedWifponClause } from './free-pratique-qualification';
+import { type NorLocationClauseInput } from './nor-location-qualification';
+import {
+  collectShexCalendarIntervals,
+  LEGACY_SHEX_CALENDAR_WARNING,
+  resolveShexCalendarContract,
+  ShexCalendarError,
+  type ShexCalendarContract,
+  type ShexCalendarInterval,
+} from './shex-calendar';
 
 const HOUR_SECONDS = 3600;
 const DAY_SECONDS = 86_400;
@@ -36,19 +54,9 @@ const SUPPORTED_CLAUSE_TYPES = new Set([
   'weather_working',
   'wibon',
   'wipon',
+  'wifpon',
   'atutc',
-]);
-
-/** SOF event marking NOR tender, used when no nor_documents row exists. */
-const NOR_TENDERED_EVENT = 'NOR_TENDERED';
-
-/** SOF events that end cargo operations; the last one stops the clock. */
-const COMPLETION_EVENTS = new Set([
-  'CARGO_COMPLETED',
-  'LOADING_COMPLETED',
-  'DISCHARGE_COMPLETED',
-  'COMPLETION_OF_CARGO',
-  'HOSES_DISCONNECTED',
+  'nor_commencement_schedule',
 ]);
 
 /** SOF events that open a stoppage (laytime exception). */
@@ -70,6 +78,10 @@ interface ExceptionInterval {
   end: Date;
   clauseId: string | null;
   kind: 'generic' | 'weather' | 'shex';
+  calendarDates?: Array<{
+    localDate: string;
+    reasons: ShexCalendarInterval['reasons'];
+  }>;
 }
 
 /**
@@ -77,12 +89,8 @@ interface ExceptionInterval {
  *
  * Laytime commences a notice period after NOR, runs until cargo operations
  * complete, and is suspended for stoppages recorded in the SOF and (under a
- * SHEX clause) for excepted weekend days. Countable time beyond the allowed
- * laytime becomes demurrage; time saved becomes despatch.
- *
- * Not yet modelled: WIBON, reversible laytime, weather working days, turn time,
- * and "once on demurrage, always on demurrage" (exceptions still suspend the
- * clock after demurrage begins — a warning is emitted when that happens).
+ * SHEX clause) for contractual calendar exceptions. Countable time beyond the
+ * allowed laytime becomes demurrage; time saved becomes despatch.
  */
 export function runLaytimeEngine(
   input: LaytimeEngineInput,
@@ -91,9 +99,41 @@ export function runLaytimeEngine(
   const clauses = indexClauses(input.clauses, warnings);
   const atutc = resolveAtutcState(clauses.atutc);
   const operation = input.operation ?? 'Loading';
+  const wifponClause = resolveApplicableWifponClause(
+    input.clauses,
+    operation,
+    warnings,
+  );
+  const wibonClause = resolveApplicableLocationClause(
+    input.clauses,
+    operation,
+    'wibon',
+    warnings,
+  );
+  const wiponClause = resolveApplicableLocationClause(
+    input.clauses,
+    operation,
+    'wipon',
+    warnings,
+  );
 
-  const commencedAt = resolveCommencement(input, clauses.laytimeRate, warnings);
-  const completedAt = resolveCompletion(input.sofEvents);
+  const commencement = resolveCommencement(
+    input,
+    clauses.laytimeRate,
+    clauses.norCommencementSchedule,
+    wifponClause,
+    wibonClause,
+    wiponClause,
+    warnings,
+  );
+  const commencedAt = commencement.commencedAt;
+  const cargoCompletion = selectCargoCompletion({
+    events: input.sofEvents,
+    operation: operation,
+    bulkOperationType: input.bulkOperationType ?? null,
+  });
+  warnings.push(...cargoCompletion.warnings);
+  const completedAt = cargoCompletion.completionTime;
 
   if (completedAt.getTime() <= commencedAt.getTime()) {
     throw new LaytimeEngineError(
@@ -106,9 +146,17 @@ export function runLaytimeEngine(
     input.cargoQuantity,
   );
 
+  const shexCalendar = resolveShexCalendarState(
+    clauses.shex,
+    commencedAt,
+    completedAt,
+    warnings,
+  );
+
   const collectedExceptions = collectExceptions(
     input.sofEvents,
-    clauses.shex,
+    shexCalendar.generatedIntervals,
+    clauses.shex?.id ?? null,
     clauses.weatherWorking,
     commencedAt,
     completedAt,
@@ -131,7 +179,9 @@ export function runLaytimeEngine(
     );
     warnings.push(...workingIntervals.warnings);
 
-    const shexIntervals = exceptions.filter((interval) => interval.kind === 'shex');
+    const shexIntervals = exceptions.filter(
+      (interval) => interval.kind === 'shex',
+    );
     const restoredOverlap = intersectWorkingWithExceptedIntervals(
       workingIntervals.intervals as CargoWorkingInterval[],
       shexIntervals as TimeInterval[],
@@ -164,18 +214,22 @@ export function runLaytimeEngine(
     ignoredExceptions,
     demurrageStartedAt,
     weatherDeductedSeconds,
-  } =
-    buildPeriods(
-      commencedAt,
-      completedAt,
-      exceptions,
-      allowedSeconds,
-      collectedExceptions.weatherDeductedSeconds,
-    );
+  } = buildPeriods(
+    commencedAt,
+    completedAt,
+    exceptions,
+    allowedSeconds,
+    collectedExceptions.weatherDeductedSeconds,
+  );
+  const preDemurragePeriods = buildPreDemurragePeriods(
+    commencedAt,
+    completedAt,
+    exceptions,
+  );
 
   const despatchTimeBasis = resolveDespatchTimeBasis(
     clauses.despatch,
-    clauses.shex,
+    shexCalendar.contract,
     completedAt,
     allowedSeconds,
     usedSeconds,
@@ -189,8 +243,10 @@ export function runLaytimeEngine(
   );
 
   return {
+    commencement,
     commencedAt,
     completedAt,
+    cargoCompletion,
     demurrageStartedAt,
     weatherDeductedSeconds,
     allowedSeconds,
@@ -198,16 +254,88 @@ export function runLaytimeEngine(
     demurrageAmount,
     despatchAmount,
     periods,
+    preDemurragePeriods,
     ignoredExceptions,
+    shexCalendar: shexCalendar.audit,
     warnings,
     atutc,
     despatchTimeBasis,
   };
 }
 
+function resolveShexCalendarState(
+  clause: EngineClause | undefined,
+  commencedAt: Date,
+  completedAt: Date,
+  warnings: string[],
+): {
+  contract: ShexCalendarContract | null;
+  generatedIntervals: ShexCalendarInterval[];
+  audit: LaytimeEngineResult['shexCalendar'];
+} {
+  if (!clause) {
+    return {
+      contract: null,
+      generatedIntervals: [],
+      audit: {
+        clauseId: null,
+        shex: null,
+        calendarVersion: null,
+        operation: null,
+        timeZone: null,
+        saturdayExcepted: null,
+        holidayDates: [],
+        sourceType: 'none',
+        legacyCompatibilityUsed: false,
+        generatedIntervals: [],
+      },
+    };
+  }
+
+  try {
+    const contract = resolveShexCalendarContract(clause.parameters);
+    if (contract.legacyCompatibilityUsed) {
+      warnings.push(LEGACY_SHEX_CALENDAR_WARNING);
+    }
+    const generatedIntervals = collectShexCalendarIntervals({
+      contract,
+      rangeStart: commencedAt,
+      rangeEnd: completedAt,
+    });
+    return {
+      contract,
+      generatedIntervals,
+      audit: {
+        clauseId: clause.id,
+        shex: contract.shex,
+        calendarVersion: contract.calendarVersion,
+        operation: contract.operation,
+        timeZone: contract.timeZone,
+        saturdayExcepted: contract.shex ? contract.saturdayExcepted : null,
+        holidayDates: [...contract.holidayDates],
+        sourceType: contract.sourceType,
+        legacyCompatibilityUsed: contract.legacyCompatibilityUsed,
+        generatedIntervals: generatedIntervals.map((interval) => ({
+          startTime: new Date(interval.start),
+          endTime: new Date(interval.end),
+          localDate: interval.localDate,
+          reasons: [...interval.reasons],
+        })),
+      },
+    };
+  } catch (error) {
+    if (error instanceof ShexCalendarError) {
+      throw new LaytimeEngineError(
+        `The SHEX/SHINC calendar clause is invalid: ${error.message}`,
+      );
+    }
+    throw error;
+  }
+}
+
 function resolveDespatchTimeBasis(
   clause: EngineClause | undefined,
-  shexClause: EngineClause | undefined,
+  shexCalendar: ShexCalendarContract | null,
   completedAt: Date,
   allowedSeconds: number,
   usedSeconds: number,
@@ -237,15 +365,7 @@ function resolveDespatchTimeBasis(
   const projection = projectLaytimeExpiry({
     completionTime: completedAt,
     remainingCountableSeconds: workingTimeSavedSeconds,
-    calendarRules: {
-      shex: readBoolean(shexClause?.parameters, ['shex']) === true,
-      saturdayExcepted:
-        readBoolean(shexClause?.parameters, [
-          'saturdayExcepted',
-          'saturday_excepted',
-          'satShex',
-        ]) === true,
-    },
+    calendarContract: shexCalendar,
   });
 
   return {
@@ -259,6 +379,8 @@ function resolveDespatchTimeBasis(
       (interval) => ({
         startTime: interval.start,
         endTime: interval.end,
+        localDate: interval.localDate,
+        reasons: [...interval.reasons],
       }),
     ),
   };
@@ -273,6 +395,7 @@ interface IndexedClauses {
   wibon?: EngineClause;
   wipon?: EngineClause;
   atutc?: EngineClause;
+  norCommencementSchedule?: EngineClause;
 }
 
 function indexClauses(
@@ -305,8 +428,13 @@ function indexClauses(
       case 'wipon':
         indexed.wipon ??= clause;
         break;
+      case 'wifpon':
+        break;
       case 'atutc':
         indexed.atutc ??= clause;
+        break;
+      case 'nor_commencement_schedule':
+        indexed.norCommencementSchedule ??= clause;
         break;
       default:
         unsupported.add(clause.clauseType);
@@ -321,7 +449,11 @@ function indexClauses(
 
   const duplicated = new Set(
     clauses
-      .filter((clause) => SUPPORTED_CLAUSE_TYPES.has(clause.clauseType))
+      .filter(
+        (clause) =>
+          SUPPORTED_CLAUSE_TYPES.has(clause.clauseType) &&
+          clause.clauseType !== 'wifpon',
+      )
       .map((clause) => clause.clauseType)
       .filter((type, index, all) => all.indexOf(type) !== index),
   );
@@ -332,6 +464,41 @@ function indexClauses(
   }
 
   return indexed;
+}
+
+function resolveApplicableWifponClause(
+  clauses: EngineClause[],
+  operation: 'Loading' | 'Discharge',
+  warnings: string[],
+): SelectedWifponClause | null {
+  const selected = resolveClausesForOperation(
+    clauses.filter((clause) => clause.clauseType === 'wifpon'),
+    operation,
+    warnings,
+  )[0];
+
+  return selected
+    ? {
+        id: selected.id,
+        clauseType: 'wifpon',
+        parameters: selected.parameters,
+      }
+    : null;
+}
+
+function resolveApplicableLocationClause(
+  clauses: EngineClause[],
+  operation: 'Loading' | 'Discharge',
+  clauseType: 'wibon' | 'wipon',
+  warnings: string[],
+): NorLocationClauseInput | null {
+  const selected = resolveClausesForOperation(
+    clauses.filter((clause) => clause.clauseType === clauseType),
+    operation,
+    warnings,
+  )[0];
+
+  return selected ? { id: selected.id, parameters: selected.parameters } : null;
 }
 
 function resolveAtutcState(
@@ -355,71 +522,244 @@ function resolveAtutcState(
 function resolveCommencement(
   input: LaytimeEngineInput,
   laytimeClause: EngineClause | undefined,
+  scheduleClause: EngineClause | undefined,
+  wifponClause: SelectedWifponClause | null,
+  wibonClause: NorLocationClauseInput | null,
+  wiponClause: NorLocationClauseInput | null,
   warnings: string[],
-): Date {
-  const earliestNor = [...input.norDocuments].sort(
-    (a, b) => a.tenderTime.getTime() - b.tenderTime.getTime(),
-  )[0];
+): LaytimeEngineResult['commencement'] {
+  const candidateResolution = resolveNorCommencementCandidate({
+    norDocuments: input.norDocuments,
+    sofEvents: input.sofEvents,
+    operation: input.operation,
+    wifponClause,
+    voyageId: input.voyageId,
+    locationEvidence: input.norTenderLocationEvidence,
+    wibonClause,
+    wiponClause,
+  });
+  for (const warning of candidateResolution.warnings) {
+    if (!warnings.includes(warning)) warnings.push(warning);
+  }
 
-  let base: Date;
-  if (earliestNor) {
-    if (earliestNor.acceptedTime) {
-      base = earliestNor.acceptedTime;
-    } else {
-      base = earliestNor.tenderTime;
-      warnings.push(
-        'NOR has no accepted time; laytime commencement was measured from the tender time.',
-      );
-    }
-  } else {
-    const tenderEvent = input.sofEvents
-      .filter((event) => event.eventType === NOR_TENDERED_EVENT)
-      .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime())[0];
+  if (candidateResolution.validityStatus === 'no-valid-candidate') {
+    throw new LaytimeEngineError(
+      'No valid NOR exists after applying NOR qualification requirements.',
+    );
+  }
 
-    if (!tenderEvent) {
-      throw new LaytimeEngineError(
-        'No Notice of Readiness found for this voyage; attach a NOR document or a NOR_TENDERED SOF event before calculating laytime.',
-      );
-    }
+  const selected = candidateResolution.selectedCandidate;
+  if (!selected) {
+    throw new LaytimeEngineError(
+      'No Notice of Readiness found for this voyage; attach a NOR document or a NOR_TENDERED SOF event before calculating laytime.',
+    );
+  }
 
-    base = tenderEvent.eventTime;
+  const base = selected.effectiveTime;
+  if (
+    selected.source === 'nor-document' &&
+    !selected.acceptedTime &&
+    candidateResolution.validityStatus === 'unavailable'
+  ) {
+    warnings.push(
+      'NOR has no accepted time; laytime commencement was measured from the tender time.',
+    );
+  }
+  if (
+    selected.source === 'sof-event' &&
+    candidateResolution.validityStatus === 'unavailable'
+  ) {
     warnings.push(
       'No NOR document found; laytime commencement was derived from the NOR_TENDERED SOF event.',
     );
   }
 
-  const noticeHours = readNumber(laytimeClause?.parameters, [
-    'noticeHours',
-    'notice_hours',
-    'turnTimeHours',
-  ]);
-
-  if (noticeHours === undefined) {
-    warnings.push(
-      `No notice period in the charter party; the default of ${DEFAULT_NOTICE_HOURS} hours was applied.`,
-    );
+  const commencementRule = selectCommencementRule({
+    laytimeRateClause: laytimeClause,
+    norCommencementScheduleClause: scheduleClause,
+  });
+  if (commencementRule.rule === 'conflict') {
+    throw new LaytimeEngineError(commencementRule.conflict.reason);
   }
 
-  const hours = noticeHours ?? DEFAULT_NOTICE_HOURS;
+  let commencedAt: Date;
+  let noticeHours: number | null = null;
+  let noticeSource: LaytimeEngineResult['commencement']['noticeSource'] = null;
+  let scheduleAudit: ReturnType<typeof resolveNorCommencementSchedule> | null =
+    null;
+  let schedule: NorCommencementSchedule | null = null;
+  let scheduleCutoffReference: LaytimeEngineResult['commencement']['scheduleCutoffReference'] =
+    null;
+  let scheduleGoverningTime: Date | null = null;
+  let scheduleLegacyCompatibilityUsed = false;
 
-  return new Date(base.getTime() + hours * HOUR_SECONDS * 1000);
+  if (commencementRule.rule === 'notice-hours') {
+    noticeHours = commencementRule.noticeHours;
+    noticeSource = commencementRule.noticeSource;
+    if (commencementRule.noticeSource === 'default') {
+      warnings.push(
+        `No notice period in the charter party; the default of ${DEFAULT_NOTICE_HOURS} hours was applied.`,
+      );
+    }
+    commencedAt = new Date(
+      base.getTime() + commencementRule.noticeHours * HOUR_SECONDS * 1000,
+    );
+  } else {
+    schedule = readNorCommencementSchedule(scheduleClause);
+    if (schedule.cutoffReference === 'tenderTime') {
+      scheduleCutoffReference = 'tenderTime';
+      scheduleGoverningTime = new Date(selected.tenderTime);
+    } else if (schedule.cutoffReference === 'acceptedTime') {
+      if (!selected.acceptedTime) {
+        throw new LaytimeEngineError(
+          'The NOR commencement schedule requires an acceptedTime for cutoffReference acceptedTime.',
+        );
+      }
+      scheduleCutoffReference = 'acceptedTime';
+      scheduleGoverningTime = new Date(selected.acceptedTime);
+    } else {
+      scheduleCutoffReference = 'legacy-effectiveTime';
+      scheduleGoverningTime = new Date(base);
+      scheduleLegacyCompatibilityUsed = true;
+      warnings.push(
+        'NOR commencement schedule has no cutoffReference; legacy effective-time cutoff behavior was preserved.',
+      );
+    }
+
+    try {
+      scheduleAudit = resolveNorCommencementSchedule({
+        governingNorTime: scheduleGoverningTime,
+        schedule,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new LaytimeEngineError(
+        `The NOR commencement schedule could not be applied: ${message}`,
+      );
+    }
+    commencedAt = scheduleAudit.commencedAt;
+  }
+
+  return {
+    basis:
+      selected.source === 'sof-event'
+        ? 'sof_nor_tendered'
+        : selected.acceptedTime
+          ? 'nor_accepted'
+          : 'nor_tendered',
+    norDocumentId: selected.norDocumentId,
+    norTenderedEventId: selected.norTenderedEventId,
+    tenderTime: new Date(selected.tenderTime),
+    acceptedTime: selected.acceptedTime
+      ? new Date(selected.acceptedTime)
+      : null,
+    baseTime: new Date(base),
+    commencementRule: commencementRule.rule,
+    noticeHours,
+    noticeSource,
+    scheduleClauseId: scheduleClause?.id ?? null,
+    scheduleBasis: scheduleAudit?.basis ?? null,
+    scheduleCutoffReference,
+    scheduleGoverningTime,
+    scheduleCutoffTime: schedule?.tenderCutoffTime ?? null,
+    scheduleLegacyCompatibilityUsed,
+    scheduleTimeZone: scheduleAudit?.timeZone ?? null,
+    scheduleWorkingDays: schedule ? [...schedule.workingDays] : null,
+    scheduleLocalNorDate: scheduleAudit?.localNorDate ?? null,
+    scheduleLocalNorTime: scheduleAudit?.localNorTime ?? null,
+    scheduleSelectedWorkingDate: scheduleAudit?.selectedWorkingDate ?? null,
+    scheduleSelectedLocalCommencementTime:
+      scheduleAudit?.selectedLocalCommencementTime ?? null,
+    scheduleSkippedDates:
+      scheduleAudit?.skippedDates.map((entry) => ({ ...entry })) ?? [],
+    commencedAt,
+    readinessEventId: candidateResolution.readiness.selectedEventId,
+    readinessTime: candidateResolution.readiness.readinessTime
+      ? new Date(candidateResolution.readiness.readinessTime)
+      : null,
+    readinessSource: candidateResolution.readiness.source,
+    validityStatus: candidateResolution.validityStatus,
+    validityBasis: selected.validityBasis,
+    validityWarnings: [...candidateResolution.warnings],
+    freePratique: {
+      ...selected.freePratique,
+      grantedTime: selected.freePratique.grantedTime
+        ? new Date(selected.freePratique.grantedTime)
+        : null,
+      warnings: [...selected.freePratique.warnings],
+    },
+    location: cloneLocationAudit(selected.location),
+    rejectedNorCandidates: candidateResolution.rejectedCandidates.map(
+      (candidate) => ({
+        ...candidate,
+        tenderTime: new Date(candidate.tenderTime),
+        warnings: [...candidate.warnings],
+        freePratique: {
+          ...candidate.freePratique,
+          grantedTime: candidate.freePratique.grantedTime
+            ? new Date(candidate.freePratique.grantedTime)
+            : null,
+          warnings: [...candidate.freePratique.warnings],
+        },
+      }),
+    ),
+    freePratiqueRejectedCandidates:
+      candidateResolution.freePratiqueRejectedCandidates.map((candidate) => ({
+        ...candidate,
+        tenderTime: new Date(candidate.tenderTime),
+        freePratique: {
+          ...candidate.freePratique,
+          grantedTime: candidate.freePratique.grantedTime
+            ? new Date(candidate.freePratique.grantedTime)
+            : null,
+          warnings: [...candidate.freePratique.warnings],
+        },
+      })),
+    locationRejectedCandidates:
+      candidateResolution.locationRejectedCandidates.map((candidate) => ({
+        ...candidate,
+        tenderTime: new Date(candidate.tenderTime),
+        rejectionReasons: [...candidate.rejectionReasons],
+        location: cloneLocationAudit(candidate.location),
+      })),
+  };
 }
 
-function resolveCompletion(sofEvents: EngineSofEvent[]): Date {
-  const completion = sofEvents
-    .filter((event) => COMPLETION_EVENTS.has(event.eventType))
-    .sort((a, b) => a.eventTime.getTime() - b.eventTime.getTime())
-    .at(-1);
-
-  if (!completion) {
+function readNorCommencementSchedule(
+  clause: EngineClause | undefined,
+): NorCommencementSchedule {
+  const parameters = clause?.parameters;
+  const workingDays = parameters?.workingDays;
+  if (
+    !parameters ||
+    (parameters.cutoffReference !== undefined &&
+      parameters.cutoffReference !== 'tenderTime' &&
+      parameters.cutoffReference !== 'acceptedTime') ||
+    typeof parameters.tenderCutoffTime !== 'string' ||
+    typeof parameters.sameDayCommencementTime !== 'string' ||
+    typeof parameters.nextWorkingDayCommencementTime !== 'string' ||
+    !Array.isArray(workingDays) ||
+    workingDays.length === 0 ||
+    !workingDays.every((day) => typeof day === 'string') ||
+    typeof parameters.timeZone !== 'string'
+  ) {
     throw new LaytimeEngineError(
-      'No cargo completion event found in the SOF; expected one of: ' +
-        [...COMPLETION_EVENTS].join(', ') +
-        '.',
+      'The NOR commencement schedule is incomplete and cannot be applied safely.',
     );
   }
 
-  return completion.eventTime;
+  return {
+    cutoffReference:
+      parameters.cutoffReference === 'tenderTime' ||
+      parameters.cutoffReference === 'acceptedTime'
+        ? parameters.cutoffReference
+        : undefined,
+    tenderCutoffTime: parameters.tenderCutoffTime,
+    sameDayCommencementTime: parameters.sameDayCommencementTime,
+    nextWorkingDayCommencementTime: parameters.nextWorkingDayCommencementTime,
+    workingDays: workingDays as NorCommencementSchedule['workingDays'],
+    timeZone: parameters.timeZone,
+  };
 }
 
 function resolveAllowedLaytime(
@@ -460,7 +800,8 @@ interface CollectedExceptions {
 
 function collectExceptions(
   sofEvents: EngineSofEvent[],
-  shexClause: EngineClause | undefined,
+  calendarIntervals: ShexCalendarInterval[],
+  shexClauseId: string | null,
   weatherWorkingClause: EngineClause | undefined,
   commencedAt: Date,
   completedAt: Date,
@@ -473,15 +814,24 @@ function collectExceptions(
     ...(weatherWorkingEnabled
       ? collectWeatherStoppages(sofEvents, completedAt, warnings)
       : []),
-    ...collectExceptedDays(shexClause, commencedAt, completedAt),
+    ...calendarIntervals.map((interval) => ({
+      start: interval.start,
+      end: interval.end,
+      clauseId: shexClauseId,
+      kind: 'shex' as const,
+      calendarDates: [
+        { localDate: interval.localDate, reasons: [...interval.reasons] },
+      ],
+    })),
   ];
 
   const clamped = raw
-    .map(({ start, end, clauseId, kind }) => ({
+    .map(({ start, end, clauseId, kind, calendarDates }) => ({
       start: new Date(Math.max(start.getTime(), commencedAt.getTime())),
       end: new Date(Math.min(end.getTime(), completedAt.getTime())),
       clauseId,
       kind,
+      calendarDates,
     }))
     .filter((interval) => interval.end.getTime() > interval.start.getTime())
     .sort((a, b) => a.start.getTime() - b.start.getTime());
@@ -495,6 +845,31 @@ function collectExceptions(
           sum + (interval.end.getTime() - interval.start.getTime()) / 1000,
         0,
       ),
+  };
+}
+
+function cloneLocationAudit(
+  location: LaytimeEngineResult['commencement']['location'],
+): LaytimeEngineResult['commencement']['location'] {
+  return {
+    ...location,
+    selectedEvidence: location.selectedEvidence
+      ? {
+          ...location.selectedEvidence,
+          evidenceTime: new Date(location.selectedEvidence.evidenceTime),
+          createdAt: new Date(location.selectedEvidence.createdAt),
+        }
+      : null,
+    conflictingEvidenceIds: [...location.conflictingEvidenceIds],
+    ignoredUnassociatedEvidenceIds: [
+      ...location.ignoredUnassociatedEvidenceIds,
+    ],
+    ineligibleAfterTenderEvidenceIds: [
+      ...location.ineligibleAfterTenderEvidenceIds,
+    ],
+    berth: { ...location.berth },
+    port: { ...location.port },
+    warnings: [...location.warnings],
   };
 }
 
@@ -587,53 +962,6 @@ function collectWeatherStoppages(
   return stoppages;
 }
 
-/** Whole days excepted by a SHEX clause (Sundays, and Saturdays when configured). */
-function collectExceptedDays(
-  shexClause: EngineClause | undefined,
-  commencedAt: Date,
-  completedAt: Date,
-): ExceptionInterval[] {
-  if (!shexClause) {
-    return [];
-  }
-
-  const shexEnabled = readBoolean(shexClause.parameters, ['shex']);
-  if (shexEnabled !== true) {
-    return [];
-  }
-
-  const saturdaysExcepted =
-    readBoolean(shexClause.parameters, [
-      'saturdayExcepted',
-      'saturday_excepted',
-      'satShex',
-    ]) ?? false;
-
-  const excepted: ExceptionInterval[] = [];
-  const cursor = new Date(
-    Date.UTC(
-      commencedAt.getUTCFullYear(),
-      commencedAt.getUTCMonth(),
-      commencedAt.getUTCDate(),
-    ),
-  );
-
-  while (cursor.getTime() < completedAt.getTime()) {
-    const day = cursor.getUTCDay();
-    if (day === 0 || (saturdaysExcepted && day === 6)) {
-      excepted.push({
-        start: new Date(cursor),
-        end: new Date(cursor.getTime() + DAY_SECONDS * 1000),
-        clauseId: shexClause.id,
-        kind: 'shex',
-      });
-    }
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-
-  return excepted;
-}
-
 /** Unions overlapping intervals; a clause-attributed interval keeps its clause. */
 function mergeIntervals(sorted: ExceptionInterval[]): ExceptionInterval[] {
   const merged: ExceptionInterval[] = [];
@@ -645,6 +973,10 @@ function mergeIntervals(sorted: ExceptionInterval[]): ExceptionInterval[] {
         previous.end = interval.end;
       }
       previous.clauseId ??= interval.clauseId;
+      previous.calendarDates = mergeCalendarDates(
+        previous.calendarDates,
+        interval.calendarDates,
+      );
       continue;
     }
     merged.push({ ...interval });
@@ -653,7 +985,31 @@ function mergeIntervals(sorted: ExceptionInterval[]): ExceptionInterval[] {
   return merged;
 }
 
-function sortExceptionIntervals(intervals: ExceptionInterval[]): ExceptionInterval[] {
+function mergeCalendarDates(
+  left: ExceptionInterval['calendarDates'],
+  right: ExceptionInterval['calendarDates'],
+): ExceptionInterval['calendarDates'] {
+  const merged = new Map<
+    string,
+    NonNullable<ExceptionInterval['calendarDates']>[number]
+  >();
+  for (const entry of [...(left ?? []), ...(right ?? [])]) {
+    const existing = merged.get(entry.localDate);
+    if (!existing) {
+      merged.set(entry.localDate, {
+        localDate: entry.localDate,
+        reasons: [...entry.reasons],
+      });
+      continue;
+    }
+    existing.reasons = [...new Set([...existing.reasons, ...entry.reasons])];
+  }
+  return merged.size > 0 ? [...merged.values()] : undefined;
+}
+
+function sortExceptionIntervals(
+  intervals: ExceptionInterval[],
+): ExceptionInterval[] {
   return [...intervals].sort(
     (left, right) =>
       left.start.getTime() - right.start.getTime() ||
@@ -710,6 +1066,7 @@ function subtractIntervals(
           end: fragmentEnd,
           clauseId: interval.clauseId,
           kind: interval.kind,
+          calendarDates: interval.calendarDates,
         });
       }
 
@@ -730,6 +1087,7 @@ function subtractIntervals(
         end: new Date(interval.end),
         clauseId: interval.clauseId,
         kind: interval.kind,
+        calendarDates: interval.calendarDates,
       });
     }
   }
@@ -823,20 +1181,24 @@ function buildPeriods(
         startTime: exception.start,
         endTime: exception.end,
         appliedClauseId: exception.clauseId,
+        calendarDates: exception.calendarDates,
       });
       periods.push({
         startTime: exception.start,
         endTime: exception.end,
         periodType: 'demurrage',
         appliedClauseId: null,
+        calendarDates: exception.calendarDates,
       });
-      usedSeconds += (exception.end.getTime() - exception.start.getTime()) / 1000;
+      usedSeconds +=
+        (exception.end.getTime() - exception.start.getTime()) / 1000;
     } else {
       periods.push({
         startTime: exception.start,
         endTime: exception.end,
         periodType: 'exception',
         appliedClauseId: exception.clauseId,
+        calendarDates: exception.calendarDates,
       });
       if (exception.kind === 'weather') {
         weatherDeductedSeconds +=
@@ -855,6 +1217,44 @@ function buildPeriods(
     ignoredExceptions,
     weatherDeductedSeconds,
   };
+}
+
+function buildPreDemurragePeriods(
+  commencedAt: Date,
+  completedAt: Date,
+  exceptions: ExceptionInterval[],
+): EnginePeriod[] {
+  const periods: EnginePeriod[] = [];
+  let cursor = commencedAt;
+
+  const pushCountable = (startTime: Date, endTime: Date): void => {
+    if (endTime.getTime() <= startTime.getTime()) return;
+    periods.push({
+      startTime: new Date(startTime),
+      endTime: new Date(endTime),
+      periodType: 'laytime',
+      appliedClauseId: null,
+    });
+  };
+
+  for (const exception of exceptions) {
+    pushCountable(cursor, exception.start);
+    periods.push({
+      startTime: new Date(exception.start),
+      endTime: new Date(exception.end),
+      periodType: 'exception',
+      appliedClauseId: exception.clauseId,
+      exceptionKind: exception.kind,
+      calendarDates: exception.calendarDates?.map((entry) => ({
+        localDate: entry.localDate,
+        reasons: [...entry.reasons],
+      })),
+    });
+    cursor = exception.end;
+  }
+
+  pushCountable(cursor, completedAt);
+  return periods;
 }
 
 function priceResult(

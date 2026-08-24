@@ -127,3 +127,44 @@ export function getProductionCorsOrigins(
 
   return validateCommaSeparatedValues('CORS_ORIGINS', value as string);
 }
+
+export function validateAuthenticationEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (env.DB_ENABLED?.toLowerCase() !== 'true') {
+    return;
+  }
+
+  const authMode = env.AUTH_MODE?.trim().toLowerCase();
+
+  if (authMode !== 'firebase' && authMode !== 'development') {
+    throw new Error(
+      'Invalid authentication configuration: AUTH_MODE must be "firebase" or "development" when DB_ENABLED is true.',
+    );
+  }
+
+  if (env.NODE_ENV === 'production' && authMode !== 'firebase') {
+    throw new Error(
+      'Invalid authentication configuration: production requires AUTH_MODE="firebase".',
+    );
+  }
+
+  if (authMode === 'firebase' && isMissing(env.FIREBASE_PROJECT_ID)) {
+    throw new Error(
+      'Invalid authentication configuration: FIREBASE_PROJECT_ID is required in Firebase authentication mode.',
+    );
+  }
+
+  if (authMode === 'development') {
+    const missing = [
+      'AUTH_DEVELOPMENT_TOKEN',
+      'AUTH_DEVELOPMENT_FIREBASE_UID',
+    ].filter((name) => isMissing(env[name]));
+
+    if (missing.length > 0) {
+      throw new Error(
+        `Invalid authentication configuration: development mode requires ${missing.join(', ')}.`,
+      );
+    }
+  }
+}

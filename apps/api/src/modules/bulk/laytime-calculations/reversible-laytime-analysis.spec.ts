@@ -220,7 +220,7 @@ describe('analyzeReversibleLaytime', () => {
 });
 
 describe('resolveReversibleLaytimeRule', () => {
-  it('selects the first reversible clause and warns on duplicates', () => {
+  it('selects the active reversible clause when another clause is disabled', () => {
     expect(
       resolveReversibleLaytimeRule([
         {
@@ -238,12 +238,68 @@ describe('resolveReversibleLaytimeRule', () => {
       ]),
     ).toEqual(
       expect.objectContaining({
-        clauseId: 'reversible-1',
+        clauseId: 'reversible-2',
         clauseType: 'reversible_laytime',
-        enabled: false,
-        clauseParameters: { enabled: false },
-        rawText: 'Reversible laytime enabled',
-        warnings: ['Multiple "reversible_laytime" clauses found; the first one was used.'],
+        enabled: true,
+        contractStatus: 'legacy',
+        clauseParameters: { enabled: true },
+        rawText: 'Reversible laytime enabled again',
+        warnings: [],
+      }),
+    );
+  });
+
+  it('marks duplicate active reversible clauses as ambiguous', () => {
+    expect(
+      resolveReversibleLaytimeRule([
+        {
+          id: 'reversible-1',
+          clauseType: 'reversible_laytime',
+          parameters: {
+            enabled: true,
+            settlementVersion: 1,
+            allowanceMode: 'sum_operation_allowances',
+          },
+        },
+        {
+          id: 'reversible-2',
+          clauseType: 'reversible_laytime',
+          parameters: {
+            enabled: true,
+            settlementVersion: 1,
+            allowanceMode: 'sum_operation_allowances',
+          },
+        },
+      ]),
+    ).toEqual(
+      expect.objectContaining({
+        clauseId: null,
+        enabled: null,
+        contractStatus: 'ambiguous',
+        conflictingClauseIds: ['reversible-1', 'reversible-2'],
+        warnings: [expect.stringContaining('Multiple active')],
+      }),
+    );
+  });
+
+  it('recognizes an explicit Version 1 reversible contract', () => {
+    expect(
+      resolveReversibleLaytimeRule([
+        {
+          id: 'reversible-v1',
+          clauseType: 'reversible_laytime',
+          parameters: {
+            enabled: true,
+            settlementVersion: 1,
+            allowanceMode: 'sum_operation_allowances',
+          },
+        },
+      ]),
+    ).toEqual(
+      expect.objectContaining({
+        contractStatus: 'v1',
+        settlementVersion: 1,
+        allowanceMode: 'sum_operation_allowances',
       }),
     );
   });
@@ -262,6 +318,7 @@ describe('resolveReversibleLaytimeRule', () => {
         clauseId: null,
         clauseType: 'reversible_laytime',
         enabled: null,
+        contractStatus: 'absent',
         clauseParameters: null,
         rawText: null,
         warnings: [],

@@ -15,13 +15,14 @@ import { ListVoyagesQueryDto } from './dto/list-voyages-query.dto';
 import { UpdateVoyageDto } from './dto/update-voyage.dto';
 import { VoyageSummary } from './voyage-summary';
 import { VoyagesService } from './voyages.service';
+import type { VoyageListItem } from './voyages.service';
 
 @Controller('voyages')
 export class VoyagesController {
   constructor(private readonly voyagesService: VoyagesService) {}
 
   @Get()
-  findAll(@Query() query: ListVoyagesQueryDto): Promise<Paginated<Voyage>> {
+  findAll(@Query() query: ListVoyagesQueryDto): Promise<Paginated<VoyageListItem>> {
     return this.voyagesService.findAll(query);
   }
 

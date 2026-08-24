@@ -70,6 +70,32 @@ describe('normalizeCommercialTermsToClauses', () => {
     ]);
   });
 
+  it('preserves the complete versioned SHEX calendar during initialization normalization', () => {
+    expect(
+      normalizeCommercialTermsToClauses({
+        id: 'charter-party-3',
+        timeCountingBasis: 'SHEX',
+        shexCalendar: {
+          calendarVersion: 1,
+          timeZone: 'Australia/Sydney',
+          holidayDates: ['2026-12-25'],
+          saturdayExcepted: false,
+        },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        clauseType: 'shex_shinc',
+        parameters: {
+          shex: true,
+          calendarVersion: 1,
+          timeZone: 'Australia/Sydney',
+          holidayDates: ['2026-12-25'],
+          saturdayExcepted: false,
+        },
+      }),
+    ]);
+  });
+
   it('keeps NOR notice parsing unchanged', () => {
     expect(parseNoticeHours('12 hours')).toBe(12);
     expect(parseNoticeHours('Immediate')).toBe(0);
@@ -84,6 +110,16 @@ describe('supported commercial clause types', () => {
 
   it('includes atutc as an explicit supported clause type', () => {
     expect(SUPPORTED_COMMERCIAL_CLAUSE_TYPES).toContain('atutc');
+  });
+
+  it('includes nor_commencement_schedule as a supported clause type', () => {
+    expect(SUPPORTED_COMMERCIAL_CLAUSE_TYPES).toContain(
+      'nor_commencement_schedule',
+    );
+  });
+
+  it('includes wifpon as a supported clause type', () => {
+    expect(SUPPORTED_COMMERCIAL_CLAUSE_TYPES).toContain('wifpon');
   });
 });
 
@@ -179,6 +215,77 @@ describe('resolveClausesForOperation', () => {
       }),
     ]);
   });
+
+  it.each(COMMERCIAL_CLAUSE_OPERATIONS)(
+    'selects matching operation-specific wifpon over global fallback for %s',
+    (operation) => {
+      const opposite = operation === 'Loading' ? 'Discharge' : 'Loading';
+      const selected = resolveClausesForOperation(
+        [
+          clause('global-wifpon', 'wifpon', { enabled: false }),
+          clause(`${operation.toLowerCase()}-wifpon`, 'wifpon', {
+            enabled: true,
+            operation,
+          }),
+          clause(`${opposite.toLowerCase()}-wifpon`, 'wifpon', {
+            enabled: true,
+            operation: opposite,
+          }),
+        ],
+        operation,
+      );
+
+      expect(selected).toEqual([
+        expect.objectContaining({ id: `${operation.toLowerCase()}-wifpon` }),
+      ]);
+    },
+  );
+
+  it('uses global wifpon when no matching operation-specific clause exists', () => {
+    const selected = resolveClausesForOperation(
+      [
+        clause('global-wifpon', 'wifpon', { enabled: true }),
+        clause('discharge-wifpon', 'wifpon', {
+          enabled: false,
+          operation: 'Discharge',
+        }),
+      ],
+      'Loading',
+    );
+
+    expect(selected).toEqual([
+      expect.objectContaining({ id: 'global-wifpon' }),
+    ]);
+  });
+
+  it('excludes opposite-operation wifpon when no global fallback exists', () => {
+    expect(
+      resolveClausesForOperation(
+        [
+          clause('discharge-wifpon', 'wifpon', {
+            enabled: true,
+            operation: 'Discharge',
+          }),
+        ],
+        'Loading',
+      ),
+    ).toEqual([]);
+  });
+
+  it.each(['wibon', 'wipon'] as const)(
+    'does not infer wifpon from %s',
+    (clauseType) => {
+      const selected = resolveClausesForOperation(
+        [clause(`global-${clauseType}`, clauseType, { enabled: true })],
+        'Loading',
+      );
+
+      expect(selected).toEqual([
+        expect.objectContaining({ clauseType }),
+      ]);
+      expect(selected.some((entry) => entry.clauseType === 'wifpon')).toBe(false);
+    },
+  );
 
   it('warns and keeps the first same-operation clause when duplicates exist', () => {
     const warnings: string[] = [];

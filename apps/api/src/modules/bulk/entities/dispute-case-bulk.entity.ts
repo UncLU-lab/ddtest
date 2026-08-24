@@ -8,6 +8,7 @@ import {
 } from 'typeorm';
 import { UuidEntity } from '../../../database/entities/base.entity';
 import { Voyage } from './voyage.entity';
+import type { SettlementCurrency } from '../currency/settlement-currency';
 
 export const BULK_DISPUTE_TYPES = [
   'demurrage_counter',
@@ -44,6 +45,9 @@ export class DisputeCaseBulk extends UuidEntity {
     scale: 2,
   })
   amountDisputed!: string;
+
+  @Column({ type: 'varchar', length: 3, nullable: true })
+  currency?: SettlementCurrency | null;
 
   @Column({ type: 'varchar', length: 30, default: 'Open' })
   status!: DisputeStatus;

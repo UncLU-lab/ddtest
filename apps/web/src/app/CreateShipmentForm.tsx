@@ -16,6 +16,7 @@ import {
   useShipments,
   ShipmentDraft,
   ShipmentCommercialTermsDraft,
+  ShipmentShexCalendarDraft,
   emptyShipmentCommercialTermsDraft,
   missingDraftFields,
 } from "./data/ShipmentsContext";
@@ -126,6 +127,45 @@ function Select({
   );
 }
 
+function BulkOperationSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange?: (v: string) => void;
+}) {
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(e) => onChange?.(e.target.value)}
+        className="w-full appearance-none outline-none cursor-pointer"
+        style={{
+          height: "34px",
+          border: "0.5px solid #E5E7EB",
+          borderRadius: "8px",
+          padding: "0 28px 0 10px",
+          fontSize: "12px",
+          color: "#111827",
+          backgroundColor: "#ffffff",
+          transition: "border-color 0.15s",
+        }}
+        onFocus={(e) => (e.currentTarget.style.borderColor = "#1A4ED8")}
+        onBlur={(e) => (e.currentTarget.style.borderColor = "#E5E7EB")}
+      >
+        <option value="">Select bulk operation type…</option>
+        <option value="dry_bulk">Dry bulk</option>
+        <option value="tanker">Tanker / liquid bulk</option>
+      </select>
+      <ChevronDown
+        size={12}
+        className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+        style={{ color: "#9CA3AF" }}
+      />
+    </div>
+  );
+}
+
 function SectionEyebrow({
   icon,
   label,
@@ -181,6 +221,86 @@ function Divider() {
       className="my-4"
       style={{ borderTop: "0.5px solid #E5E7EB" }}
     />
+  );
+}
+
+function ShexCalendarFields({
+  calendar,
+  onChange,
+}: {
+  calendar: ShipmentShexCalendarDraft;
+  onChange: (calendar: ShipmentShexCalendarDraft) => void;
+}) {
+  const updateHoliday = (index: number, value: string) => {
+    const holidayDates = [...calendar.holidayDates];
+    holidayDates[index] = value;
+    onChange({ ...calendar, holidayDates });
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border p-3" style={{ borderColor: "#D1D5DB" }}>
+      <p style={{ fontSize: "10px", color: "#6B7280", marginBottom: "10px" }}>
+        SHEX calendar dates use the contractual timezone and are stored with the Charter Party.
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <FormField label="Contractual timezone" required>
+          <Input
+            value={calendar.timeZone}
+            onChange={(timeZone) => onChange({ ...calendar, timeZone })}
+            placeholder="e.g. Australia/Sydney"
+          />
+        </FormField>
+        <FormField label="Saturday excepted?" required>
+          <Select
+            value={calendar.saturdayExcepted}
+            onChange={(value) =>
+              onChange({
+                ...calendar,
+                saturdayExcepted: value as ShipmentShexCalendarDraft["saturdayExcepted"],
+              })
+            }
+            options={["No", "Yes"]}
+          />
+        </FormField>
+      </div>
+      <div className="mt-3 flex flex-col gap-2">
+        <span style={{ fontSize: "10px", color: "#6B7280" }}>
+          Contractual holiday dates (optional dates, explicit empty list allowed)
+        </span>
+        {calendar.holidayDates.map((date, index) => (
+          <div key={`${index}-${date}`} className="flex gap-2">
+            <Input
+              value={date}
+              onChange={(value) => updateHoliday(index, value)}
+              placeholder="YYYY-MM-DD"
+            />
+            <button
+              type="button"
+              onClick={() =>
+                onChange({
+                  ...calendar,
+                  holidayDates: calendar.holidayDates.filter((_, itemIndex) => itemIndex !== index),
+                })
+              }
+              className="rounded-lg border px-3"
+              style={{ borderColor: "#E5E7EB", fontSize: "11px", color: "#6B7280" }}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() =>
+            onChange({ ...calendar, holidayDates: [...calendar.holidayDates, ""] })
+          }
+          className="self-start rounded-lg border px-3 py-1.5"
+          style={{ borderColor: "#D1D5DB", fontSize: "11px", color: "#374151" }}
+        >
+          Add holiday date
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -242,7 +362,7 @@ function OperationTermsSection({
             options={["", "SHEX", "SHINC"]}
           />
         </FormField>
-        <FormField label="NOR notice period">
+        <FormField label="Notice period">
           <Input
             value={terms.norNoticePeriod}
             onChange={(v) => onChange("norNoticePeriod", v)}
@@ -250,6 +370,13 @@ function OperationTermsSection({
           />
         </FormField>
       </div>
+
+      {terms.timeCountingBasis === "SHEX" && (
+        <ShexCalendarFields
+          calendar={terms.shexCalendar}
+          onChange={(calendar) => onChange("shexCalendar", calendar)}
+        />
+      )}
 
       <div className="grid grid-cols-3 gap-3">
         <FormField label="Weather working">
@@ -335,10 +462,10 @@ export default function CreateShipmentForm() {
     );
   }
 
-  function updateCommercialTerms(
+  function updateCommercialTerms<K extends keyof ShipmentCommercialTermsDraft>(
     section: "loadingTerms" | "dischargeTerms",
-    key: keyof ShipmentCommercialTermsDraft,
-    value: string,
+    key: K,
+    value: ShipmentCommercialTermsDraft[K],
   ) {
     const current = draft[section] ?? emptyShipmentCommercialTermsDraft;
 
@@ -684,10 +811,17 @@ export default function CreateShipmentForm() {
               <FormField label="Time counting basis" required>
                 <Select value={draft.timeCountingBasis} onChange={(v) => update("timeCountingBasis", v)} options={["6h SHINC", "SHEX", "SHINC", "WWD", "CQD"]} />
               </FormField>
-              <FormField label="NOR notice period">
+              <FormField label="Notice period">
                 <Select value={draft.norNoticePeriod} onChange={(v) => update("norNoticePeriod", v)} options={["6 hours", "12 hours", "24 hours", "Immediate"]} />
               </FormField>
             </div>
+
+            {draft.timeCountingBasis === "SHEX" && (
+              <ShexCalendarFields
+                calendar={draft.shexCalendar}
+                onChange={(calendar) => update("shexCalendar", calendar)}
+              />
+            )}
 
             <div className="grid grid-cols-2 gap-3 mt-3">
               <FormField label="Laytime operation" required>
@@ -695,6 +829,12 @@ export default function CreateShipmentForm() {
                   value={draft.laytimeOperation}
                   onChange={(v) => update("laytimeOperation", v as ShipmentDraft["laytimeOperation"])}
                   options={["Discharge", "Loading"]}
+                />
+              </FormField>
+              <FormField label="Bulk operation type" required>
+                <BulkOperationSelect
+                  value={draft.bulkOperationType}
+                  onChange={(v) => update("bulkOperationType", v as ShipmentDraft["bulkOperationType"])}
                 />
               </FormField>
             </div>
