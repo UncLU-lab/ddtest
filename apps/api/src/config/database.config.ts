@@ -1,13 +1,17 @@
 import { registerAs } from '@nestjs/config';
 import { DataSourceOptions } from 'typeorm';
 import { databaseEntities } from '../database/entities';
-import { validateProductionDatabaseEnvironment } from './env-validation';
+import {
+  readPositiveIntegerEnvironmentValue,
+  validateProductionDatabaseEnvironment,
+} from './env-validation';
 
 export type AppDatabaseConfig = DataSourceOptions & {
   autoLoadEntities?: boolean;
 };
 
 export const DEFAULT_APPLICATION_DATABASE_ROLE = 'demurrage_defender_app';
+export const DEFAULT_RUNTIME_DATABASE_POOL_MAX = 2;
 
 export interface DatabaseConfigOptions {
   useApplicationRole?: boolean;
@@ -53,6 +57,11 @@ export function createDatabaseConfig(
   const applicationRole =
     process.env.DB_APPLICATION_ROLE?.trim() ||
     DEFAULT_APPLICATION_DATABASE_ROLE;
+  const poolMax = readPositiveIntegerEnvironmentValue(
+    'DB_POOL_MAX',
+    process.env.DB_POOL_MAX,
+    DEFAULT_RUNTIME_DATABASE_POOL_MAX,
+  );
 
   if (!/^[a-z_][a-z0-9_]*$/.test(applicationRole)) {
     throw new Error(
@@ -83,6 +92,7 @@ export function createDatabaseConfig(
           // always assume the non-owner role that is subject to RLS.
           extra: {
             options: `-c role=${applicationRole}`,
+            max: poolMax,
           },
         }),
   };

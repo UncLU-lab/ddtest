@@ -36,10 +36,34 @@ function validatePort(name: string, value: string | undefined): void {
   }
 }
 
+export function readPositiveIntegerEnvironmentValue(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+): number {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(
+      `Invalid configuration: ${name} must be a positive integer.`,
+    );
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `Invalid configuration: ${name} must be a positive integer.`,
+    );
+  }
+
+  return parsed;
+}
+
 function validateCommaSeparatedValues(name: string, value: string): string[] {
-  const values = value
-    .split(',')
-    .map((entry) => entry.trim());
+  const values = value.split(',').map((entry) => entry.trim());
 
   if (values.length === 0 || values.some((entry) => entry === '')) {
     throw new Error(
@@ -66,6 +90,7 @@ export function validateProductionEnvironment(
   validateBooleanFlag('DB_ENABLED', env.DB_ENABLED);
   validatePort('PORT', env.PORT);
   validatePort('DB_PORT', env.DB_PORT);
+  readPositiveIntegerEnvironmentValue('DB_POOL_MAX', env.DB_POOL_MAX, 2);
   validateBooleanFlag('DB_SSL', env.DB_SSL);
   validateBooleanFlag(
     'DB_SSL_REJECT_UNAUTHORIZED',
@@ -149,10 +174,20 @@ export function validateAuthenticationEnvironment(
     );
   }
 
-  if (authMode === 'firebase' && isMissing(env.FIREBASE_PROJECT_ID)) {
-    throw new Error(
-      'Invalid authentication configuration: FIREBASE_PROJECT_ID is required in Firebase authentication mode.',
-    );
+  if (authMode === 'firebase') {
+    if (isMissing(env.FIREBASE_PROJECT_ID)) {
+      throw new Error(
+        'Invalid authentication configuration: FIREBASE_PROJECT_ID is required in Firebase authentication mode.',
+      );
+    }
+
+    const hasClientEmail = !isMissing(env.FIREBASE_CLIENT_EMAIL);
+    const hasPrivateKey = !isMissing(env.FIREBASE_PRIVATE_KEY);
+    if (hasClientEmail !== hasPrivateKey) {
+      throw new Error(
+        'Invalid authentication configuration: FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY must be provided together.',
+      );
+    }
   }
 
   if (authMode === 'development') {

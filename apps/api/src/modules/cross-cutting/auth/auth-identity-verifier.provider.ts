@@ -8,8 +8,25 @@ import {
 import { DevelopmentIdentityVerifier } from './development-identity.verifier';
 import { FirebaseIdentityVerifier } from './firebase-identity.verifier';
 
+export type FirebaseAdminModules = {
+  app: typeof import('firebase-admin/app');
+  auth: typeof import('firebase-admin/auth');
+};
+
+type FirebaseAdminLoader = () => Promise<FirebaseAdminModules>;
+
+async function loadFirebaseAdmin(): Promise<FirebaseAdminModules> {
+  const [app, auth] = await Promise.all([
+    import('firebase-admin/app'),
+    import('firebase-admin/auth'),
+  ]);
+
+  return { app, auth };
+}
+
 export async function createAuthIdentityVerifier(
   config: ConfigService,
+  firebaseAdminLoader: FirebaseAdminLoader = loadFirebaseAdmin,
 ): Promise<AuthIdentityVerifier> {
   validateAuthenticationEnvironment(process.env);
 
@@ -27,15 +44,24 @@ export async function createAuthIdentityVerifier(
   }
 
   const projectId = config.getOrThrow<string>('FIREBASE_PROJECT_ID');
-  const [{ applicationDefault, getApps, initializeApp }, { getAuth }] =
-    await Promise.all([
-      import('firebase-admin/app'),
-      import('firebase-admin/auth'),
-    ]);
+  const clientEmail = config.get<string>('FIREBASE_CLIENT_EMAIL');
+  const privateKey = config.get<string>('FIREBASE_PRIVATE_KEY');
+  const {
+    app: { applicationDefault, cert, getApps, initializeApp },
+    auth: { getAuth },
+  } = await firebaseAdminLoader();
+  const credential =
+    clientEmail && privateKey
+      ? cert({
+          projectId,
+          clientEmail,
+          privateKey: privateKey.replace(/\\n/g, '\n'),
+        })
+      : applicationDefault();
   const firebaseApp =
     getApps()[0] ??
     initializeApp({
-      credential: applicationDefault(),
+      credential,
       projectId,
     });
 
