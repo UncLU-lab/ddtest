@@ -40,6 +40,7 @@
     "db:capabilities": "ts-node -r tsconfig-paths/register ./src/scripts/probe-postgres-capabilities.ts",
     "db:rls-audit": "ts-node -r tsconfig-paths/register ./src/scripts/audit-rls-structure.ts",
     "db:rls-verify": "ts-node -r tsconfig-paths/register ./src/scripts/verify-postgres-rls.ts",
+    "provision:staging-user": "ts-node -r tsconfig-paths/register ./src/scripts/provision-staging-user.ts",
     "seed:test-shipments": "ts-node -r tsconfig-paths/register ./src/scripts/seed-test-shipments.ts",
     "prepare": "husky",
     "release": "standard-version",
