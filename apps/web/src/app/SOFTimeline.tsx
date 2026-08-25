@@ -176,7 +176,7 @@ const initialEvents: TimelineRow[] = [
   {
     n: "05", state: "deductible", timestamp: "24 Oct 11:20", name: "Rain squall — operations suspended",
     detail: "Operations halted due to adverse weather conditions",
-    tag: "Deductible", tagBg: "#F3F4F6", tagText: "#374151",
+    tag: "Exception candidate", tagBg: "#F3F4F6", tagText: "#374151",
     duration: "2h 30m", cause: "Weather", causeActive: true,
   },
   {
@@ -188,7 +188,7 @@ const initialEvents: TimelineRow[] = [
   {
     n: "07", state: "deductible", timestamp: "25 Oct 03:40", name: "Terminal breakdown — arm fault",
     detail: "Loading arm hydraulics failed. Terminal responsibility",
-    tag: "Deductible", tagBg: "#F3F4F6", tagText: "#374151",
+    tag: "Exception candidate", tagBg: "#F3F4F6", tagText: "#374151",
     duration: "1h 30m", cause: "Terminal", causeActive: true,
   },
   {
@@ -817,7 +817,7 @@ function toTimelineRow(event: SofEvent, index: number): TimelineRow {
     detail: inferDetail(event.eventType, parsed, event.isManualOverride, event.remarks),
     tag:
       state === "deductible"
-        ? "Deductible"
+        ? "Exception candidate"
         : state === "pending"
           ? "Pending"
           : "Counting",
@@ -879,7 +879,7 @@ function LaytimeBar() {
       <div className="flex items-center gap-4">
         {[
           { color: "#3B82F6", label: "Counting" },
-          { color: "#D1D5DB", label: "Deductible" },
+          { color: "#D1D5DB", label: "Exception candidate" },
           { color: "#E5E7EB", label: "Remaining" },
         ].map((item) => (
           <div key={item.label} className="flex items-center gap-1.5">
@@ -1059,8 +1059,11 @@ function AddEventModal({
               checked={form.deductible}
               onChange={(e) => setForm((current) => ({ ...current, deductible: e.target.checked }))}
             />
-            Mark as deductible
+            Mark as exception candidate
           </label>
+          <p style={{ fontSize: "11px", color: "#6B7280", lineHeight: 1.45 }}>
+            Actual deductible time is determined by Charter Party rules during the laytime calculation.
+          </p>
 
           <div>
             <label htmlFor="sof-event-notes" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
@@ -1477,7 +1480,7 @@ export default function SOFTimeline() {
   const sourceOperationText = sourceOperation ? `Operation: ${formatOperationLabel(sourceOperation)}` : null;
 
   const warningText = eventCounts.deductible + eventCounts.pending > 0
-    ? `Persisted SOF loaded from backend. ${eventCounts.deductible} deductible and ${eventCounts.pending} pending event(s) require review.`
+    ? `Persisted SOF loaded from backend. ${eventCounts.deductible} exception candidate and ${eventCounts.pending} pending event(s) require review.`
     : "Persisted SOF loaded from backend.";
 
   const shipmentMeta = [

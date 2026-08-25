@@ -81,6 +81,27 @@ function buildEvent() {
   };
 }
 
+function buildRainEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "rain-1",
+    sofId: "sof-1",
+    eventTime: "2026-09-16T00:00:00.000Z",
+    eventType: "RAIN_STOPPAGE",
+    operation: "Discharge" as const,
+    remarks: JSON.stringify({
+      cause: "Weather",
+      duration: "6",
+      deductible: false,
+      notes: "Rain stopped cargo work",
+    }),
+    confidenceScore: null,
+    isManualOverride: true,
+    overrideReason: null,
+    createdAt: "2026-09-16T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 function buildCalculation(
   overrides: Record<string, unknown> = {},
 ) {
@@ -203,5 +224,78 @@ describe("SOFTimeline laytime error handling", () => {
       screen.getAllByText("Not available for this calculation version.").length,
     ).toBeGreaterThan(0);
     expect(screen.queryByText("Discharge completion found")).not.toBeInTheDocument();
+  });
+});
+
+describe("SOFTimeline exception candidate semantics", () => {
+  it("shows neutral exception-candidate wording for weather events even when remarks.deductible is false", async () => {
+    apiMocks.getSofEvents.mockResolvedValue({
+      data: [buildRainEvent()],
+    });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Rain stoppage")).toBeInTheDocument();
+    expect(screen.getAllByText("Exception candidate").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Deductible")).not.toBeInTheDocument();
+  });
+
+  it("uses neutral exception-candidate wording in the manual event form and keeps the persisted remarks payload compatible", async () => {
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("SOF event log")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /add event/i }));
+
+    expect(
+      screen.getByLabelText(/mark as exception candidate/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Actual deductible time is determined by Charter Party rules during the laytime calculation.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText(/mark as deductible/i)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/event type/i), {
+      target: { value: "RAIN_STOPPAGE" },
+    });
+    fireEvent.change(screen.getByLabelText(/event time/i), {
+      target: { value: "2026-09-16T00:00" },
+    });
+    fireEvent.change(screen.getByLabelText(/cause/i), {
+      target: { value: "Weather" },
+    });
+    fireEvent.click(screen.getByLabelText(/mark as exception candidate/i));
+    fireEvent.change(screen.getByLabelText(/^notes$/i), {
+      target: { value: "Rain stopped cargo work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save event/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.createSofEvent).toHaveBeenCalledTimes(1);
+    });
+
+    expect(apiMocks.createSofEvent).toHaveBeenCalledWith(
+      "sof-1",
+      expect.objectContaining({
+        eventType: "RAIN_STOPPAGE",
+        remarks: JSON.stringify({
+          cause: "Weather",
+          deductible: true,
+          notes: "Rain stopped cargo work",
+        }),
+      }),
+    );
+  });
+
+  it('keeps engine-backed calculation totals labeled as "Deductions"', async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [buildCalculation()],
+    });
+
+    render(<SOFTimeline />);
+
+    expect((await screen.findAllByText("Deductions")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Backend exception periods")).toBeInTheDocument();
   });
 });
