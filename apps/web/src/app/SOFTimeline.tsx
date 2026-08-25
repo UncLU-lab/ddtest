@@ -1494,6 +1494,7 @@ export default function SOFTimeline() {
   const calculationPeriods = getCalculationPeriods(laytimeCalculation);
   const sofDocumentSelectionAudit = getSofDocumentSelectionAudit(laytimeCalculation);
   const demurrageAudit = getDemurrageAudit(laytimeCalculation);
+  const operationSelectionAudit = getOperationSelectionAudit(laytimeCalculation);
   const weatherWorkingAudit = getWeatherWorkingAudit(laytimeCalculation);
   const reversibleLaytimeAudit = getReversibleLaytimeAudit(laytimeCalculation);
   const allowedSeconds = intervalStringToSeconds(laytimeCalculation?.allowedLaytime);
