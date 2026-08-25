@@ -358,6 +358,13 @@ export interface LaytimeDecisionSnapshot {
     commencedAt?: string | null;
     [key: string]: unknown;
   };
+  cargoCompletion?: {
+    selectedTime?: string | null;
+    eventTime?: string | null;
+    selectedEventId?: string | null;
+    excludedEventIds?: string[] | null;
+    [key: string]: unknown;
+  } | null;
   weatherWorking?: {
     clauseId?: string | null;
     clauseParameters?: Record<string, unknown> | null;

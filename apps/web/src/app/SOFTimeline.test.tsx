@@ -137,6 +137,49 @@ function buildCalculation(
   };
 }
 
+function buildNonReversibleCalculation(
+  overrides: Record<string, unknown> = {},
+) {
+  return buildCalculation({
+    allowedLaytime: null,
+    usedLaytime: null,
+    decisionSnapshot: {
+      commencement: {
+        commencedAt: "2026-09-15T06:45:00.000Z",
+      },
+      cargoCompletion: {
+        selectedTime: "2026-09-19T04:00:00.000Z",
+        eventTime: "2026-09-19T04:00:00.000Z",
+        selectedEventId: "completion-1",
+        excludedEventIds: [],
+      },
+      nonReversibleSettlement: {
+        version: 1,
+        settlementMode: "separate_operation_results",
+        expectedOperationScope: "Discharge",
+        expectedOperations: ["Discharge"],
+        settlementStatus: "PROVISIONAL",
+        operations: {
+          Discharge: {
+            operation: "Discharge",
+            allowedSeconds: 259200,
+            usedSeconds: 299700,
+          },
+        },
+        monetaryAggregation: {
+          status: "AVAILABLE",
+          currency: "USD",
+          netExposure: 9375,
+          netDirection: "NET_PAYABLE",
+          legalNetting: false,
+          claimableAsAggregate: false,
+        },
+      },
+    },
+    ...overrides,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   apiMocks.getSofDocuments.mockResolvedValue({ data: [buildDocument()] });
@@ -297,5 +340,265 @@ describe("SOFTimeline exception candidate semantics", () => {
 
     expect((await screen.findAllByText("Deductions")).length).toBeGreaterThan(0);
     expect(screen.getByText("Backend exception periods")).toBeInTheDocument();
+  });
+});
+
+describe("SOFTimeline non-reversible single-operation summary", () => {
+  it("shows Discharge-only summary values from the persisted non-reversible operation result", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [buildNonReversibleCalculation()],
+    });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Laytime allowed")).toBeInTheDocument();
+    expect(screen.getAllByText("3d 00h 00m").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("3d 11h 15m").length).toBeGreaterThan(0);
+    expect(screen.getByText("11h 15m over")).toBeInTheDocument();
+    expect(screen.getAllByText("Discharge operation result").length).toBeGreaterThan(0);
+  });
+
+  it("shows Loading-only summary values from the persisted non-reversible operation result", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [
+        buildNonReversibleCalculation({
+          decisionSnapshot: {
+            commencement: {
+              commencedAt: "2026-09-10T06:00:00.000Z",
+            },
+            cargoCompletion: {
+              selectedTime: "2026-09-12T04:00:00.000Z",
+              eventTime: "2026-09-12T04:00:00.000Z",
+              selectedEventId: "completion-loading-1",
+              excludedEventIds: [],
+            },
+            nonReversibleSettlement: {
+              version: 1,
+              settlementMode: "separate_operation_results",
+              expectedOperationScope: "Loading",
+              expectedOperations: ["Loading"],
+              settlementStatus: "PROVISIONAL",
+              operations: {
+                Loading: {
+                  operation: "Loading",
+                  allowedSeconds: 172800,
+                  usedSeconds: 180000,
+                },
+              },
+              monetaryAggregation: {
+                status: "AVAILABLE",
+                currency: "USD",
+                netExposure: 2000,
+                netDirection: "NET_PAYABLE",
+                legalNetting: false,
+                claimableAsAggregate: false,
+              },
+            },
+          },
+        }),
+      ],
+    });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Laytime allowed")).toBeInTheDocument();
+    expect(screen.getAllByText("2d 00h 00m").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("2d 02h 00m").length).toBeGreaterThan(0);
+    expect(screen.getByText("02h 00m over")).toBeInTheDocument();
+    expect(screen.getAllByText("Loading operation result").length).toBeGreaterThan(0);
+  });
+
+  it("does not fabricate aggregate time totals for LoadingAndDischarge scope", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [
+        buildNonReversibleCalculation({
+          decisionSnapshot: {
+            commencement: {
+              commencedAt: "2026-09-15T06:45:00.000Z",
+            },
+            cargoCompletion: {
+              selectedTime: "2026-09-19T04:00:00.000Z",
+              eventTime: "2026-09-19T04:00:00.000Z",
+              selectedEventId: "completion-1",
+              excludedEventIds: [],
+            },
+            nonReversibleSettlement: {
+              version: 1,
+              settlementMode: "separate_operation_results",
+              expectedOperationScope: "LoadingAndDischarge",
+              expectedOperations: ["Loading", "Discharge"],
+              settlementStatus: "PROVISIONAL",
+              operations: {
+                Loading: {
+                  operation: "Loading",
+                  allowedSeconds: 172800,
+                  usedSeconds: 180000,
+                },
+                Discharge: {
+                  operation: "Discharge",
+                  allowedSeconds: 259200,
+                  usedSeconds: 299700,
+                },
+              },
+              monetaryAggregation: {
+                status: "AVAILABLE",
+                currency: "USD",
+                netExposure: 9375,
+                netDirection: "NET_PAYABLE",
+                legalNetting: false,
+                claimableAsAggregate: false,
+              },
+            },
+          },
+        }),
+      ],
+    });
+    apiMocks.getLaytimeOperationResults.mockResolvedValue([
+      {
+        id: "loading-child",
+        parentCalculationId: "calc-1",
+        operation: "Loading",
+        voyageId: "voyage-1",
+        version: 2,
+        allowedLaytime: "2 days 00:00:00",
+        usedLaytime: "2 days 02:00:00",
+        demurrageAmount: "2000.00",
+        despatchAmount: "0.00",
+        currency: "USD",
+        status: "Draft",
+        calculatedAt: "2026-09-12T04:00:00.000Z",
+        inputSnapshot: {
+          operationResult: {
+            source: "operation-specific-child-calculation",
+            operation: "Loading",
+          },
+        },
+      },
+      {
+        id: "discharge-child",
+        parentCalculationId: "calc-1",
+        operation: "Discharge",
+        voyageId: "voyage-1",
+        version: 2,
+        allowedLaytime: "3 days 00:00:00",
+        usedLaytime: "3 days 11:15:00",
+        demurrageAmount: "9375.00",
+        despatchAmount: "0.00",
+        currency: "USD",
+        status: "Draft",
+        calculatedAt: "2026-09-19T04:00:00.000Z",
+        inputSnapshot: {
+          operationResult: {
+            source: "operation-specific-child-calculation",
+            operation: "Discharge",
+          },
+        },
+      },
+    ]);
+
+    render(<SOFTimeline />);
+
+    expect((await screen.findAllByText("See operation results")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Loading").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Discharge").length).toBeGreaterThan(0);
+    expect(screen.queryByText("5d 11h 15m")).not.toBeInTheDocument();
+  });
+
+  it("uses the persisted selected cargo-completion time when present", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [buildNonReversibleCalculation()],
+    });
+
+    render(<SOFTimeline />);
+
+    const expectedCompletion = new Date("2026-09-19T04:00:00.000Z").toLocaleString();
+    expect(await screen.findByText("Cargo completion")).toBeInTheDocument();
+    expect(screen.getByText(expectedCompletion)).toBeInTheDocument();
+  });
+
+  it("keeps showing Not available when persisted cargo-completion data is missing", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [
+        buildNonReversibleCalculation({
+          decisionSnapshot: {
+            commencement: {
+              commencedAt: "2026-09-15T06:45:00.000Z",
+            },
+            cargoCompletion: null,
+            nonReversibleSettlement: {
+              version: 1,
+              settlementMode: "separate_operation_results",
+              expectedOperationScope: "Discharge",
+              expectedOperations: ["Discharge"],
+              settlementStatus: "PROVISIONAL",
+              operations: {
+                Discharge: {
+                  operation: "Discharge",
+                  allowedSeconds: 259200,
+                  usedSeconds: 299700,
+                },
+              },
+              monetaryAggregation: {
+                status: "AVAILABLE",
+                currency: "USD",
+                netExposure: 9375,
+                netDirection: "NET_PAYABLE",
+                legalNetting: false,
+                claimableAsAggregate: false,
+              },
+            },
+          },
+        }),
+      ],
+    });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Cargo completion")).toBeInTheDocument();
+    expect(screen.getAllByText("Not available").length).toBeGreaterThan(0);
+  });
+
+  it("keeps reversible and legacy parent summary behavior unchanged", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [
+        buildCalculation({
+          allowedLaytime: "1 days 00:00:00",
+          usedLaytime: "0 days 06:00:00",
+          decisionSnapshot: {
+            commencement: {
+              commencedAt: "2026-09-15T06:45:00.000Z",
+            },
+            cargoCompletion: {
+              selectedTime: "2026-09-15T12:45:00.000Z",
+              eventTime: "2026-09-15T12:45:00.000Z",
+              selectedEventId: "completion-legacy-1",
+              excludedEventIds: [],
+            },
+          },
+        }),
+      ],
+    });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Laytime allowed")).toBeInTheDocument();
+    expect(screen.getAllByText("1d 00h 00m").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("06h 00m").length).toBeGreaterThan(0);
+    expect(screen.queryByText("See operation results")).not.toBeInTheDocument();
+  });
+
+  it("keeps the informational non-reversible net-position wording unchanged", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [buildNonReversibleCalculation()],
+    });
+
+    render(<SOFTimeline />);
+
+    expect(
+      (await screen.findAllByText("USD 9,375.00 NET_PAYABLE")).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Informational only - operation results remain separate"),
+    ).toBeInTheDocument();
   });
 });

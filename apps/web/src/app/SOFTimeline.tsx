@@ -297,7 +297,7 @@ function getCalculationSnapshot(
 }
 
 function getEvidenceAuditIds(calc?: LaytimeCalculation | null) {
-  const snapshot = getCalculationSnapshot(calc) as any;
+  const snapshot = getCalculationSnapshot(calc);
   const commencement = snapshot?.commencement ?? null;
   const completion = snapshot?.cargoCompletion ?? null;
   const selectedIds = new Set<string>();
@@ -314,6 +314,45 @@ function getEvidenceAuditIds(calc?: LaytimeCalculation | null) {
   }
 
   return { selectedIds, excludedIds, completion };
+}
+
+function getSingleOperationSummary(
+  calc?: LaytimeCalculation | null,
+): {
+  operation: "Loading" | "Discharge";
+  allowedSeconds: number;
+  usedSeconds: number;
+} | null {
+  const snapshot = getCalculationSnapshot(calc);
+  const settlement = snapshot?.nonReversibleSettlement ?? null;
+  const expectedOperations = Array.isArray(settlement?.expectedOperations)
+    ? settlement.expectedOperations
+    : [];
+
+  if (expectedOperations.length !== 1) {
+    return null;
+  }
+
+  const operation = expectedOperations[0];
+  if (operation !== "Loading" && operation !== "Discharge") {
+    return null;
+  }
+
+  const operationSummary = settlement?.operations?.[operation] ?? null;
+  const allowedSeconds =
+    typeof operationSummary?.allowedSeconds === "number"
+      ? operationSummary.allowedSeconds
+      : null;
+  const usedSeconds =
+    typeof operationSummary?.usedSeconds === "number"
+      ? operationSummary.usedSeconds
+      : null;
+
+  if (allowedSeconds === null || usedSeconds === null) {
+    return null;
+  }
+
+  return { operation, allowedSeconds, usedSeconds };
 }
 
 function validateDurationHours(value?: string | null) {
@@ -1500,8 +1539,13 @@ export default function SOFTimeline() {
   const operationSelectionAudit = getOperationSelectionAudit(laytimeCalculation);
   const weatherWorkingAudit = getWeatherWorkingAudit(laytimeCalculation);
   const reversibleLaytimeAudit = getReversibleLaytimeAudit(laytimeCalculation);
-  const allowedSeconds = intervalStringToSeconds(laytimeCalculation?.allowedLaytime);
-  const grossUsedSeconds = intervalStringToSeconds(laytimeCalculation?.usedLaytime);
+  const singleOperationSummary = getSingleOperationSummary(laytimeCalculation);
+  const allowedSeconds = singleOperationSummary
+    ? singleOperationSummary.allowedSeconds
+    : intervalStringToSeconds(laytimeCalculation?.allowedLaytime);
+  const grossUsedSeconds = singleOperationSummary
+    ? singleOperationSummary.usedSeconds
+    : intervalStringToSeconds(laytimeCalculation?.usedLaytime);
   const deductionSeconds = calculationPeriods.reduce((total, period) => {
     if (period?.periodType !== "exception") return total;
 
@@ -1538,6 +1582,9 @@ export default function SOFTimeline() {
           ? formatCurrencyAmount(0, calculationCurrency)
           : "—";
   const supplierClockStart = formatDateTime(calculationSnapshot?.commencement?.commencedAt);
+  const cargoCompletionValue = formatDateTime(
+    evidenceAudit.completion?.selectedTime ?? evidenceAudit.completion?.eventTime,
+  );
   const demurrageAuditVisible = Boolean(demurrageAudit.startedAt);
   const weatherWorkingAuditVisible = Boolean(laytimeCalculation);
   const reversibleLaytimeAuditVisible = Boolean(laytimeCalculation);
@@ -1649,12 +1696,45 @@ export default function SOFTimeline() {
   }
 
   const hasLaytimeCalculation = Boolean(laytimeCalculation);
-  const allowedDisplay = formatInterval(laytimeCalculation?.allowedLaytime);
-  const grossUsedDisplay = formatInterval(laytimeCalculation?.usedLaytime);
+  const nonReversibleMultiOperationSummary =
+    !singleOperationSummary &&
+    Array.isArray(nonReversibleSettlement?.expectedOperations) &&
+    nonReversibleSettlement.expectedOperations.length > 1;
+  const allowedDisplay = singleOperationSummary
+    ? formatSecondsAsInterval(singleOperationSummary.allowedSeconds)
+    : nonReversibleMultiOperationSummary
+      ? "See operation results"
+      : formatInterval(laytimeCalculation?.allowedLaytime);
+  const grossUsedDisplay = singleOperationSummary
+    ? formatSecondsAsInterval(singleOperationSummary.usedSeconds)
+    : nonReversibleMultiOperationSummary
+      ? "See operation results"
+      : formatInterval(laytimeCalculation?.usedLaytime);
   const deductionsDisplay = hasLaytimeCalculation ? formatSecondsAsInterval(deductionSeconds) : "—";
   const netUsedDisplay = hasLaytimeCalculation ? formatSecondsAsInterval(netUsedSeconds) : "—";
   const remainingDisplay = hasLaytimeCalculation ? formatSecondsAsInterval(remainingSeconds) : "—";
   const overrunDisplay = hasLaytimeCalculation ? formatSecondsAsInterval(overrunSeconds) : "—";
+  const summaryAllowedDisplay = singleOperationSummary
+    ? formatSecondsAsInterval(singleOperationSummary.allowedSeconds)
+    : nonReversibleMultiOperationSummary
+      ? "See operation results"
+      : allowedDisplay;
+  const summaryUsedDisplay = singleOperationSummary
+    ? formatSecondsAsInterval(singleOperationSummary.usedSeconds)
+    : nonReversibleMultiOperationSummary
+      ? "See operation results"
+      : grossUsedDisplay;
+  const summaryRemainingDisplay =
+    singleOperationSummary || !nonReversibleMultiOperationSummary
+      ? remainingDisplay
+      : "See operation results";
+  const summaryOverrunDisplay =
+    singleOperationSummary || !nonReversibleMultiOperationSummary
+      ? overrunDisplay
+      : "See operation results";
+  const singleOperationSummaryLabel = singleOperationSummary
+    ? `${formatOperationLabel(singleOperationSummary.operation)} operation result`
+    : null;
   const supplierClockNote = laytimeCalculation
     ? `Calculated ${formatDateTime(laytimeCalculation.calculatedAt)}`
     : laytimeLoading
@@ -2004,10 +2084,10 @@ export default function SOFTimeline() {
 
       <div className="flex gap-4 flex-shrink-0" style={{ padding: "14px 24px", borderBottom: "0.5px solid #E5E7EB", backgroundColor: "#ffffff" }}>
         {[
-          { label: "Laytime allowed", value: allowedDisplay, vc: "#1A4ED8", sub: hasLaytimeCalculation ? "Backend result from charter party" : "No persisted calculation yet" },
-          { label: "Laytime used", value: grossUsedDisplay, vc: "#B45309", sub: hasLaytimeCalculation ? "Gross elapsed time from the backend" : "No persisted calculation yet" },
+          { label: "Laytime allowed", value: summaryAllowedDisplay, vc: "#1A4ED8", sub: hasLaytimeCalculation ? (singleOperationSummaryLabel ?? "Backend result from charter party") : "No persisted calculation yet" },
+          { label: "Laytime used", value: summaryUsedDisplay, vc: "#B45309", sub: hasLaytimeCalculation ? (singleOperationSummaryLabel ?? "Gross elapsed time from the backend") : "No persisted calculation yet" },
           { label: "Deductions", value: deductionsDisplay, vc: "#374151", sub: hasLaytimeCalculation ? "Backend exception periods" : "No persisted calculation yet" },
-          { label: "Remaining", value: remainingDisplay, vc: "#22543D", sub: hasLaytimeCalculation ? (overrunDisplay === "—" ? "Net laytime balance from backend" : `${overrunDisplay} over`) : "No persisted calculation yet" },
+          { label: "Remaining", value: summaryRemainingDisplay, vc: "#22543D", sub: hasLaytimeCalculation ? (summaryOverrunDisplay === "—" ? "Net laytime balance from backend" : summaryOverrunDisplay === "See operation results" ? "See operation results" : `${summaryOverrunDisplay} over`) : "No persisted calculation yet" },
           { label: "Net position", value: netPositionValue, vc: "#B45309", sub: hasLaytimeCalculation ? (reversibleConfigured ? reversibleSettlementStatusLabel(reversibleSettlementStatus) : monetarySummary?.status === "AVAILABLE" ? "Informational only - operation results remain separate" : "Authoritative calculation currency unavailable") : "No persisted calculation yet" },
         ].map(({ label, value, vc, sub }) => (
           <div
@@ -2296,11 +2376,11 @@ export default function SOFTimeline() {
             {/* Supplier clock */}
             <p className="mb-1.5" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>Calculation evidence</p>
             <CalcRow label="Laytime commenced" value={supplierClockStart} />
-            <CalcRow label="Cargo completion" value={formatDateTime(evidenceAudit.completion?.completionTime)} />
-            <CalcRow label="Allowed laytime" value={allowedDisplay} valueColor="#1A4ED8" bold />
-            <CalcRow label="Used laytime" value={grossUsedDisplay} />
+            <CalcRow label="Cargo completion" value={cargoCompletionValue} />
+            <CalcRow label="Allowed laytime" value={summaryAllowedDisplay} valueColor="#1A4ED8" bold />
+            <CalcRow label="Used laytime" value={summaryUsedDisplay} />
             <CalcRow label="Deductions" value={formatSecondsAsInterval(deductionSeconds)} valueColor="#22543D" />
-            <CalcRow label="Time balance" value={remainingDisplay} valueColor="#22543D" bold />
+            <CalcRow label="Time balance" value={summaryRemainingDisplay} valueColor="#22543D" bold />
             <CalcRow label="Net position" value={netPositionValue} valueColor="#B45309" bold />
             {reversibleConfigured && (
               <CalcRow
