@@ -948,7 +948,10 @@ function AddEventModal({
   onSave,
   submitting,
 }: AddEventModalProps) {
-  const getInitialForm = (): ManualEventForm => ({
+  const getInitialForm = (): ManualEventForm => {
+    const details = parseManualDetails(event?.remarks);
+
+    return {
     eventTime: formatDateTimeInput(event?.eventTimeIso ?? new Date().toISOString()),
     eventType: event?.eventType ?? ENGINE_EVENT_PRESETS[0].value,
     operation: (event?.operation ?? defaultOperation) as EventOperation,
@@ -957,7 +960,16 @@ function AddEventModal({
     deductible: event?.state === "deductible",
     notes: event?.detail ?? "",
     overrideReason: "",
-  });
+    ...(details
+      ? {
+          cause: details.cause ?? event?.cause ?? "Vessel",
+          duration: details.duration ?? "",
+          deductible: details.deductible ?? event?.state === "deductible",
+          notes: details.notes ?? event?.detail ?? "",
+        }
+      : { duration: "" }),
+    };
+  };
 
   const [form, setForm] = useState<ManualEventForm>(getInitialForm);
 
@@ -1147,7 +1159,7 @@ function AddEventModal({
               className="rounded-md px-3 py-2 text-sm text-white"
               style={{ backgroundColor: "#1A4ED8", opacity: submitting ? 0.7 : 1 }}
             >
-              {submitting ? "Saving..." : "Save event"}
+              {submitting ? "Saving..." : mode === "edit" ? "Save changes" : "Save event"}
             </button>
           </div>
         </form>

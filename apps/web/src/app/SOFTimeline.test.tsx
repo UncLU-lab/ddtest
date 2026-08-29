@@ -182,6 +182,17 @@ function buildNonReversibleCalculation(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  apiMocks.createBulkDispute.mockReset();
+  apiMocks.createNorTenderLocationEvidence.mockReset();
+  apiMocks.createSofDocument.mockReset();
+  apiMocks.createSofEvent.mockReset();
+  apiMocks.getLaytimeCalculations.mockReset();
+  apiMocks.getLaytimeOperationResults.mockReset();
+  apiMocks.getNorTenderLocationEvidence.mockReset();
+  apiMocks.getSofDocuments.mockReset();
+  apiMocks.getSofEvents.mockReset();
+  apiMocks.runLaytimeCalculation.mockReset();
+  apiMocks.updateSofEvent.mockReset();
   apiMocks.getSofDocuments.mockResolvedValue({ data: [buildDocument()] });
   apiMocks.getSofEvents.mockResolvedValue({ data: [buildEvent()] });
   apiMocks.getNorTenderLocationEvidence.mockResolvedValue({ data: [] });
@@ -329,6 +340,72 @@ describe("SOFTimeline exception candidate semantics", () => {
         }),
       }),
     );
+  });
+
+  it("edits a manually entered discharge completion, preserves its ID, and refreshes the event log", async () => {
+    const originalEvent = buildEvent();
+    originalEvent.eventType = "DISCHARGE_COMPLETED";
+    originalEvent.remarks = JSON.stringify({
+      cause: "Vessel",
+      notes: "Discharge hoses disconnected",
+    });
+    const correctedEvent = {
+      ...originalEvent,
+      eventType: "HOSES_DISCONNECTED",
+    };
+    apiMocks.getSofEvents
+      .mockResolvedValueOnce({ data: [originalEvent] })
+      .mockResolvedValueOnce({ data: [correctedEvent] });
+    apiMocks.updateSofEvent.mockResolvedValue(correctedEvent);
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Discharge completed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Discharge completed" }));
+
+    expect(screen.getByRole("combobox", { name: /event type/i })).toHaveValue("DISCHARGE_COMPLETED");
+    expect(screen.getByRole("combobox", { name: /operation/i })).toHaveValue("Discharge");
+    expect(screen.getByDisplayValue("Discharge hoses disconnected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/event type/i), {
+      target: { value: "HOSES_DISCONNECTED" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updateSofEvent).toHaveBeenCalledWith(
+        "event-1",
+        expect.objectContaining({
+          eventType: "HOSES_DISCONNECTED",
+          operation: "Discharge",
+          remarks: JSON.stringify({
+            cause: "Vessel",
+            deductible: false,
+            notes: "Discharge hoses disconnected",
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("SOF event updated successfully.")).toBeInTheDocument();
+    expect(await screen.findByText("Hoses disconnected")).toBeInTheDocument();
+    expect(apiMocks.getSofEvents).toHaveBeenCalledTimes(2);
+    expect(apiMocks.runLaytimeCalculation).not.toHaveBeenCalled();
+  });
+
+  it("cancels a manual event edit without calling the update endpoint", async () => {
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("NOR tendered")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit NOR tendered" }));
+    fireEvent.change(screen.getByLabelText(/^notes$/i), {
+      target: { value: "This change must be discarded" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(apiMocks.updateSofEvent).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+    expect(screen.getByText("NOR tendered")).toBeInTheDocument();
   });
 
   it('keeps engine-backed calculation totals labeled as "Deductions"', async () => {

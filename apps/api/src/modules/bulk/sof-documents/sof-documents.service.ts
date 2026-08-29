@@ -112,8 +112,8 @@ export class SofDocumentsService {
   }
 
   /**
-   * Corrects an extracted event. Changing the time or type flags the row as a
-   * manual override and requires a reason, so the audit trail explains the edit.
+   * Corrects an event. Extracted evidence retains its override-reason audit
+   * requirement; manually entered evidence may be corrected directly.
    */
   async updateEvent(id: string, dto: UpdateSofEventDto): Promise<SofEvent> {
     const event = await this.events.findOne({
@@ -126,10 +126,12 @@ export class SofDocumentsService {
 
     await this.findOne(event.sofId);
 
-    const correctsExtraction =
+    const changesTimeOrType =
       (dto.eventTime !== undefined &&
         new Date(dto.eventTime).getTime() !== event.eventTime.getTime()) ||
       (dto.eventType !== undefined && dto.eventType !== event.eventType);
+
+    const correctsExtraction = !event.isManualOverride && changesTimeOrType;
 
     if (correctsExtraction && !dto.overrideReason) {
       throw new BadRequestException(

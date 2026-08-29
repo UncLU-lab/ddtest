@@ -389,6 +389,38 @@ describe('SofDocumentsService events', () => {
     );
   });
 
+  it('allows a manually entered event to be corrected without an extraction override reason', async () => {
+    const { service, events } = buildService();
+    const manuallyEnteredEvent = {
+      id: EVENT_ID,
+      sofId: SOF_ID,
+      eventTime: new Date('2026-08-17T09:00:00Z'),
+      eventType: 'DISCHARGE_COMPLETED',
+      operation: 'Discharge',
+      remarks: JSON.stringify({ notes: 'Discharge hoses disconnected' }),
+      isManualOverride: true,
+      overrideReason: null,
+    };
+    events.findOne.mockResolvedValueOnce(manuallyEnteredEvent);
+
+    const result = await service.updateEvent(EVENT_ID, {
+      eventType: 'HOSES_DISCONNECTED',
+      operation: 'Discharge',
+      remarks: JSON.stringify({ notes: 'Discharge hoses disconnected' }),
+    } as UpdateSofEventDto);
+
+    expect(result.id).toBe(EVENT_ID);
+    expect(events.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: EVENT_ID,
+        eventType: 'HOSES_DISCONNECTED',
+        operation: 'Discharge',
+        remarks: JSON.stringify({ notes: 'Discharge hoses disconnected' }),
+        isManualOverride: true,
+      }),
+    );
+  });
+
   it('returns persisted operation values from findEvents', async () => {
     const { service } = buildService();
 
