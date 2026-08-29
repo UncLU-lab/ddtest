@@ -89,4 +89,23 @@ describe("CreateShipmentForm contract text autofill", () => {
     expect(discharge).toHaveValue("72");
     expect(screen.getAllByText(/global allowance is not reused/i)).toHaveLength(2);
   });
+
+  it("flags explicit operation allowances as required in the missing fields sidebar when reversible V1 is selected", async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><ShipmentsProvider><CreateShipmentForm /></ShipmentsProvider></MemoryRouter>);
+
+    await user.selectOptions(controlFor("Laytime applies to"), "LoadingAndDischarge");
+    await user.selectOptions(controlFor("Reversible laytime"), "Enabled");
+
+    expect(screen.getByText("Loading laytime allowance")).toBeInTheDocument();
+    expect(screen.getByText("Discharge laytime allowance")).toBeInTheDocument();
+
+    const loading = allowanceInputFor("Loading-specific terms");
+    const discharge = allowanceInputFor("Discharge-specific terms");
+    await user.type(loading, "72");
+    await user.type(discharge, "72");
+
+    expect(screen.queryByText("Loading laytime allowance")).not.toBeInTheDocument();
+    expect(screen.queryByText("Discharge laytime allowance")).not.toBeInTheDocument();
+  });
 });

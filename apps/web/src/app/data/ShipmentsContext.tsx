@@ -243,7 +243,16 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 export function missingDraftFields(draft: ShipmentDraft): string[] {
-  return REQUIRED_DRAFT_FIELDS.filter((f) => !String(draft[f]).trim()).map((f) => FIELD_LABELS[f] ?? f);
+  const missing = REQUIRED_DRAFT_FIELDS.filter((f) => !String(draft[f]).trim()).map((f) => FIELD_LABELS[f] ?? f);
+  if (draft.laytimeOperationScope === "LoadingAndDischarge" && draft.reversibleLaytime === "Enabled") {
+    if (!String(draft.loadingTerms?.laytimeAllowed ?? "").trim()) {
+      missing.push("Loading laytime allowance");
+    }
+    if (!String(draft.dischargeTerms?.laytimeAllowed ?? "").trim()) {
+      missing.push("Discharge laytime allowance");
+    }
+  }
+  return missing;
 }
 
 interface ShipmentsContextValue {

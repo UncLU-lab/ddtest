@@ -1341,6 +1341,20 @@ export default function ShipmentDetail() {
   const calculation =
     summary?.latestCalculation ?? null;
 
+  const calculationSnapshot = (calculation?.decisionSnapshot ?? null) as Record<string, any> | null;
+  const reversibleSettlement = calculationSnapshot?.reversibleSettlement ?? null;
+  const reversibleConfigured =
+    Boolean(reversibleSettlement) ||
+    calculationSnapshot?.reversibleLaytimeRule?.enabled === true;
+  const reversibleSettlementStatus = (
+    reversibleSettlement?.settlementStatus ??
+    (reversibleConfigured ? "LEGACY" : null)
+  ) as string | null;
+  const nonAuthoritativeReversibleSummary =
+    reversibleConfigured &&
+    (reversibleSettlementStatus === "NONAUTHORITATIVE" ||
+      reversibleSettlementStatus === "LEGACY");
+
   const usedLaytime =
     calculation?.usedLaytime ??
     calculation?.laytimeUsed ??
@@ -1645,11 +1659,15 @@ export default function ShipmentDetail() {
         {[
           {
             label: "Laytime used",
-            value: usedLaytime
+            value: nonAuthoritativeReversibleSummary
+              ? "Not authoritative"
+              : usedLaytime
               ? formatValue(usedLaytime)
               : "Not yet recorded",
             vc: "#1A4ED8",
-            sub: allowedLaytime
+            sub: nonAuthoritativeReversibleSummary
+              ? "See operation results"
+              : allowedLaytime
               ? `Of ${formatValue(
                   allowedLaytime
                 )}`
@@ -1658,13 +1676,17 @@ export default function ShipmentDetail() {
 
           {
             label: "Remaining laytime",
-            value: remainingLaytime
+            value: nonAuthoritativeReversibleSummary
+              ? "Not authoritative"
+              : remainingLaytime
               ? formatValue(
                   remainingLaytime
                 )
               : "Not yet recorded",
             vc: "#22543D",
-            sub: calculation
+            sub: nonAuthoritativeReversibleSummary
+              ? "See operation results"
+              : calculation
               ? "Backend calculation"
               : "Laytime calculation pending",
           },
@@ -1864,7 +1886,9 @@ export default function ShipmentDetail() {
                   <ClockCard
                     label="Supplier clock"
                     value={
-                      usedLaytime
+                      nonAuthoritativeReversibleSummary
+                        ? "Not authoritative"
+                        : usedLaytime
                         ? formatValue(
                             usedLaytime
                           )
@@ -1872,14 +1896,18 @@ export default function ShipmentDetail() {
                     }
                     valueColor="#B45309"
                     sub={
-                      remainingLaytime
+                      nonAuthoritativeReversibleSummary
+                        ? "See operation results"
+                        : remainingLaytime
                         ? `${formatValue(
                             remainingLaytime
                           )} remaining`
                         : "See laytime calculation"
                     }
                     pct={
-                      allowedLaytime &&
+                      nonAuthoritativeReversibleSummary
+                        ? 0
+                        : allowedLaytime &&
                       usedLaytime
                         ? Math.min(
                             100,
@@ -1935,7 +1963,9 @@ export default function ShipmentDetail() {
                   <ClockCard
                     label="Receiver clock"
                     value={
-                      usedLaytime
+                      nonAuthoritativeReversibleSummary
+                        ? "Not authoritative"
+                        : usedLaytime
                         ? formatValue(
                             usedLaytime
                           )
@@ -1943,14 +1973,18 @@ export default function ShipmentDetail() {
                     }
                     valueColor="#1A4ED8"
                     sub={
-                      remainingLaytime
+                      nonAuthoritativeReversibleSummary
+                        ? "See operation results"
+                        : remainingLaytime
                         ? `${formatValue(
                             remainingLaytime
                           )} remaining`
                         : "See laytime calculation"
                     }
                     pct={
-                      allowedLaytime &&
+                      nonAuthoritativeReversibleSummary
+                        ? 0
+                        : allowedLaytime &&
                       usedLaytime
                         ? Math.min(
                             100,

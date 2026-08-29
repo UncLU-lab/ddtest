@@ -456,6 +456,55 @@ describe('VoyagesService voyage persistence', () => {
     } })]);
   });
 
+  it('persists distinct Loading=72h and Discharge=72h operation-specific allowance clauses for reversible V1 without converting or combining', async () => {
+    const persistedVoyage = { id: VOYAGE_ID, organizationId: ORGANIZATION_ID, vessel: { id: VESSEL_ID }, counterpartyLinks: [] } as Voyage;
+    const { service, manager } = buildService(persistedVoyage);
+
+    await service.create({
+      vesselId: VESSEL_ID,
+      cargoQuantity: 50000,
+      cargoType: 'Products',
+      reference: 'STAGE-REV-002',
+      loadPort: 'AUPHE',
+      dischargePort: 'CNQDG',
+      laycanStart: '2026-09-28',
+      laycanEnd: '2026-09-30',
+      settlementCurrency: 'USD',
+      laytimeOperationScope: 'LoadingAndDischarge',
+      reversibleLaytime: { enabled: true, settlementVersion: 1, allowanceMode: 'sum_operation_allowances' },
+      loadingTerms: {
+        laytimeAllowed: 72,
+      },
+      dischargeTerms: {
+        laytimeAllowed: 72,
+      },
+    });
+
+    const laytimeRateClauses = manager.create.mock.calls
+      .filter(([entity]) => entity === CpClause)
+      .map(([, value]) => value)
+      .filter((value) => (value as any).clauseType === 'laytime_rate');
+
+    expect(laytimeRateClauses).toHaveLength(2);
+    expect(laytimeRateClauses).toEqual([
+      expect.objectContaining({
+        clauseType: 'laytime_rate',
+        rawText: 'Loading laytime allowed: 72h',
+        parameters: { hours: 72, operation: 'Loading' },
+      }),
+      expect.objectContaining({
+        clauseType: 'laytime_rate',
+        rawText: 'Discharge laytime allowed: 72h',
+        parameters: { hours: 72, operation: 'Discharge' },
+      }),
+    ]);
+
+    // Verify no single combined 144h clause exists
+    expect(laytimeRateClauses.some((c: any) => c.parameters.hours === 144)).toBe(false);
+    // Verify no un-scoped global clause exists
+    expect(laytimeRateClauses.some((c: any) => !c.parameters.operation)).toBe(false);
+  });
+
   it('does not create a reversible clause unless it is explicitly enabled with the V1 contract', async () => {
     const persistedVoyage = { id: VOYAGE_ID, organizationId: ORGANIZATION_ID, vessel: { id: VESSEL_ID }, counterpartyLinks: [] } as Voyage;
     const { service, manager } = buildService(persistedVoyage);

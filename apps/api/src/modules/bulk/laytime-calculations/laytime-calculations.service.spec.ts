@@ -3088,6 +3088,109 @@ describe('LaytimeCalculationsService lifecycle', () => {
     ).toBe(settlement.combinedUsedSeconds);
   });
 
+  it('settles a reversible voyage with Loading allowed=72h used=48h and Discharge allowed=72h used=96h to net zero pooled demurrage/despatch', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        settlementCurrency: 'USD',
+        laytimeOperationScope: 'LoadingAndDischarge',
+        clauses: [
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 72,
+            noticeHours: 0,
+          }),
+          opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+            rate: 15000,
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 72,
+            noticeHours: 0,
+          }),
+          opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+            rate: 15000,
+          }),
+          cpClause('reversible-laytime', 'reversible_laytime', {
+            enabled: true,
+          }),
+        ],
+      },
+      {
+        laytimeOperation: 'Discharge',
+        norDocuments: [
+          {
+            id: 'nor-1',
+            tenderTime: new Date('2026-03-01T00:00:00Z'),
+            acceptedTime: new Date('2026-03-01T00:00:00Z'),
+          },
+        ],
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-01T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-03-01T01:00:00Z'),
+            operation: 'Discharge',
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-completion',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-03-03T00:00:00Z'), // 48h used from 2026-03-01 00:00
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-03-05T00:00:00Z'), // 96h used from 2026-03-01 00:00
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parentCalculation] = getCreatedCalculations(manager);
+
+    expect(parentCalculation).toEqual(
+      expect.objectContaining({
+        allowedLaytime: '6 days 00:00:00',
+        usedLaytime: '6 days 00:00:00',
+        demurrageAmount: '0.00',
+        despatchAmount: '0.00',
+        currency: 'USD',
+        decisionSnapshot: expect.objectContaining({
+          reversibleSettlement: expect.objectContaining({
+            version: 1,
+            allowanceMode: 'sum_operation_allowances',
+            cargoQuantityBasis: 'voyage_cargo_quantity',
+            thresholdMode: 'combined_pool',
+            settlementStatus: 'FINAL_AUTHORITATIVE',
+            reasonCode: 'SETTLED',
+            currency: 'USD',
+            currencyAuthorityStatus: 'AVAILABLE',
+            combinedAllowedSeconds: 144 * 3600,
+            combinedUsedSeconds: 144 * 3600,
+            combinedOverrunSeconds: 0,
+            combinedSavedSeconds: 0,
+            demurrageAmount: 0,
+            despatchAmount: 0,
+          }),
+        }),
+      }),
+    );
+  });
+
   it('applies pooled demurrage authoritatively when the child demurrage rates are compatible', async () => {
     const { service, manager } = buildServiceWithCharterParty(
       0,

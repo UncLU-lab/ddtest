@@ -71,7 +71,10 @@ function ResultCard({ calculation, audit, parent = false, referenceOnly = false,
     (reversibleEnabled ? "LEGACY" : undefined)
   ) as ReversibleSettlementStatus | undefined;
   const parentCommerciallyAuthoritative = !parent || !reversibleEnabled || settlementStatus === "FINAL_AUTHORITATIVE";
-  const unavailableParentTime = parent && reversibleEnabled && settlementStatus === "NONAUTHORITATIVE";
+  const unavailableParentTime =
+    parent &&
+    reversibleEnabled &&
+    (settlementStatus === "NONAUTHORITATIVE" || settlementStatus === "LEGACY");
   const completion = snapshot?.cargoCompletion?.completionTime;
   const commenced = snapshot?.commencement?.commencedAt;
   const timeBalance = audit?.calculation?.excessLaytime
@@ -101,7 +104,7 @@ function ResultCard({ calculation, audit, parent = false, referenceOnly = false,
       <div className="grid gap-2 mt-4 sm:grid-cols-2 lg:grid-cols-4">
         <Metric label="Laytime allowed" value={unavailableParentTime ? "Not authoritative" : formatInterval(calculation.allowedLaytime)} />
         <Metric label="Laytime used" value={unavailableParentTime ? "Not authoritative" : formatInterval(calculation.usedLaytime)} />
-        <Metric label="Time balance" value={timeBalance} />
+        <Metric label="Time balance" value={unavailableParentTime ? "Not authoritative" : timeBalance} />
         <Metric label="Calculated" value={formatDateTime(calculation.calculatedAt)} />
       </div>
 

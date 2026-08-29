@@ -174,6 +174,41 @@ describe('resolveReversibleLaytimeSettlement', () => {
     expect(result.despatchAmount).toBe(despatch);
   });
 
+  it('settles Loading allowed=72h used=48h and Discharge allowed=72h used=96h to zero net overrun and surplus excluding the sailing gap', () => {
+    const base = input([period(0, 48)], [period(200, 296)], {
+      allowances: {
+        Loading: {
+          clauseId: 'loading-allowance',
+          source: 'operation-specific',
+          mechanism: 'hours',
+          parameters: { hours: 72, operation: 'Loading' },
+          allowedSeconds: 72 * HOUR,
+        },
+        Discharge: {
+          clauseId: 'discharge-allowance',
+          source: 'operation-specific',
+          mechanism: 'hours',
+          parameters: { hours: 72, operation: 'Discharge' },
+          allowedSeconds: 72 * HOUR,
+        },
+      },
+    });
+
+    const result = resolveReversibleLaytimeSettlement(base);
+
+    expect(result.settlementStatus).toBe('FINAL_AUTHORITATIVE');
+    expect(result.reasonCode).toBe('SETTLED');
+    expect(result.combinedAllowedSeconds).toBe(144 * HOUR);
+    expect(result.combinedUsedSeconds).toBe(144 * HOUR);
+    expect(result.combinedOverrunSeconds).toBe(0);
+    expect(result.combinedSavedSeconds).toBe(0);
+    expect(result.demurrageAmount).toBe(0);
+    expect(result.despatchAmount).toBe(0);
+    // Sailing gap between hour 48 and 200 is not in timeline
+    expect(result.timeline.reduce((total, s) => total + s.countedSeconds, 0)).toBe(144 * HOUR);
+    expect(result.timeline.filter((s) => s.classification === 'demurrage')).toHaveLength(0);
+  });
+
   it('is non-authoritative when demurrage rates differ', () => {
     const base = input([period(0, 84)], [period(100, 160)]);
     base.operations.Discharge = operation('Discharge', [period(100, 160)], {
