@@ -59,6 +59,29 @@ function formatEta(value?: string | null) {
   return date.toLocaleString();
 }
 
+export function formatCreatedAt(value?: string | null): string | null {
+  if (!value) return null;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return `Created ${date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`;
+}
+
+export function sortShipmentsByCreatedAt<T extends { createdAt?: string; voyageRef?: string }>(shipments: T[]): T[] {
+  const creationTime = (value?: string) => {
+    const time = value ? new Date(value).getTime() : 0;
+    return Number.isFinite(time) ? time : 0;
+  };
+
+  return [...shipments].sort((left, right) => {
+    const newestFirst = creationTime(right.createdAt) - creationTime(left.createdAt);
+    if (newestFirst !== 0) return newestFirst;
+
+    return String(right.voyageRef ?? "").localeCompare(String(left.voyageRef ?? ""));
+  });
+}
+
 function AlertCard({ borderColor, typeColor, type, subject, desc, time, onNavigate }: {
   borderColor: string;
   typeColor: string;
@@ -122,8 +145,8 @@ const amountUnderDispute = shipments.reduce((total, s) => total + (Number(s.amou
 
   const ports = ["All ports", ...Array.from(new Set(shipments.map((s) => s.port)))];
 
-  const filteredShipments = shipments.filter(
-    (s) => riskFilter.has(s.risk) && (portFilter === "All ports" || s.port === portFilter)
+  const filteredShipments = sortShipmentsByCreatedAt(
+    shipments.filter((s) => riskFilter.has(s.risk) && (portFilter === "All ports" || s.port === portFilter))
   );
 
   function toggleRisk(level: RiskLevel) {
@@ -136,7 +159,7 @@ const amountUnderDispute = shipments.reduce((total, s) => total + (Number(s.amou
 
   function exportCsv() {
     const header = ["Vessel", "Voyage", "Port", "Supplier", "Receiver", "ETA", "Risk", "Exposure"];
-    const rows = filteredShipments.map((s) => [s.vessel, s.id, s.port, s.supplier, s.receiver, s.eta, s.risk, String(s.exposure)]);
+    const rows = filteredShipments.map((s) => [s.vessel, s.voyageRef ?? s.id, s.port, s.supplier, s.receiver, s.eta, s.risk, String(s.exposure)]);
     const csv = [header, ...rows].map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -263,7 +286,14 @@ const amountUnderDispute = shipments.reduce((total, s) => total + (Number(s.amou
                 <RiskBar level={s.risk} />
                 <div className="flex flex-col gap-0.5 pr-3">
                   <span style={{ fontSize: "13px", fontWeight: 500, color: "#111827" }}>{s.vessel}</span>
+                  <span style={{ fontSize: "11px", fontWeight: 500, color: "#1A4ED8" }}>{s.voyageRef ?? "Voyage reference unavailable"}</span>
+                  {formatCreatedAt(s.createdAt) && (
+                    <span style={{ fontSize: "10px", color: "#6B7280" }}>{formatCreatedAt(s.createdAt)}</span>
+                  )}
+                  {/* The UUID remains the routing identifier but is not a board label. */}
+                  {/*
                   <span style={{ fontSize: "11px", color: "#6B7280" }}>{s.port} · {s.id}</span>
+                  */}
                 </div>
                 <span style={{ fontSize: "13px", color: "#374151" }}>{s.port}</span>
                 <span style={{ fontSize: "13px", color: "#374151" }}>{s.supplier}</span>

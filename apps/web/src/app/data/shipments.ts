@@ -15,6 +15,8 @@ export type Shipment = {
   quantity: string;
 
   status?: string;
+  createdAt?: string;
+  updatedAt?: string;
   laycanStart?: string;
   laycanEnd?: string;
   laytimeOperation?: string;

@@ -97,6 +97,8 @@ export interface Voyage {
   laycanEnd: string;
   eta?: string;
   status?: string;
+  createdAt?: string;
+  updatedAt?: string;
   [key: string]: unknown;
 }
 

@@ -79,6 +79,8 @@ function normalizeShipment(item: VoyageListItem): Shipment | null {
     quantity: String(quantity),
 
     status: item.status,
+    createdAt: typeof item.createdAt === "string" ? item.createdAt : undefined,
+    updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : undefined,
     laycanStart: item.laycanStart,
     laycanEnd: item.laycanEnd,
     laytimeOperation:
