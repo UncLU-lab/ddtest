@@ -97,6 +97,8 @@ describe("CreateShipmentForm contract text autofill", () => {
     await user.selectOptions(controlFor("Laytime applies to"), "LoadingAndDischarge");
     await user.selectOptions(controlFor("Reversible laytime"), "Enabled");
 
+    expect(screen.getByText("Global laytime allowed (hrs)")).toBeInTheDocument();
+    expect(screen.queryByText("Laytime allowed")).not.toBeInTheDocument();
     expect(screen.getByText("Loading laytime allowance")).toBeInTheDocument();
     expect(screen.getByText("Discharge laytime allowance")).toBeInTheDocument();
 
@@ -107,5 +109,6 @@ describe("CreateShipmentForm contract text autofill", () => {
 
     expect(screen.queryByText("Loading laytime allowance")).not.toBeInTheDocument();
     expect(screen.queryByText("Discharge laytime allowance")).not.toBeInTheDocument();
+    expect(screen.queryByText("Laytime allowed")).not.toBeInTheDocument();
   });
 });

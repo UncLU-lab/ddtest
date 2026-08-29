@@ -242,9 +242,17 @@ const FIELD_LABELS: Record<string, string> = {
   laytimeOperation: "Laytime operation", bulkOperationType: "Bulk operation type", laytimeAllowed: "Laytime allowed", demurrageRate: "Demurrage rate", timeCountingBasis: "Time counting basis",
 };
 
+export function usesExplicitReversibleOperationAllowances(draft: Pick<ShipmentDraft, "laytimeOperationScope" | "reversibleLaytime">): boolean {
+  return draft.laytimeOperationScope === "LoadingAndDischarge" && draft.reversibleLaytime === "Enabled";
+}
+
 export function missingDraftFields(draft: ShipmentDraft): string[] {
-  const missing = REQUIRED_DRAFT_FIELDS.filter((f) => !String(draft[f]).trim()).map((f) => FIELD_LABELS[f] ?? f);
-  if (draft.laytimeOperationScope === "LoadingAndDischarge" && draft.reversibleLaytime === "Enabled") {
+  const explicitReversibleOperationAllowances = usesExplicitReversibleOperationAllowances(draft);
+  const missing = REQUIRED_DRAFT_FIELDS
+    .filter((f) => f !== "laytimeAllowed" || !explicitReversibleOperationAllowances)
+    .filter((f) => !String(draft[f]).trim())
+    .map((f) => FIELD_LABELS[f] ?? f);
+  if (explicitReversibleOperationAllowances) {
     if (!String(draft.loadingTerms?.laytimeAllowed ?? "").trim()) {
       missing.push("Loading laytime allowance");
     }

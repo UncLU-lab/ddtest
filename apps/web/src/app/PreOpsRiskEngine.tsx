@@ -19,6 +19,7 @@ import {
 import {
   useShipments,
   estimateRisk,
+  usesExplicitReversibleOperationAllowances,
   type ShipmentDraft,
   type ShipmentCommercialTermsDraft,
 } from "./data/ShipmentsContext";
@@ -162,6 +163,7 @@ function validateCommercialTermsBlock(
   terms?: ShipmentCommercialTermsDraft | null,
   required: boolean = false,
   strictBasis: boolean = false,
+  requireLaytimeAllowed: boolean = required,
 ): string | null {
   if (!terms) {
     return required
@@ -169,7 +171,7 @@ function validateCommercialTermsBlock(
       : null;
   }
 
-  if (required && !isFilled(terms.laytimeAllowed)) {
+  if (requireLaytimeAllowed && !isFilled(terms.laytimeAllowed)) {
     return `${label}: laytime allowed is required.`;
   }
 
@@ -225,7 +227,7 @@ function validateCommercialTermsBlock(
   return null;
 }
 
-function toVoyageCommercialTermsDto(
+export function toVoyageCommercialTermsDto(
   terms?: ShipmentCommercialTermsDraft | null,
 ): VoyageCommercialTermsDto | undefined {
   if (!terms) {
@@ -285,6 +287,45 @@ function toVoyageCommercialTermsDto(
   }
 
   return Object.keys(dto).length > 0 ? dto : undefined;
+}
+
+export function buildCreateVoyageDto(
+  draft: ShipmentDraft,
+  selectedVesselId: string,
+): CreateVoyageDto {
+  return {
+    vesselId: selectedVesselId,
+    cargoQuantity: Number(draft.quantity) || 0,
+    cargoType: draft.productType || "Unknown",
+    reference: draft.voyageRef?.trim() || undefined,
+    supplier: draft.supplier?.trim() || undefined,
+    receiver: draft.receiver?.trim() || undefined,
+    loadPort: draft.loadPort || "",
+    dischargePort: draft.dischargePort || "",
+    laycanStart: toIsoDateString(draft.laycanOpen || draft.laycanStart || ""),
+    laycanEnd: toIsoDateString(draft.laycanClose || draft.laycanEnd || ""),
+    laytimeOperation: draft.laytimeOperation || "Discharge",
+    bulkOperationType: draft.bulkOperationType || undefined,
+    eta: toIsoDateString(draft.eta),
+    laytimeAllowed: draft.laytimeAllowed ? Number(draft.laytimeAllowed) : undefined,
+    demurrageRate: draft.demurrageRate ? Number(draft.demurrageRate) : undefined,
+    dispatchRate: draft.dispatchRate ? Number(draft.dispatchRate) : undefined,
+    timeCountingBasis: draft.timeCountingBasis?.trim() || undefined,
+    shexCalendar:
+      draft.timeCountingBasis?.trim().toUpperCase() === "SHEX"
+        ? {
+            calendarVersion: 1 as const,
+            timeZone: draft.shexCalendar.timeZone.trim(),
+            holidayDates: [...draft.shexCalendar.holidayDates].sort(),
+            saturdayExcepted: draft.shexCalendar.saturdayExcepted === "Yes",
+          }
+        : undefined,
+    norNoticePeriod: draft.norNoticePeriod?.trim() || undefined,
+    ...toCreateVoyageCharterPartyFields(draft),
+    loadingTerms: toVoyageCommercialTermsDto(draft.loadingTerms ?? null),
+    dischargeTerms: toVoyageCommercialTermsDto(draft.dischargeTerms ?? null),
+    status: mapDraftVoyageStatus(),
+  };
 }
 
 function SectionEyebrow({
@@ -796,6 +837,8 @@ export default function PreOpsRiskEngine() {
     setPostSubmitError(null);
 
     try {
+      const requiresExplicitReversibleAllowances =
+        usesExplicitReversibleOperationAllowances(draft);
       const globalValidationError =
         validateCommercialTermsBlock(
           "Global terms",
@@ -811,6 +854,8 @@ export default function PreOpsRiskEngine() {
             wipon: "",
           },
           true,
+          false,
+          !requiresExplicitReversibleAllowances,
         ) ??
         validateCommercialTermsBlock(
           "Loading-specific terms",
@@ -829,9 +874,6 @@ export default function PreOpsRiskEngine() {
         throw new Error(globalValidationError);
       }
 
-      const requiresExplicitReversibleAllowances =
-        draft.laytimeOperationScope === "LoadingAndDischarge" &&
-        draft.reversibleLaytime === "Enabled";
       if (requiresExplicitReversibleAllowances) {
         if (!isFilled(draft.loadingTerms?.laytimeAllowed)) {
           throw new Error("Loading laytime allowance is required for reversible V1.");
@@ -877,108 +919,7 @@ export default function PreOpsRiskEngine() {
         );
       }
 
-      /*
-       * Convert the draft into the ACTUAL backend DTO.
-       */
-      const dto = {
-        vesselId: selectedVesselId,
-
-        cargoQuantity: Number(draft.quantity) || 0,
-
-        cargoType:
-          draft.productType ||
-          "Unknown",
-
-        reference:
-          draft.voyageRef?.trim() ||
-          undefined,
-
-        supplier:
-          draft.supplier?.trim() ||
-          undefined,
-
-        receiver:
-          draft.receiver?.trim() ||
-          undefined,
-
-        loadPort:
-          draft.loadPort || "",
-
-        dischargePort:
-          draft.dischargePort || "",
-
-        laycanStart:
-          toIsoDateString(
-            draft.laycanOpen ||
-              draft.laycanStart ||
-              ""
-          ),
-
-        laycanEnd:
-          toIsoDateString(
-            draft.laycanClose ||
-              draft.laycanEnd ||
-              ""
-          ),
-
-        laytimeOperation:
-          draft.laytimeOperation ||
-          "Discharge",
-
-        bulkOperationType:
-          draft.bulkOperationType ||
-          undefined,
-
-        eta:
-          toIsoDateString(draft.eta),
-
-        laytimeAllowed:
-          draft.laytimeAllowed
-            ? Number(draft.laytimeAllowed)
-            : undefined,
-
-        demurrageRate:
-          draft.demurrageRate
-            ? Number(draft.demurrageRate)
-            : undefined,
-
-        dispatchRate:
-          draft.dispatchRate
-            ? Number(draft.dispatchRate)
-            : undefined,
-
-        timeCountingBasis:
-          draft.timeCountingBasis?.trim() ||
-          undefined,
-
-        shexCalendar:
-          draft.timeCountingBasis?.trim().toUpperCase() === "SHEX"
-            ? {
-                calendarVersion: 1 as const,
-                timeZone: draft.shexCalendar.timeZone.trim(),
-                holidayDates: [...draft.shexCalendar.holidayDates].sort(),
-                saturdayExcepted: draft.shexCalendar.saturdayExcepted === "Yes",
-              }
-            : undefined,
-
-        norNoticePeriod:
-          draft.norNoticePeriod?.trim() ||
-          undefined,
-
-        ...toCreateVoyageCharterPartyFields(draft),
-
-        loadingTerms:
-          toVoyageCommercialTermsDto(
-            draft.loadingTerms ?? null,
-          ),
-
-        dischargeTerms:
-          toVoyageCommercialTermsDto(
-            draft.dischargeTerms ?? null,
-          ),
-
-        status: mapDraftVoyageStatus(),
-      };
+      const dto = buildCreateVoyageDto(draft, selectedVesselId);
 
       const createdVoyage =
         await createVoyage(dto);

@@ -19,6 +19,7 @@ import {
   ShipmentShexCalendarDraft,
   emptyShipmentCommercialTermsDraft,
   missingDraftFields,
+  usesExplicitReversibleOperationAllowances,
 } from "./data/ShipmentsContext";
 import { getVessels, parseContractText, type ContractExtractionResult } from "../lib/api";
 
@@ -489,6 +490,7 @@ export default function CreateShipmentForm() {
   }
 
   const missing = missingDraftFields(draft);
+  const explicitReversibleOperationAllowances = usesExplicitReversibleOperationAllowances(draft);
 
   const onClose = () => navigate("/");
   const onInitialise = () => {
@@ -915,8 +917,12 @@ export default function CreateShipmentForm() {
               </FormField>
             </div>
             <div className="grid grid-cols-3 gap-3 mb-3">
-              <FormField label="Laytime allowed (hrs)" required>
-                <Input value={draft.laytimeAllowed} onChange={(v) => update("laytimeAllowed", v)} placeholder="e.g. 72" />
+              <FormField
+                label={explicitReversibleOperationAllowances ? "Global laytime allowed (hrs)" : "Laytime allowed (hrs)"}
+                required={!explicitReversibleOperationAllowances}
+                hint={explicitReversibleOperationAllowances ? "Optional; reversible V1 uses the Loading and Discharge allowances below." : undefined}
+              >
+                <Input value={draft.laytimeAllowed} onChange={(v) => update("laytimeAllowed", v)} placeholder={explicitReversibleOperationAllowances ? "Optional" : "e.g. 72"} />
               </FormField>
               <FormField label="Demurrage rate ($/day)" required>
                 <Input value={draft.demurrageRate} onChange={(v) => update("demurrageRate", v)} placeholder="e.g. 25000" />
