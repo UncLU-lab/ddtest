@@ -378,6 +378,53 @@ function validateDurationHours(value?: string | null) {
   return null;
 }
 
+function validateManualEventForm(
+  form: ManualEventForm,
+  event: TimelineRow | null,
+): string | null {
+  const eventTime = form.eventTime.trim();
+  if (!eventTime || Number.isNaN(new Date(eventTime).getTime())) {
+    return "Enter a valid event time.";
+  }
+
+  if (!ENGINE_EVENT_PRESETS.some((preset) => preset.value === form.eventType)) {
+    return "Select a supported event type.";
+  }
+
+  if (form.operation && form.operation !== "Loading" && form.operation !== "Discharge") {
+    return "Select a valid operation.";
+  }
+
+  const durationError = validateDurationHours(form.duration);
+  if (durationError) return durationError;
+
+  const changesTimeOrType =
+    event &&
+    (new Date(form.eventTime).toISOString() !== event.eventTimeIso ||
+      form.eventType !== event.eventType);
+  if (changesTimeOrType && !event.isManualOverride && !form.overrideReason?.trim()) {
+    return "Provide an override reason when correcting extracted event time or type.";
+  }
+
+  return null;
+}
+
+function isManualEventFormDirty(
+  form: ManualEventForm,
+  initialForm: ManualEventForm,
+): boolean {
+  return (
+    form.eventTime !== initialForm.eventTime ||
+    form.eventType !== initialForm.eventType ||
+    form.operation !== initialForm.operation ||
+    form.cause !== initialForm.cause ||
+    form.duration !== initialForm.duration ||
+    form.deductible !== initialForm.deductible ||
+    form.notes !== initialForm.notes ||
+    (form.overrideReason ?? "") !== (initialForm.overrideReason ?? "")
+  );
+}
+
 function getCalculationPeriods(calc?: LaytimeCalculation | null): any[] {
   const periods = getCalculationSnapshot(calc)?.periods;
   return Array.isArray(periods) ? periods : [];
@@ -938,6 +985,7 @@ type AddEventModalProps = {
   onClose: () => void;
   onSave: (form: ManualEventForm) => void;
   submitting: boolean;
+  submitError: string | null;
 };
 
 function AddEventModal({
@@ -947,6 +995,7 @@ function AddEventModal({
   onClose,
   onSave,
   submitting,
+  submitError,
 }: AddEventModalProps) {
   const getInitialForm = (): ManualEventForm => {
     const details = parseManualDetails(event?.remarks);
@@ -972,6 +1021,11 @@ function AddEventModal({
   };
 
   const [form, setForm] = useState<ManualEventForm>(getInitialForm);
+  const initialForm = getInitialForm();
+  const validationError = validateManualEventForm(form, event);
+  const isDirty = mode === "add" || isManualEventFormDirty(form, initialForm);
+  const saveDisabled = submitting || Boolean(validationError) || !isDirty;
+  const saveDisabledMessage = validationError ?? (!isDirty ? "Make a change before saving." : null);
 
   useEffect(() => {
     setForm(getInitialForm());
@@ -1013,9 +1067,10 @@ function AddEventModal({
 
         <form
           className="space-y-4 px-5 py-4"
+          noValidate
           onSubmit={(e) => {
             e.preventDefault();
-            onSave(form);
+            if (!saveDisabled) onSave(form);
           }}
         >
           <div>
@@ -1145,6 +1200,11 @@ function AddEventModal({
           )}
 
           <div className="flex items-center justify-end gap-2 border-t pt-4" style={{ borderColor: "#E5E7EB" }}>
+            {(submitError ?? saveDisabledMessage) && (
+              <p role="alert" className="mr-auto" style={{ fontSize: "11px", color: "#B45309" }}>
+                {submitError ?? saveDisabledMessage}
+              </p>
+            )}
             <button
               type="button"
               onClick={onClose}
@@ -1155,9 +1215,9 @@ function AddEventModal({
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={saveDisabled}
               className="rounded-md px-3 py-2 text-sm text-white"
-              style={{ backgroundColor: "#1A4ED8", opacity: submitting ? 0.7 : 1 }}
+              style={{ backgroundColor: "#1A4ED8", opacity: saveDisabled ? 0.55 : 1 }}
             >
               {submitting ? "Saving..." : mode === "edit" ? "Save changes" : "Save event"}
             </button>
@@ -1181,6 +1241,7 @@ export default function SOFTimeline() {
   const [editingEvent, setEditingEvent] = useState<TimelineRow | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [savingEvent, setSavingEvent] = useState(false);
+  const [eventSaveError, setEventSaveError] = useState<string | null>(null);
   const [laytimeCalculation, setLaytimeCalculation] = useState<LaytimeCalculation | null>(null);
   const [laytimeLoading, setLaytimeLoading] = useState(true);
   const [laytimeError, setLaytimeError] = useState<string | null>(null);
@@ -1416,10 +1477,12 @@ export default function SOFTimeline() {
     setSavingEvent(true);
     setTimelineError(null);
     setTimelineSuccess(null);
+    setEventSaveError(null);
 
     const durationError = validateDurationHours(form.duration);
     if (durationError) {
       setTimelineError(durationError);
+      setEventSaveError(durationError);
       setSavingEvent(false);
       return;
     }
@@ -1472,7 +1535,9 @@ export default function SOFTimeline() {
       setEditingEvent(null);
       setRefreshKey((current) => current + 1);
     } catch (error: any) {
-      setTimelineError(sofErrorMessage(error, "Unable to save this SOF event. Check the event time and try again."));
+      const message = sofErrorMessage(error, "Unable to save this SOF event. Check the event time and try again.");
+      setTimelineError(message);
+      setEventSaveError(message);
     } finally {
       setSavingEvent(false);
     }
@@ -1788,9 +1853,11 @@ export default function SOFTimeline() {
           onClose={() => {
             setShowAddEvent(false);
             setEditingEvent(null);
+            setEventSaveError(null);
           }}
           onSave={(form) => void handleSaveEvent(form, editingEvent)}
           submitting={savingEvent}
+          submitError={eventSaveError}
         />
       )}
       <PageHeader
@@ -2337,6 +2404,7 @@ export default function SOFTimeline() {
                           title={`Edit ${ev.name}`}
                           onClick={() => {
                             setTimelineSuccess(null);
+                            setEventSaveError(null);
                             setShowAddEvent(false);
                             setEditingEvent(ev);
                           }}
@@ -2360,6 +2428,7 @@ export default function SOFTimeline() {
                 style={{ height: "32px", fontSize: "12px", color: "#6B7280", border: "0.5px dashed #D1D5DB", backgroundColor: "transparent" }}
                 onClick={() => {
                   setTimelineSuccess(null);
+                  setEventSaveError(null);
                   setEditingEvent(null);
                   setShowAddEvent(true);
                 }}

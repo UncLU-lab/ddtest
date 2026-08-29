@@ -342,8 +342,10 @@ describe("SOFTimeline exception candidate semantics", () => {
     );
   });
 
-  it("edits a manually entered discharge completion, preserves its ID, and refreshes the event log", async () => {
+  it("enables the exact valid Event 12 manual correction and refreshes the corrected row", async () => {
     const originalEvent = buildEvent();
+    originalEvent.id = "event-12";
+    originalEvent.eventTime = "2026-10-06T14:30:00.000Z";
     originalEvent.eventType = "DISCHARGE_COMPLETED";
     originalEvent.remarks = JSON.stringify({
       cause: "Vessel",
@@ -366,16 +368,20 @@ describe("SOFTimeline exception candidate semantics", () => {
     expect(screen.getByRole("combobox", { name: /event type/i })).toHaveValue("DISCHARGE_COMPLETED");
     expect(screen.getByRole("combobox", { name: /operation/i })).toHaveValue("Discharge");
     expect(screen.getByDisplayValue("Discharge hoses disconnected")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Make a change before saving.");
 
     fireEvent.change(screen.getByLabelText(/event type/i), {
       target: { value: "HOSES_DISCONNECTED" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    const saveChanges = screen.getByRole("button", { name: "Save changes" });
+    expect(saveChanges).toBeEnabled();
+    expect(screen.queryByText(/override reason/i, { selector: "[role=alert]" })).not.toBeInTheDocument();
+    fireEvent.click(saveChanges);
 
     await waitFor(() => {
       expect(apiMocks.updateSofEvent).toHaveBeenCalledWith(
-        "event-1",
+        "event-12",
         expect.objectContaining({
           eventType: "HOSES_DISCONNECTED",
           operation: "Discharge",
@@ -389,6 +395,8 @@ describe("SOFTimeline exception candidate semantics", () => {
     });
     expect(await screen.findByText("SOF event updated successfully.")).toBeInTheDocument();
     expect(await screen.findByText("Hoses disconnected")).toBeInTheDocument();
+    expect(screen.getByText(new Date(originalEvent.eventTime).toLocaleString())).toBeInTheDocument();
+    expect(screen.getByText("Discharge hoses disconnected")).toBeInTheDocument();
     expect(apiMocks.getSofEvents).toHaveBeenCalledTimes(2);
     expect(apiMocks.runLaytimeCalculation).not.toHaveBeenCalled();
   });
@@ -406,6 +414,34 @@ describe("SOFTimeline exception candidate semantics", () => {
     expect(apiMocks.updateSofEvent).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
     expect(screen.getByText("NOR tendered")).toBeInTheDocument();
+  });
+
+  it("keeps the edit open and shows the PATCH error without discarding a manual correction", async () => {
+    const originalEvent = buildEvent();
+    originalEvent.eventType = "DISCHARGE_COMPLETED";
+    originalEvent.remarks = JSON.stringify({ notes: "Discharge hoses disconnected" });
+    apiMocks.getSofEvents.mockResolvedValue({ data: [originalEvent] });
+    apiMocks.updateSofEvent.mockRejectedValue({ message: "SOF event update was rejected" });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Discharge completed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Discharge completed" }));
+    fireEvent.change(screen.getByLabelText(/event type/i), {
+      target: { value: "HOSES_DISCONNECTED" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updateSofEvent).toHaveBeenCalledWith(
+        "event-1",
+        expect.objectContaining({ eventType: "HOSES_DISCONNECTED" }),
+      );
+    });
+    expect(await screen.findByText("SOF event update was rejected")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Edit SOF event" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /event type/i })).toHaveValue("HOSES_DISCONNECTED");
+    expect(screen.getByDisplayValue("Discharge hoses disconnected")).toBeInTheDocument();
   });
 
   it('keeps engine-backed calculation totals labeled as "Deductions"', async () => {

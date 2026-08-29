@@ -421,6 +421,25 @@ describe('SofDocumentsService events', () => {
     );
   });
 
+  it('continues to require an override reason when correcting extracted evidence', async () => {
+    const { service, events } = buildService();
+    events.findOne.mockResolvedValueOnce({
+      id: EVENT_ID,
+      sofId: SOF_ID,
+      eventTime: new Date('2026-08-17T09:00:00Z'),
+      eventType: 'DISCHARGE_COMPLETED',
+      operation: 'Discharge',
+      isManualOverride: false,
+    });
+
+    await expect(
+      service.updateEvent(EVENT_ID, {
+        eventType: 'HOSES_DISCONNECTED',
+      } as UpdateSofEventDto),
+    ).rejects.toThrow('overrideReason is required when changing an event time or type');
+    expect(events.save).not.toHaveBeenCalled();
+  });
+
   it('returns persisted operation values from findEvents', async () => {
     const { service } = buildService();
 
