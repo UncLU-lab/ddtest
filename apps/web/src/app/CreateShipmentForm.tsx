@@ -92,7 +92,7 @@ function Select({
   onChange,
 }: {
   value: string;
-  options: string[];
+  options: Array<string | { value: string; label: string }>;
   onChange?: (v: string) => void;
 }) {
   return (
@@ -114,9 +114,11 @@ function Select({
         onFocus={(e) => (e.currentTarget.style.borderColor = "#1A4ED8")}
         onBlur={(e) => (e.currentTarget.style.borderColor = "#E5E7EB")}
       >
-        {options.map((o) => (
-          <option key={o}>{o}</option>
-        ))}
+        {options.map((option) => {
+          const value = typeof option === "string" ? option : option.value;
+          const label = typeof option === "string" ? option : option.label;
+          return <option key={value} value={value}>{label}</option>;
+        })}
       </select>
       <ChevronDown
         size={12}
@@ -876,22 +878,6 @@ export default function CreateShipmentForm() {
             <FormField label="Intermediary / trader">
               <Input value={draft.intermediary} onChange={(v) => update("intermediary", v)} placeholder="Search entity database…" />
             </FormField>
-            <div className="grid grid-cols-2 gap-3 mt-3">
-              <FormField label="Settlement currency">
-                <Select value={draft.settlementCurrency} onChange={(v) => update("settlementCurrency", v)} options={["", "USD", "EUR", "GBP", "AUD", "SGD"]} />
-              </FormField>
-              <FormField label="Laytime applies to">
-                <Select value={draft.laytimeOperationScope} onChange={(v) => update("laytimeOperationScope", v as ShipmentDraft["laytimeOperationScope"])} options={["", "Loading", "Discharge", "LoadingAndDischarge"]} />
-              </FormField>
-            </div>
-            <div className="mt-3 rounded-lg border p-3" style={{ borderColor: "#E5E7EB", backgroundColor: "#F9FAFB" }}>
-              <FormField label="Reversible laytime">
-                <Select value={draft.reversibleLaytime} onChange={(v) => update("reversibleLaytime", v as ShipmentDraft["reversibleLaytime"])} options={["", "Enabled", "Disabled"]} />
-              </FormField>
-              {draft.reversibleLaytime === "Enabled" && (
-                <p className="mt-2" style={{ fontSize: "10px", color: "#6B7280" }}>Version 1: settlement version 1 · sum operation allowances.</p>
-              )}
-            </div>
           </div>
 
           {/* Card 3 — Laytime terms */}
@@ -951,6 +937,40 @@ export default function CreateShipmentForm() {
                   onChange={(v) => update("bulkOperationType", v as ShipmentDraft["bulkOperationType"])}
                 />
               </FormField>
+            </div>
+
+            <div className="mt-4 rounded-lg border p-3" style={{ borderColor: "#BFDBFE", backgroundColor: "#F8FBFF" }}>
+              <SubLabel badge="Charter Party">Creation contract terms</SubLabel>
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Settlement currency">
+                  <Select value={draft.settlementCurrency} onChange={(v) => update("settlementCurrency", v)} options={[
+                    { value: "", label: "Not set" }, "USD", "EUR", "GBP", "AUD", "SGD",
+                  ]} />
+                </FormField>
+                <FormField label="Laytime applies to">
+                  <Select value={draft.laytimeOperationScope} onChange={(v) => update("laytimeOperationScope", v as ShipmentDraft["laytimeOperationScope"])} options={[
+                    { value: "", label: "Not set" },
+                    { value: "Loading", label: "Loading only" },
+                    { value: "Discharge", label: "Discharge only" },
+                    { value: "LoadingAndDischarge", label: "Loading and Discharge" },
+                  ]} />
+                </FormField>
+              </div>
+              <div className="mt-3">
+                <FormField label="Reversible laytime">
+                  <Select value={draft.reversibleLaytime} onChange={(v) => update("reversibleLaytime", v as ShipmentDraft["reversibleLaytime"])} options={[
+                    { value: "", label: "Not set" },
+                    { value: "Disabled", label: "Disabled" },
+                    { value: "Enabled", label: "Enabled — V1 sum operation allowances" },
+                  ]} />
+                </FormField>
+                {draft.reversibleLaytime === "Enabled" && (
+                  <div className="mt-2 grid grid-cols-2 gap-3">
+                    <div><span style={{ fontSize: "10px", color: "#6B7280" }}>Settlement version</span><p style={{ fontSize: "12px", color: "#111827" }}>1</p></div>
+                    <div><span style={{ fontSize: "10px", color: "#6B7280" }}>Allowance mode</span><p style={{ fontSize: "12px", color: "#111827" }}>Sum operation allowances</p></div>
+                  </div>
+                )}
+              </div>
             </div>
 
             <OperationTermsSection

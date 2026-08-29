@@ -14,6 +14,10 @@ const api = vi.hoisted(() => ({
 vi.mock("../lib/api", () => api);
 
 describe("CreateShipmentForm contract text autofill", () => {
+  function controlFor(label: string) {
+    return screen.getByText(label).parentElement?.querySelector("select") as HTMLSelectElement;
+  }
+
   it("applies only valid reviewed terms to the draft without creating a voyage", async () => {
     api.parseContractText.mockResolvedValue({
       warnings: [],
@@ -37,10 +41,29 @@ describe("CreateShipmentForm contract text autofill", () => {
 
     await user.click(screen.getByRole("button", { name: "Apply extracted terms" }));
     await waitFor(() => expect(screen.getByDisplayValue("STAGE-BASIC-001")).toBeInTheDocument());
-    expect(screen.getByDisplayValue("USD")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("LoadingAndDischarge")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("Enabled")).toBeInTheDocument();
+    expect(controlFor("Settlement currency")).toHaveValue("USD");
+    expect(controlFor("Laytime applies to")).toHaveValue("LoadingAndDischarge");
+    expect(controlFor("Reversible laytime")).toHaveValue("Enabled");
+    expect(screen.getByText("Settlement version")).toBeInTheDocument();
+    expect(screen.getByText("Allowance mode")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("Port Hedland")).not.toBeInTheDocument();
     expect(api.parseContractText).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the contract creation controls in Laytime terms and supports manual edits", async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><ShipmentsProvider><CreateShipmentForm /></ShipmentsProvider></MemoryRouter>);
+
+    expect(screen.getByText("Settlement currency")).toBeInTheDocument();
+    expect(screen.getByText("Laytime applies to")).toBeInTheDocument();
+    expect(screen.getByText("Reversible laytime")).toBeInTheDocument();
+    await user.selectOptions(controlFor("Settlement currency"), "EUR");
+    await user.selectOptions(controlFor("Laytime applies to"), "Loading");
+    await user.selectOptions(controlFor("Reversible laytime"), "Enabled");
+
+    expect(controlFor("Settlement currency")).toHaveValue("EUR");
+    expect(controlFor("Laytime applies to")).toHaveValue("Loading");
+    expect(controlFor("Reversible laytime")).toHaveValue("Enabled");
+    expect(screen.getByText("Sum operation allowances")).toBeInTheDocument();
   });
 });
