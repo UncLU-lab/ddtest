@@ -162,6 +162,7 @@ describe('SofDocumentsService events', () => {
     const result = await service.addEvent(SOF_ID, {
       eventTime,
       eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+      sourceTimeZone: 'Australia/Perth',
     });
 
     expect(events.create).toHaveBeenCalledWith(
@@ -169,12 +170,29 @@ describe('SofDocumentsService events', () => {
         sofId: SOF_ID,
         eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
         eventTime: new Date(eventTime),
+        sourceTimeZone: 'Australia/Perth',
         operation: null,
         isManualOverride: true,
       }),
     );
     expect(result.eventType).toBe('VESSEL_READY_IN_ALL_RESPECTS');
     expect(result.eventTime).toEqual(new Date(eventTime));
+    expect(result.sourceTimeZone).toBe('Australia/Perth');
+  });
+
+  it('rejects invalid sourceTimeZone values when adding a manual event', async () => {
+    const { service } = buildService();
+
+    await expect(
+      service.addEvent(SOF_ID, {
+        eventTime: '2026-08-17T09:30:00.000Z',
+        eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+        sourceTimeZone: 'Australia/Nowhere',
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      message: 'sourceTimeZone must be a valid IANA timezone identifier',
+    });
   });
 
   it.each([

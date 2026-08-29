@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   IsDateString,
+  IsNotEmpty,
   IsNumber,
   IsIn,
   IsOptional,
@@ -15,10 +16,10 @@ export class CreateSofEventDto {
   @IsDateString({ strict: true })
   eventTime!: string;
 
-  @IsOptional()
   @IsString()
+  @IsNotEmpty()
   @MaxLength(100)
-  sourceTimeZone?: string;
+  sourceTimeZone!: string;
 
   /** e.g. `NOR_TENDERED`, `RAIN_STOPPAGE`, `CARGO_COMPLETED`. */
   @IsString()

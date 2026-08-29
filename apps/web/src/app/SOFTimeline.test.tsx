@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import SOFTimeline from "./SOFTimeline";
+import { resolveLocalDateTimeInTimeZone } from "../lib/sourceTimeZone";
 
 const apiMocks = vi.hoisted(() => ({
   createBulkDispute: vi.fn(),
@@ -194,6 +196,7 @@ beforeEach(() => {
   apiMocks.runLaytimeCalculation.mockReset();
   apiMocks.updateSofEvent.mockReset();
   apiMocks.getSofDocuments.mockResolvedValue({ data: [buildDocument()] });
+  apiMocks.createSofDocument.mockResolvedValue(buildDocument());
   apiMocks.getSofEvents.mockResolvedValue({ data: [buildEvent()] });
   apiMocks.getNorTenderLocationEvidence.mockResolvedValue({ data: [] });
   apiMocks.getLaytimeCalculations.mockResolvedValue({ data: [] });
@@ -295,6 +298,7 @@ describe("SOFTimeline exception candidate semantics", () => {
   });
 
   it("uses neutral exception-candidate wording in the manual event form and keeps the persisted remarks payload compatible", async () => {
+    const user = userEvent.setup();
     render(<SOFTimeline />);
 
     expect(await screen.findByText("SOF event log")).toBeInTheDocument();
@@ -316,6 +320,9 @@ describe("SOFTimeline exception candidate semantics", () => {
     fireEvent.change(screen.getByLabelText(/event time/i), {
       target: { value: "2026-09-16T00:00" },
     });
+    fireEvent.change(screen.getByLabelText(/source timezone/i), {
+      target: { value: "Australia/Perth" },
+    });
     fireEvent.change(screen.getByLabelText(/cause/i), {
       target: { value: "Weather" },
     });
@@ -323,7 +330,9 @@ describe("SOFTimeline exception candidate semantics", () => {
     fireEvent.change(screen.getByLabelText(/^notes$/i), {
       target: { value: "Rain stopped cargo work" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /save event/i }));
+    const saveEvent = screen.getByRole("button", { name: /save event/i });
+    await waitFor(() => expect(saveEvent).toBeEnabled());
+    await user.click(saveEvent);
 
     await waitFor(() => {
       expect(apiMocks.createSofEvent).toHaveBeenCalledTimes(1);
@@ -333,6 +342,7 @@ describe("SOFTimeline exception candidate semantics", () => {
       "sof-1",
       expect.objectContaining({
         eventType: "RAIN_STOPPAGE",
+        sourceTimeZone: "Australia/Perth",
         remarks: JSON.stringify({
           cause: "Weather",
           deductible: true,
@@ -340,6 +350,64 @@ describe("SOFTimeline exception candidate semantics", () => {
         }),
       }),
     );
+  });
+
+  it("submits the visible authoritative SOF event values and resets when reopened", async () => {
+    const user = userEvent.setup();
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("SOF event log")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /add event/i }));
+
+    fireEvent.change(screen.getByLabelText(/source timezone/i), {
+      target: { value: "Australia/Perth" },
+    });
+    fireEvent.change(screen.getByLabelText(/event time/i), {
+      target: { value: "2026-10-10T08:00" },
+    });
+    fireEvent.change(screen.getByLabelText(/event type/i), {
+      target: { value: "VESSEL_READY_IN_ALL_RESPECTS" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: /operation/i }), {
+      target: { value: "Loading" },
+    });
+    fireEvent.change(screen.getByLabelText(/cause/i), {
+      target: { value: "Vessel" },
+    });
+    fireEvent.change(screen.getByLabelText(/^notes$/i), {
+      target: { value: "Vessel ready for loading" },
+    });
+    const saveEvent = screen.getByRole("button", { name: /save event/i });
+    await waitFor(() => expect(saveEvent).toBeEnabled());
+    await user.click(saveEvent);
+
+    await waitFor(() => {
+      expect(apiMocks.createSofEvent).toHaveBeenCalledTimes(1);
+    });
+
+    expect(apiMocks.createSofEvent).toHaveBeenCalledWith(
+      "sof-1",
+      expect.objectContaining({
+        eventTime: resolveLocalDateTimeInTimeZone("2026-10-10T08:00", "Australia/Perth"),
+        sourceTimeZone: "Australia/Perth",
+        eventType: "VESSEL_READY_IN_ALL_RESPECTS",
+        operation: "Loading",
+        remarks: JSON.stringify({
+          cause: "Vessel",
+          deductible: false,
+          notes: "Vessel ready for loading",
+        }),
+      }),
+    );
+    expect(apiMocks.getSofEvents).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("SOF event created successfully.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /add event/i }));
+    expect(screen.getByLabelText(/source timezone/i)).toHaveValue("");
+    expect(screen.getByLabelText(/event time/i)).not.toHaveValue("2026-10-10T08:00");
+    expect(screen.getByLabelText(/event type/i)).toHaveValue("NOR_TENDERED");
+    expect(screen.getByRole("combobox", { name: /operation/i })).toHaveValue("Discharge");
+    expect(screen.getByLabelText(/^notes$/i)).toHaveValue("");
   });
 
   it("enables the exact valid Event 12 manual correction and refreshes the corrected row", async () => {

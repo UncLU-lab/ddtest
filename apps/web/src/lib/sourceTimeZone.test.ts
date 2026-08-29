@@ -16,6 +16,9 @@ describe('source timezone conversion', () => {
     expect(resolveLocalDateTimeInTimeZone('2026-10-02T14:30', 'Asia/Singapore')).toBe('2026-10-02T06:30:00.000Z');
     expect(resolveLocalDateTimeInTimeZone('2026-10-02T14:30', 'Australia/Brisbane')).toBe('2026-10-02T04:30:00.000Z');
   });
+  it('resolves Perth local time to the correct UTC instant', () => {
+    expect(resolveLocalDateTimeInTimeZone('2026-10-10T08:00', 'Australia/Perth')).toBe('2026-10-10T00:00:00.000Z');
+  });
   it('rejects invalid identifiers', () => {
     expect(() => resolveLocalDateTimeInTimeZone('2026-10-02T14:30', 'Not/AZone')).toThrow(/IANA/);
   });

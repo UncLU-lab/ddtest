@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router";
 import {
   Plus, ArrowUpRight,
@@ -120,6 +120,28 @@ type ManualEventDetails = {
   deductible?: boolean;
   notes?: string;
 };
+
+function readManualEventFormSnapshot(
+  form: HTMLFormElement,
+  mode: "add" | "edit",
+): ManualEventForm {
+  const read = (selector: string) =>
+    (form.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(selector)?.value ?? "").trim();
+  const readGlobal = (selector: string) =>
+    (form.ownerDocument?.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(selector)?.value ?? "").trim();
+
+  return {
+    eventTime: read("#sof-event-time"),
+    sourceTimeZone: readGlobal("#sof-event-timezone"),
+    eventType: read("#sof-event-type"),
+    operation: (read("#sof-event-operation") as EventOperation) || null,
+    cause: read("#sof-event-cause") || "Vessel",
+    duration: read("#sof-event-duration"),
+    deductible: Boolean(form.querySelector<HTMLInputElement>("#sof-event-deductible")?.checked),
+    notes: read("#sof-event-notes"),
+    overrideReason: mode === "edit" ? read("#sof-event-override") : "",
+  };
+}
 
 type LocationEvidenceForm = {
   evidenceTime: string;
@@ -384,10 +406,14 @@ function validateDurationHours(value?: string | null) {
 function validateManualEventForm(
   form: ManualEventForm,
   event: TimelineRow | null,
+  mode: "add" | "edit",
 ): string | null {
   const eventTime = form.eventTime.trim();
   if (!eventTime || Number.isNaN(new Date(eventTime).getTime())) {
     return "Enter a valid event time.";
+  }
+  if (mode === "add" && !form.sourceTimeZone.trim()) {
+    return "Enter a source timezone.";
   }
   if (form.sourceTimeZone.trim() && !isValidIanaTimeZone(form.sourceTimeZone.trim())) return "Enter a valid IANA source timezone.";
 
@@ -1030,8 +1056,9 @@ function AddEventModal({
   };
 
   const [form, setForm] = useState<ManualEventForm>(getInitialForm);
+  const formRef = useRef<HTMLFormElement | null>(null);
   const initialForm = getInitialForm();
-  const validationError = validateManualEventForm(form, event);
+  const validationError = validateManualEventForm(form, event, mode);
   const isDirty = mode === "add" || isManualEventFormDirty(form, initialForm);
   const saveDisabled = submitting || Boolean(validationError) || !isDirty;
   const saveDisabledMessage = validationError ?? (!isDirty ? "Make a change before saving." : null);
@@ -1065,6 +1092,7 @@ function AddEventModal({
               type="text"
               value={form.sourceTimeZone}
               onChange={(e) => setForm((current) => ({ ...current, sourceTimeZone: e.target.value }))}
+              required={mode === "add"}
               placeholder="e.g. Australia/Brisbane"
               className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
               style={{ borderColor: "#D1D5DB" }}
@@ -1095,9 +1123,11 @@ function AddEventModal({
         <form
           className="space-y-4 px-5 py-4"
           noValidate
+          ref={formRef}
           onSubmit={(e) => {
             e.preventDefault();
-            if (!saveDisabled) onSave(form);
+            const snapshot = formRef.current ? readManualEventFormSnapshot(formRef.current, mode) : form;
+            if (!submitting) onSave(snapshot);
           }}
         >
           <div>
@@ -1188,6 +1218,7 @@ function AddEventModal({
 
           <label className="flex items-center gap-2 text-sm" style={{ color: "#374151" }}>
             <input
+              id="sof-event-deductible"
               type="checkbox"
               checked={form.deductible}
               onChange={(e) => setForm((current) => ({ ...current, deductible: e.target.checked }))}
