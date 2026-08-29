@@ -1989,6 +1989,173 @@ describe('LaytimeCalculationsService lifecycle', () => {
     ).toBeUndefined();
   });
 
+  it('isolates tanker completion evidence per operation for reversible V1 without counting the sailing gap', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        laytimeOperationScope: 'LoadingAndDischarge',
+        settlementCurrency: 'USD',
+        clauses: [
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 72,
+            noticeHours: 6,
+          }),
+          opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+            rate: 20000,
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 72,
+            noticeHours: 6,
+          }),
+          opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+            rate: 20000,
+          }),
+          cpClause('reversible-laytime', 'reversible_laytime', {
+            enabled: true,
+            settlementVersion: 1,
+            allowanceMode: 'sum_operation_allowances',
+          }),
+        ],
+      },
+      {
+        laytimeOperation: 'Discharge',
+        bulkOperationType: 'tanker',
+        norDocuments: [],
+        sofDocuments: [
+          {
+            id: 'loading-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-09-28T00:00:00Z'),
+            operation: 'Loading',
+          },
+          {
+            id: 'discharge-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-10-02T00:00:00Z'),
+            operation: 'Discharge',
+          },
+          {
+            id: 'shared-completion-doc',
+            status: 'Final',
+            uploadDate: new Date('2026-09-30T14:30:00Z'),
+            operation: null,
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-nor',
+            sofId: 'loading-doc',
+            eventTime: new Date('2026-09-28T08:30:00Z'),
+            eventType: 'NOR_TENDERED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-nor',
+            sofId: 'discharge-doc',
+            eventTime: new Date('2026-10-02T08:30:00Z'),
+            eventType: 'NOR_TENDERED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+          {
+            id: 'loading-completed',
+            sofId: 'shared-completion-doc',
+            eventTime: new Date('2026-09-30T14:30:00Z'),
+            eventType: 'LOADING_COMPLETED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'loading-hoses-disconnected',
+            sofId: 'shared-completion-doc',
+            eventTime: new Date('2026-09-30T14:30:00Z'),
+            eventType: 'HOSES_DISCONNECTED',
+            operation: 'Loading',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-completed',
+            sofId: 'shared-completion-doc',
+            eventTime: new Date('2026-10-06T14:30:00Z'),
+            eventType: 'DISCHARGE_COMPLETED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+          {
+            id: 'discharge-hoses-disconnected',
+            sofId: 'shared-completion-doc',
+            eventTime: new Date('2026-10-06T14:30:00Z'),
+            eventType: 'HOSES_DISCONNECTED',
+            operation: 'Discharge',
+            isManualOverride: false,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const [parent, loading, discharge] = getCreatedCalculations(manager);
+    const loadingSnapshot = loading.decisionSnapshot as Record<string, any>;
+    const dischargeSnapshot = discharge.decisionSnapshot as Record<string, any>;
+    const settlement = (parent.decisionSnapshot as Record<string, any>)
+      .reversibleSettlement;
+
+    expect(loading.operation).toBe('Loading');
+    expect(loadingSnapshot.commencement).toEqual(
+      expect.objectContaining({
+        norTenderedEventId: 'loading-nor',
+        commencedAt: '2026-09-28T14:30:00.000Z',
+      }),
+    );
+    expect(loadingSnapshot.cargoCompletion).toEqual(
+      expect.objectContaining({
+        selectedEventId: 'loading-hoses-disconnected',
+        selectedEventType: 'HOSES_DISCONNECTED',
+        eventTime: '2026-09-30T14:30:00.000Z',
+      }),
+    );
+    expect(loading.allowedLaytime).toBe('3 days 00:00:00');
+    expect(loading.usedLaytime).toBe('2 days 00:00:00');
+
+    expect(discharge.operation).toBe('Discharge');
+    expect(dischargeSnapshot.commencement).toEqual(
+      expect.objectContaining({
+        norTenderedEventId: 'discharge-nor',
+        commencedAt: '2026-10-02T14:30:00.000Z',
+      }),
+    );
+    expect(dischargeSnapshot.cargoCompletion).toEqual(
+      expect.objectContaining({
+        selectedEventId: 'discharge-hoses-disconnected',
+        selectedEventType: 'HOSES_DISCONNECTED',
+        eventTime: '2026-10-06T14:30:00.000Z',
+      }),
+    );
+    expect(discharge.allowedLaytime).toBe('3 days 00:00:00');
+    expect(discharge.usedLaytime).toBe('4 days 00:00:00');
+
+    expect(settlement).toEqual(
+      expect.objectContaining({
+        combinedAllowedSeconds: 144 * 3600,
+        combinedUsedSeconds: 144 * 3600,
+        combinedOverrunSeconds: 0,
+        combinedSavedSeconds: 0,
+        currency: 'USD',
+        demurrageAmount: 0,
+        despatchAmount: 0,
+      }),
+    );
+    expect(
+      settlement.timeline.reduce(
+        (total: number, segment: { countedSeconds: number }) =>
+          total + segment.countedSeconds,
+        0,
+      ),
+    ).toBe(144 * 3600);
+  });
+
   it('falls back to legacy null child documents and events when no explicit operation-specific evidence exists', async () => {
     const { service, manager } = buildServiceWithCharterParty(0, undefined, {
       laytimeOperation: 'Loading',

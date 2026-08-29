@@ -2121,15 +2121,17 @@ export class LaytimeCalculationsService {
     const excludedEventIds: string[] = [];
 
     for (const event of sofEvents) {
-      const classification = this.classifySofEventOperation(
-        event,
-        voyageOperation,
-      );
-
+      // Completion evidence is operation-specific whenever it declares an
+      // operation.  This remains true for tanker HOSES_DISCONNECTED and the
+      // generic completion markers, even though some of those event types can
+      // otherwise be shared as global timeline evidence.  Passing another
+      // operation's terminal marker to the engine lets tanker selection choose
+      // the earliest hose-disconnect across the voyage.
       if (
-        classification === 'mismatched-operation' &&
-        (event.eventType === 'LOADING_COMPLETED' ||
-          event.eventType === 'DISCHARGE_COMPLETED')
+        COMPLETION_EVENT_TYPES.has(event.eventType) &&
+        event.operation !== null &&
+        event.operation !== undefined &&
+        event.operation !== voyageOperation
       ) {
         excludedEventIds.push(event.id);
         continue;
