@@ -36,6 +36,7 @@ const ENTITIES = [
 
 /** Every endpoint listed for the bulk / tramp shipping domain. */
 const EXPECTED_ROUTES = [
+  'POST /contract-extractions/parse-text',
   'GET /vessels',
   'POST /vessels',
   'GET /vessels/:vesselId',

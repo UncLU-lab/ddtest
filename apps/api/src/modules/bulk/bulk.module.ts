@@ -32,6 +32,8 @@ import { VesselsService } from './vessels/vessels.service';
 import { VoyagesController } from './voyages/voyages.controller';
 import { VoyagesService } from './voyages/voyages.service';
 import { TenantContextModule } from '../cross-cutting/tenant-context/tenant-context.module';
+import { ContractExtractionsController } from './contract-extractions/contract-extractions.controller';
+import { ContractExtractionsService } from './contract-extractions/contract-extractions.service';
 
 const BULK_ENTITIES = [
   CalculationPeriod,
@@ -65,6 +67,7 @@ const BULK_ENTITIES = [
     LaytimeCalculationsController,
     BulkDisputesController,
     CounterpartiesController,
+    ContractExtractionsController,
   ],
   providers: [
     ...createTenantRepositoryProviders(BULK_ENTITIES),
@@ -77,6 +80,7 @@ const BULK_ENTITIES = [
     LaytimeCalculationsService,
     BulkDisputesService,
     CounterpartiesService,
+    ContractExtractionsService,
   ],
 })
 export class BulkModule {}

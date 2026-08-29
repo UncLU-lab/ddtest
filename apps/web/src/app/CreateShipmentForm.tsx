@@ -20,7 +20,7 @@ import {
   emptyShipmentCommercialTermsDraft,
   missingDraftFields,
 } from "./data/ShipmentsContext";
-import { getVessels } from "../lib/api";
+import { getVessels, parseContractText, type ContractExtractionResult } from "../lib/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -449,6 +449,10 @@ export default function CreateShipmentForm() {
   const navigate = useNavigate();
   const { draft, setDraft } = useShipments();
   const [attemptedSubmit, setAttemptedSubmit] = useState(false);
+  const [contractText, setContractText] = useState("");
+  const [extraction, setExtraction] = useState<ContractExtractionResult | null>(null);
+  const [extractionError, setExtractionError] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState(false);
 
   function update<K extends keyof ShipmentDraft>(key: K, value: ShipmentDraft[K]) {
     setDraft({ ...draft, [key]: value });
@@ -487,6 +491,60 @@ export default function CreateShipmentForm() {
       return;
     }
     navigate("/shipments/new/risk-check");
+  };
+
+  const extractContractText = async (sourceText: string) => {
+    if (!sourceText.trim()) {
+      setExtractionError("Paste contract or recap text before extracting.");
+      return;
+    }
+    setExtracting(true);
+    setExtractionError(null);
+    try {
+      setExtraction(await parseContractText(sourceText));
+    } catch (error: any) {
+      setExtraction(null);
+      setExtractionError(error?.message ?? "Unable to extract contract terms.");
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const applyExtractedTerms = () => {
+    if (!extraction) return;
+    const fields = extraction.fields;
+    const value = (key: string) => fields[key]?.status === "FOUND" ? fields[key].normalizedValue : undefined;
+    const next: ShipmentDraft = { ...draft, dealMode: "upload" };
+    const mappings: Array<[keyof ShipmentDraft, string]> = [
+      ["vessel", "vessel"], ["voyageRef", "voyageRef"], ["productType", "productType"], ["quantity", "quantity"],
+      ["eta", "eta"], ["loadPort", "loadPort"], ["dischargePort", "dischargePort"], ["supplier", "supplier"],
+      ["receiver", "receiver"], ["laycanOpen", "laycanOpen"], ["laycanClose", "laycanClose"],
+      ["laytimeAllowed", "laytimeAllowed"], ["demurrageRate", "demurrageRate"], ["dispatchRate", "dispatchRate"],
+      ["timeCountingBasis", "timeCountingBasis"], ["norNoticePeriod", "norNoticePeriod"], ["laytimeOperation", "laytimeOperation"],
+      ["bulkOperationType", "bulkOperationType"],
+    ];
+    for (const [draftKey, extractionKey] of mappings) {
+      const extracted = value(extractionKey);
+      if (extracted !== undefined && extracted !== null) (next as any)[draftKey] = String(extracted);
+    }
+    if (fields.vessel?.status === "FOUND" && fields.vessel.vesselId) next.vesselId = fields.vessel.vesselId;
+    setDraft(next);
+  };
+
+  const onContractFileSelected = async (file?: File) => {
+    setExtractionError(null);
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".txt") || file.type && !/^text\/plain(?:;|$)/i.test(file.type)) {
+      setExtractionError("Upload a UTF-8 .txt file. PDF support is not available in V1.");
+      return;
+    }
+    if (file.size > 200_000) {
+      setExtractionError("Text files must be 200 KB or smaller.");
+      return;
+    }
+    const sourceText = await file.text();
+    setContractText(sourceText);
+    await extractContractText(sourceText);
   };
 
   const allDeductibleTags = ["Rain / weather", "Berth congestion", "Terminal downtime", "Mechanical breakdown", "Tide / draft", "Documentation", "Shifting"];
@@ -762,6 +820,45 @@ export default function CreateShipmentForm() {
                 );
               })}
             </div>
+
+            {draft.dealMode === "upload" && (
+              <div className="rounded-lg border p-3" style={{ borderColor: "#BFDBFE", backgroundColor: "#F8FBFF" }}>
+                <p style={{ fontSize: "12px", fontWeight: 500, color: "#1E3A8A", marginBottom: "4px" }}>Upload contract / fixture recap</p>
+                <p style={{ fontSize: "11px", color: "#6B7280", marginBottom: "10px" }}>Paste text or upload a UTF-8 .txt file. Extraction is reviewed locally before it updates this draft.</p>
+                <textarea
+                  aria-label="Contract or recap text"
+                  value={contractText}
+                  onChange={(event) => setContractText(event.target.value)}
+                  placeholder="VOYAGE REFERENCE: STAGE-BASIC-001\nVESSEL: MV Staging Explorer"
+                  className="w-full rounded-lg border p-2 outline-none"
+                  style={{ minHeight: "110px", borderColor: "#D1D5DB", fontSize: "12px", resize: "vertical" }}
+                />
+                <div className="mt-2 flex items-center gap-2">
+                  <input aria-label="Contract text file" type="file" accept=".txt,text/plain" onChange={(event) => void onContractFileSelected(event.target.files?.[0])} style={{ fontSize: "11px" }} />
+                  <button type="button" onClick={() => void extractContractText(contractText)} disabled={extracting} className="rounded-lg px-3 py-1.5" style={{ backgroundColor: "#1A4ED8", color: "#fff", fontSize: "11px", border: "none" }}>
+                    {extracting ? "Extracting…" : "Extract terms"}
+                  </button>
+                </div>
+                {extractionError && <p role="alert" className="mt-2" style={{ fontSize: "11px", color: "#B91C1C" }}>{extractionError}</p>}
+                {extraction && (
+                  <div className="mt-3 rounded-lg border bg-white p-3" style={{ borderColor: "#D1D5DB" }}>
+                    <p style={{ fontSize: "11px", color: "#374151", fontWeight: 500, marginBottom: "8px" }}>Review extracted terms</p>
+                    <div className="flex flex-col gap-2">
+                      {Object.entries(extraction.fields).map(([key, field]) => (
+                        <div key={key} className="rounded border p-2" style={{ borderColor: "#E5E7EB" }}>
+                          <div className="flex justify-between gap-2"><span style={{ fontSize: "11px", fontWeight: 500, color: "#374151" }}>{key.replace(/([A-Z])/g, " $1")}</span><span style={{ fontSize: "10px", color: field.status === "FOUND" ? "#166534" : "#B45309" }}>{field.status}</span></div>
+                          <div style={{ fontSize: "11px", color: "#111827" }}>Extracted: {field.rawValue ?? "—"}</div>
+                          <div style={{ fontSize: "11px", color: "#1A4ED8" }}>Normalized: {field.normalizedValue ?? "—"}</div>
+                          {field.sourceSnippet && <div style={{ fontSize: "10px", color: "#6B7280" }}>Source: {field.sourceSnippet}</div>}
+                          {field.warning && <div style={{ fontSize: "10px", color: "#B45309" }}>{field.warning}</div>}
+                        </div>
+                      ))}
+                    </div>
+                    <button type="button" onClick={applyExtractedTerms} className="mt-3 rounded-lg px-3 py-1.5" style={{ backgroundColor: "#1A4ED8", color: "#fff", fontSize: "11px", border: "none" }}>Apply extracted terms</button>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3 mb-3">
               <FormField

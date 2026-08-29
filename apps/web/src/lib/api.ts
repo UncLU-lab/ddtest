@@ -57,6 +57,22 @@ export interface Vessel {
   [key: string]: unknown;
 }
 
+export type ContractExtractionStatus = "FOUND" | "NOT_FOUND" | "AMBIGUOUS" | "UNSUPPORTED" | "INVALID";
+
+export interface ContractExtractionField {
+  rawValue: string | null;
+  normalizedValue: string | number | null;
+  status: ContractExtractionStatus;
+  sourceSnippet: string | null;
+  warning?: string;
+  vesselId?: string;
+}
+
+export interface ContractExtractionResult {
+  fields: Record<string, ContractExtractionField>;
+  warnings: string[];
+}
+
 export interface CreateVesselDto {
   imo: string;
   name: string;
@@ -829,6 +845,15 @@ export async function getVessels(
     console.error("Failed to fetch vessels:", error);
     throw error;
   }
+}
+
+export async function parseContractText(sourceText: string): Promise<ContractExtractionResult> {
+  const response = await fetch(`${API_BASE}/contract-extractions/parse-text`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourceText }),
+  });
+  return unwrapData<ContractExtractionResult>(await parseResponse(response));
 }
 
 export async function getVesselsPage(
