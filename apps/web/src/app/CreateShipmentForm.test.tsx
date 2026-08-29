@@ -18,6 +18,10 @@ describe("CreateShipmentForm contract text autofill", () => {
     return screen.getByText(label).parentElement?.querySelector("select") as HTMLSelectElement;
   }
 
+  function allowanceInputFor(sectionTitle: string) {
+    return screen.getByText(sectionTitle).parentElement?.parentElement?.querySelector("input") as HTMLInputElement;
+  }
+
   it("applies only valid reviewed terms to the draft without creating a voyage", async () => {
     api.parseContractText.mockResolvedValue({
       warnings: [],
@@ -27,6 +31,8 @@ describe("CreateShipmentForm contract text autofill", () => {
         settlementCurrency: { rawValue: "USD", normalizedValue: "USD", status: "FOUND", sourceSnippet: "SETTLEMENT CURRENCY: USD" },
         laytimeOperationScope: { rawValue: "LOADING AND DISCHARGE", normalizedValue: "LoadingAndDischarge", status: "FOUND", sourceSnippet: "LAYTIME APPLIES TO: LOADING AND DISCHARGE" },
         reversibleLaytime: { rawValue: "ENABLED", normalizedValue: "Enabled", status: "FOUND", sourceSnippet: "REVERSIBLE LAYTIME: ENABLED" },
+        loadingLaytimeAllowed: { rawValue: "72 HOURS", normalizedValue: 72, status: "FOUND", sourceSnippet: "LOADING LAYTIME ALLOWED: 72 HOURS" },
+        dischargeLaytimeAllowed: { rawValue: "72 HOURS", normalizedValue: 72, status: "FOUND", sourceSnippet: "DISCHARGE LAYTIME ALLOWED: 72 HOURS" },
         loadPort: { rawValue: "Port Hedland", normalizedValue: null, status: "INVALID", sourceSnippet: "LOAD PORT: Port Hedland", warning: "Backend requires an accepted 5–10 character port code." },
       },
     });
@@ -46,6 +52,8 @@ describe("CreateShipmentForm contract text autofill", () => {
     expect(controlFor("Reversible laytime")).toHaveValue("Enabled");
     expect(screen.getByText("Settlement version")).toBeInTheDocument();
     expect(screen.getByText("Allowance mode")).toBeInTheDocument();
+    expect(allowanceInputFor("Loading-specific terms")).toHaveValue("72");
+    expect(allowanceInputFor("Discharge-specific terms")).toHaveValue("72");
     expect(screen.queryByDisplayValue("Port Hedland")).not.toBeInTheDocument();
     expect(api.parseContractText).toHaveBeenCalledTimes(1);
   });
@@ -65,5 +73,20 @@ describe("CreateShipmentForm contract text autofill", () => {
     expect(controlFor("Laytime applies to")).toHaveValue("Loading");
     expect(controlFor("Reversible laytime")).toHaveValue("Enabled");
     expect(screen.getByText("Sum operation allowances")).toBeInTheDocument();
+  });
+
+  it("makes distinct operation allowances visible when reversible V1 applies to Loading and Discharge", async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><ShipmentsProvider><CreateShipmentForm /></ShipmentsProvider></MemoryRouter>);
+
+    await user.selectOptions(controlFor("Laytime applies to"), "LoadingAndDischarge");
+    await user.selectOptions(controlFor("Reversible laytime"), "Enabled");
+    const loading = allowanceInputFor("Loading-specific terms");
+    const discharge = allowanceInputFor("Discharge-specific terms");
+    await user.type(loading, "72");
+    await user.type(discharge, "72");
+    expect(loading).toHaveValue("72");
+    expect(discharge).toHaveValue("72");
+    expect(screen.getAllByText(/global allowance is not reused/i)).toHaveLength(2);
   });
 });

@@ -145,6 +145,7 @@ export interface SofEvent {
   id: string;
   sofId: string;
   eventTime: string;
+  sourceTimeZone?: string | null;
   eventType: string;
   operation?: "Loading" | "Discharge" | null;
   remarks?: string | null;
@@ -692,6 +693,7 @@ export interface UpdateSofDocumentDto extends Partial<CreateSofDocumentDto> {}
 
 export interface CreateSofEventDto {
   eventTime: string;
+  sourceTimeZone?: string;
   eventType: string;
   operation?: "Loading" | "Discharge";
   remarks?: string;
@@ -700,6 +702,7 @@ export interface CreateSofEventDto {
 
 export interface UpdateSofEventDto {
   eventTime?: string;
+  sourceTimeZone?: string;
   eventType?: string;
   operation?: "Loading" | "Discharge";
   remarks?: string;

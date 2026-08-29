@@ -26,6 +26,10 @@ export class SofEvent extends UuidEntity {
   @Column({ name: 'event_time', type: 'timestamptz' })
   eventTime!: Date;
 
+  /** IANA timezone of the source document/civil timestamp; null for legacy events. */
+  @Column({ name: 'source_time_zone', type: 'varchar', length: 100, nullable: true })
+  sourceTimeZone?: string | null;
+
   @Column({ name: 'event_type', type: 'varchar', length: 50 })
   eventType!: string;
 

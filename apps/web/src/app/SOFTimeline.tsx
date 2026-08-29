@@ -32,6 +32,7 @@ import {
   type ReversibleSettlementStatus,
 } from "../lib/api";
 import { formatCurrencyAmount } from "../lib/currency";
+import { formatDateTimeInputInTimeZone, formatSourceDateTime, resolveLocalDateTimeInTimeZone, isValidIanaTimeZone } from "../lib/sourceTimeZone";
 
 type EventOperation = SofEvent["operation"];
 
@@ -83,6 +84,7 @@ type TimelineRow = {
   eventTimeIso?: string;
   eventType?: string;
   operation?: EventOperation | null;
+  sourceTimeZone?: string | null;
   remarks?: string | null;
   isManualOverride?: boolean;
   n: string;
@@ -102,6 +104,7 @@ type TimelineRow = {
 
 type ManualEventForm = {
   eventTime: string;
+  sourceTimeZone: string;
   eventType: string;
   operation: EventOperation;
   cause: string;
@@ -386,6 +389,7 @@ function validateManualEventForm(
   if (!eventTime || Number.isNaN(new Date(eventTime).getTime())) {
     return "Enter a valid event time.";
   }
+  if (form.sourceTimeZone.trim() && !isValidIanaTimeZone(form.sourceTimeZone.trim())) return "Enter a valid IANA source timezone.";
 
   if (!ENGINE_EVENT_PRESETS.some((preset) => preset.value === form.eventType)) {
     return "Select a supported event type.";
@@ -415,6 +419,7 @@ function isManualEventFormDirty(
 ): boolean {
   return (
     form.eventTime !== initialForm.eventTime ||
+    form.sourceTimeZone !== initialForm.sourceTimeZone ||
     form.eventType !== initialForm.eventType ||
     form.operation !== initialForm.operation ||
     form.cause !== initialForm.cause ||
@@ -892,13 +897,16 @@ function toTimelineRow(event: SofEvent, index: number): TimelineRow {
   return {
     eventId: event.id,
     eventTimeIso: event.eventTime,
+    sourceTimeZone: event.sourceTimeZone,
     eventType: event.eventType,
     operation: event.operation ?? null,
     remarks: event.remarks,
     isManualOverride: event.isManualOverride,
     n: String(index + 1).padStart(2, "0"),
     state,
-    timestamp: formatDateTime(event.eventTime),
+    timestamp: event.sourceTimeZone
+      ? formatSourceDateTime(event.eventTime, event.sourceTimeZone)
+      : formatDateTime(event.eventTime),
     name: eventLabel(event.eventType),
     detail: inferDetail(event.eventType, parsed, event.isManualOverride, event.remarks),
     tag:
@@ -1001,7 +1009,8 @@ function AddEventModal({
     const details = parseManualDetails(event?.remarks);
 
     return {
-    eventTime: formatDateTimeInput(event?.eventTimeIso ?? new Date().toISOString()),
+    eventTime: formatDateTimeInputInTimeZone(event?.eventTimeIso ?? new Date().toISOString(), event?.sourceTimeZone),
+    sourceTimeZone: event?.sourceTimeZone ?? "",
     eventType: event?.eventType ?? ENGINE_EVENT_PRESETS[0].value,
     operation: (event?.operation ?? defaultOperation) as EventOperation,
     cause: event?.cause ?? "Vessel",
@@ -1047,6 +1056,24 @@ function AddEventModal({
         style={{ borderColor: "#E5E7EB", borderWidth: "0.5px" }}
       >
         <div className="flex items-center justify-between border-b px-5 py-4" style={{ borderColor: "#E5E7EB" }}>
+          <div>
+            <label htmlFor="sof-event-timezone" style={{ fontSize: "11px", color: "#374151", fontWeight: 500 }}>
+              Source timezone (IANA)
+            </label>
+            <input
+              id="sof-event-timezone"
+              type="text"
+              value={form.sourceTimeZone}
+              onChange={(e) => setForm((current) => ({ ...current, sourceTimeZone: e.target.value }))}
+              placeholder="e.g. Australia/Brisbane"
+              className="mt-1 w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              style={{ borderColor: "#D1D5DB" }}
+            />
+            <p style={{ fontSize: "11px", color: "#6B7280", marginTop: "3px" }}>
+              Required for new authoritative timestamps. Legacy events without provenance remain readable.
+            </p>
+          </div>
+
           <div>
             <h2 style={{ fontSize: "15px", fontWeight: 600, color: "#111827" }}>
               {mode === "edit" ? "Edit SOF event" : "Add SOF event"}
@@ -1498,7 +1525,10 @@ export default function SOFTimeline() {
       }
 
       const payload = {
-        eventTime: new Date(form.eventTime).toISOString(),
+        eventTime: form.sourceTimeZone.trim()
+          ? resolveLocalDateTimeInTimeZone(form.eventTime, form.sourceTimeZone.trim())
+          : new Date(form.eventTime).toISOString(),
+        ...(form.sourceTimeZone.trim() ? { sourceTimeZone: form.sourceTimeZone.trim() } : {}),
         eventType: form.eventType.trim(),
         ...(form.operation ? { operation: form.operation } : {}),
         remarks: buildManualDetails({
@@ -1677,6 +1707,8 @@ export default function SOFTimeline() {
     reversibleSettlement?.settlementStatus ??
     (reversibleConfigured ? "LEGACY" : null)
   ) as ReversibleSettlementStatus | null;
+  const nonAuthoritativeReversibleSummary =
+    reversibleConfigured && reversibleSettlementStatus === "NONAUTHORITATIVE";
   const laytimeClaimAllowed =
     reversibleConfigured &&
     reversibleSettlementStatus === "FINAL_AUTHORITATIVE" &&
@@ -1779,13 +1811,13 @@ export default function SOFTimeline() {
     nonReversibleSettlement.expectedOperations.length > 1;
   const allowedDisplay = singleOperationSummary
     ? formatSecondsAsInterval(singleOperationSummary.allowedSeconds)
-    : nonReversibleMultiOperationSummary
-      ? "See operation results"
+    : nonReversibleMultiOperationSummary || nonAuthoritativeReversibleSummary
+      ? nonAuthoritativeReversibleSummary ? "Not authoritative — see operation results" : "See operation results"
       : formatInterval(laytimeCalculation?.allowedLaytime);
   const grossUsedDisplay = singleOperationSummary
     ? formatSecondsAsInterval(singleOperationSummary.usedSeconds)
-    : nonReversibleMultiOperationSummary
-      ? "See operation results"
+    : nonReversibleMultiOperationSummary || nonAuthoritativeReversibleSummary
+      ? nonAuthoritativeReversibleSummary ? "Not authoritative — see operation results" : "See operation results"
       : formatInterval(laytimeCalculation?.usedLaytime);
   const deductionsDisplay = hasLaytimeCalculation ? formatSecondsAsInterval(deductionSeconds) : "—";
   const netUsedDisplay = hasLaytimeCalculation ? formatSecondsAsInterval(netUsedSeconds) : "—";
@@ -1793,22 +1825,22 @@ export default function SOFTimeline() {
   const overrunDisplay = hasLaytimeCalculation ? formatSecondsAsInterval(overrunSeconds) : "—";
   const summaryAllowedDisplay = singleOperationSummary
     ? formatSecondsAsInterval(singleOperationSummary.allowedSeconds)
-    : nonReversibleMultiOperationSummary
-      ? "See operation results"
+    : nonReversibleMultiOperationSummary || nonAuthoritativeReversibleSummary
+      ? nonAuthoritativeReversibleSummary ? "Not authoritative — see operation results" : "See operation results"
       : allowedDisplay;
   const summaryUsedDisplay = singleOperationSummary
     ? formatSecondsAsInterval(singleOperationSummary.usedSeconds)
-    : nonReversibleMultiOperationSummary
-      ? "See operation results"
+    : nonReversibleMultiOperationSummary || nonAuthoritativeReversibleSummary
+      ? nonAuthoritativeReversibleSummary ? "Not authoritative — see operation results" : "See operation results"
       : grossUsedDisplay;
   const summaryRemainingDisplay =
-    singleOperationSummary || !nonReversibleMultiOperationSummary
+    singleOperationSummary || (!nonReversibleMultiOperationSummary && !nonAuthoritativeReversibleSummary)
       ? remainingDisplay
-      : "See operation results";
+      : nonAuthoritativeReversibleSummary ? "Not authoritative — see operation results" : "See operation results";
   const summaryOverrunDisplay =
-    singleOperationSummary || !nonReversibleMultiOperationSummary
+    singleOperationSummary || (!nonReversibleMultiOperationSummary && !nonAuthoritativeReversibleSummary)
       ? overrunDisplay
-      : "See operation results";
+      : nonAuthoritativeReversibleSummary ? "Not authoritative — see operation results" : "See operation results";
   const singleOperationSummaryLabel = singleOperationSummary
     ? `${formatOperationLabel(singleOperationSummary.operation)} operation result`
     : null;

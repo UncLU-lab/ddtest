@@ -829,6 +829,18 @@ export default function PreOpsRiskEngine() {
         throw new Error(globalValidationError);
       }
 
+      const requiresExplicitReversibleAllowances =
+        draft.laytimeOperationScope === "LoadingAndDischarge" &&
+        draft.reversibleLaytime === "Enabled";
+      if (requiresExplicitReversibleAllowances) {
+        if (!isFilled(draft.loadingTerms?.laytimeAllowed)) {
+          throw new Error("Loading laytime allowance is required for reversible V1.");
+        }
+        if (!isFilled(draft.dischargeTerms?.laytimeAllowed)) {
+          throw new Error("Discharge laytime allowance is required for reversible V1.");
+        }
+      }
+
       /*
        * IMPORTANT:
        * Backend CreateVoyageDto requires:

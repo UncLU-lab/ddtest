@@ -41,6 +41,8 @@ const LABELS: LabelDefinition[] = [
   { field: 'laycanOpen', labels: ['LAYCAN OPEN', 'LAYCAN START'] },
   { field: 'laycanClose', labels: ['LAYCAN CLOSE', 'LAYCAN END'] },
   { field: 'laytimeAllowed', labels: ['LAYTIME ALLOWED'] },
+  { field: 'loadingLaytimeAllowed', labels: ['LOADING LAYTIME ALLOWED', 'LOADING LAYTIME ALLOWANCE'] },
+  { field: 'dischargeLaytimeAllowed', labels: ['DISCHARGE LAYTIME ALLOWED', 'DISCHARGE LAYTIME ALLOWANCE'] },
   { field: 'demurrageRate', labels: ['DEMURRAGE RATE'] },
   { field: 'dispatchRate', labels: ['DESPATCH RATE', 'DISPATCH RATE'] },
   { field: 'timeCountingBasis', labels: ['COUNTING BASIS', 'TIME COUNTING BASIS'] },
@@ -95,7 +97,10 @@ export class ContractExtractionsService {
         return product ? found(text, product, sourceSnippet) : unsupported(text, sourceSnippet, 'Product must be LNG, LPG, Crude, or Products.');
       }
       case 'quantity': return numeric(text, sourceSnippet, /\b(MT|TONNES?|METRIC TONS?)\b/i.test(text) ? undefined : 'Quantity unit was not recognised; review before applying.');
-      case 'laytimeAllowed': return hours(text, sourceSnippet);
+      case 'laytimeAllowed':
+      case 'loadingLaytimeAllowed':
+      case 'dischargeLaytimeAllowed':
+        return hours(text, sourceSnippet);
       case 'demurrageRate':
       case 'dispatchRate': return numeric(text, sourceSnippet);
       case 'eta':

@@ -24,7 +24,9 @@ SETTLEMENT CURRENCY: USD
 LAYTIME APPLIES TO: LOADING AND DISCHARGE
 REVERSIBLE LAYTIME: ENABLED
 REVERSIBLE SETTLEMENT VERSION: 1
-REVERSIBLE ALLOWANCE MODE: SUM_OPERATION_ALLOWANCES`;
+REVERSIBLE ALLOWANCE MODE: SUM_OPERATION_ALLOWANCES
+LOADING LAYTIME ALLOWED: 72 HOURS
+DISCHARGE LAYTIME ALLOWED: 72 HOURS`;
 
 describe('ContractExtractionsService', () => {
   const vessels = { findAll: jest.fn() };
@@ -69,6 +71,8 @@ PRODUCT: Ammonia`);
     expect(result.fields.reversibleLaytime).toMatchObject({ status: 'FOUND', normalizedValue: 'Enabled' });
     expect(result.fields.reversibleSettlementVersion).toMatchObject({ normalizedValue: 1 });
     expect(result.fields.reversibleAllowanceMode).toMatchObject({ normalizedValue: 'sum_operation_allowances' });
+    expect(result.fields.loadingLaytimeAllowed).toMatchObject({ status: 'FOUND', normalizedValue: 72 });
+    expect(result.fields.dischargeLaytimeAllowed).toMatchObject({ status: 'FOUND', normalizedValue: 72 });
   });
 
   it('flags unsupported currency and incomplete or unsupported reversible terms for review', async () => {

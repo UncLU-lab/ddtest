@@ -310,6 +310,7 @@ function OperationTermsSection({
   title,
   terms,
   onChange,
+  explicitAllowanceRequired = false,
 }: {
   title: string;
   terms: ShipmentCommercialTermsDraft;
@@ -317,6 +318,7 @@ function OperationTermsSection({
     key: K,
     value: ShipmentCommercialTermsDraft[K],
   ) => void;
+  explicitAllowanceRequired?: boolean;
 }) {
   return (
     <div
@@ -328,16 +330,18 @@ function OperationTermsSection({
       }}
     >
       <SubLabel>{title}</SubLabel>
-      <p style={{ fontSize: "10px", color: "#9CA3AF", marginTop: "-2px", marginBottom: "10px" }}>
-        Leave fields blank to fall back to Global terms.
+      <p style={{ fontSize: "10px", color: explicitAllowanceRequired ? "#92400E" : "#9CA3AF", marginTop: "-2px", marginBottom: "10px" }}>
+        {explicitAllowanceRequired
+          ? "Reversible V1 requires this operation's own laytime allowance; the global allowance is not reused."
+          : "Leave fields blank to fall back to Global terms."}
       </p>
 
       <div className="grid grid-cols-3 gap-3 mb-3">
-        <FormField label="Laytime allowed (hrs)">
+        <FormField label={`${title.replace("-specific terms", "")} laytime allowance (hours)`} required={explicitAllowanceRequired}>
           <Input
             value={terms.laytimeAllowed}
             onChange={(v) => onChange("laytimeAllowed", v)}
-            placeholder="Optional"
+            placeholder={explicitAllowanceRequired ? "Required for reversible V1" : "Optional"}
           />
         </FormField>
         <FormField label="Demurrage rate ($/day)">
@@ -529,6 +533,20 @@ export default function CreateShipmentForm() {
     for (const [draftKey, extractionKey] of mappings) {
       const extracted = value(extractionKey);
       if (extracted !== undefined && extracted !== null) (next as any)[draftKey] = String(extracted);
+    }
+    const loadingAllowance = value("loadingLaytimeAllowed");
+    if (loadingAllowance !== undefined) {
+      next.loadingTerms = {
+        ...(next.loadingTerms ?? emptyShipmentCommercialTermsDraft),
+        laytimeAllowed: String(loadingAllowance),
+      };
+    }
+    const dischargeAllowance = value("dischargeLaytimeAllowed");
+    if (dischargeAllowance !== undefined) {
+      next.dischargeTerms = {
+        ...(next.dischargeTerms ?? emptyShipmentCommercialTermsDraft),
+        laytimeAllowed: String(dischargeAllowance),
+      };
     }
     if (fields.vessel?.status === "FOUND" && fields.vessel.vesselId) next.vesselId = fields.vessel.vesselId;
     setDraft(next);
@@ -977,12 +995,14 @@ export default function CreateShipmentForm() {
               title="Loading-specific terms"
               terms={draft.loadingTerms ?? emptyShipmentCommercialTermsDraft}
               onChange={(key, value) => updateCommercialTerms("loadingTerms", key, value)}
+              explicitAllowanceRequired={draft.laytimeOperationScope === "LoadingAndDischarge" && draft.reversibleLaytime === "Enabled"}
             />
 
             <OperationTermsSection
               title="Discharge-specific terms"
               terms={draft.dischargeTerms ?? emptyShipmentCommercialTermsDraft}
               onChange={(key, value) => updateCommercialTerms("dischargeTerms", key, value)}
+              explicitAllowanceRequired={draft.laytimeOperationScope === "LoadingAndDischarge" && draft.reversibleLaytime === "Enabled"}
             />
 
             <Divider />

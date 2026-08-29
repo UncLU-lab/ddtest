@@ -671,6 +671,47 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
     expect(screen.getAllByText("Not available").length).toBeGreaterThan(0);
   });
 
+  it("does not present unavailable reversible parent time as zero when settlement is non-authoritative", async () => {
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [buildCalculation({
+        allowedLaytime: null,
+        usedLaytime: null,
+        settlementAuthorityStatus: "NONAUTHORITATIVE",
+        decisionSnapshot: {
+          reversibleLaytimeRule: { enabled: true },
+          reversibleSettlement: {
+            settlementStatus: "NONAUTHORITATIVE",
+            reasonCode: "REVERSIBLE_EXPLICIT_OPERATION_ALLOWANCES_REQUIRED",
+          },
+        },
+      })],
+    });
+    apiMocks.getLaytimeOperationResults.mockResolvedValue([
+      {
+        id: "discharge-child",
+        parentCalculationId: "calc-1",
+        operation: "Discharge",
+        voyageId: "voyage-1",
+        version: 2,
+        allowedLaytime: "3 days 00:00:00",
+        usedLaytime: "3 days 23:00:00",
+        demurrageAmount: "0.00",
+        despatchAmount: "0.00",
+        currency: "USD",
+        status: "Draft",
+        calculatedAt: "2026-10-06T14:30:00.000Z",
+        warnings: [],
+        inputSnapshot: {},
+        decisionSnapshot: {},
+      },
+    ]);
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findAllByText("Not authoritative — see operation results")).not.toHaveLength(0);
+    expect(screen.getByText("3d 23h 00m")).toBeInTheDocument();
+  });
+
   it("keeps reversible and legacy parent summary behavior unchanged", async () => {
     apiMocks.getLaytimeCalculations.mockResolvedValue({
       data: [

@@ -15,6 +15,7 @@ import { CreateSofDocumentDto } from './dto/create-sof-document.dto';
 import { CreateSofEventDto } from './dto/create-sof-event.dto';
 import { UpdateSofDocumentDto } from './dto/update-sof-document.dto';
 import { UpdateSofEventDto } from './dto/update-sof-event.dto';
+import { isValidIanaTimeZone } from '../laytime/shex-calendar';
 
 @Injectable()
 export class SofDocumentsService {
@@ -98,10 +99,15 @@ export class SofDocumentsService {
   async addEvent(sofId: string, dto: CreateSofEventDto): Promise<SofEvent> {
     await this.findOne(sofId);
 
+    if (dto.sourceTimeZone !== undefined && !isValidIanaTimeZone(dto.sourceTimeZone)) {
+      throw new BadRequestException('sourceTimeZone must be a valid IANA timezone identifier');
+    }
+
     return this.events.save(
       this.events.create({
         sofId,
         eventTime: new Date(dto.eventTime),
+        sourceTimeZone: dto.sourceTimeZone ?? null,
         eventType: dto.eventType,
         operation: dto.operation ?? null,
         remarks: dto.remarks ?? null,
@@ -126,6 +132,10 @@ export class SofDocumentsService {
 
     await this.findOne(event.sofId);
 
+    if (dto.sourceTimeZone !== undefined && !isValidIanaTimeZone(dto.sourceTimeZone)) {
+      throw new BadRequestException('sourceTimeZone must be a valid IANA timezone identifier');
+    }
+
     const changesTimeOrType =
       (dto.eventTime !== undefined &&
         new Date(dto.eventTime).getTime() !== event.eventTime.getTime()) ||
@@ -141,6 +151,9 @@ export class SofDocumentsService {
 
     if (dto.eventTime !== undefined) {
       event.eventTime = new Date(dto.eventTime);
+    }
+    if (dto.sourceTimeZone !== undefined) {
+      event.sourceTimeZone = dto.sourceTimeZone;
     }
     if (dto.eventType !== undefined) {
       event.eventType = dto.eventType;

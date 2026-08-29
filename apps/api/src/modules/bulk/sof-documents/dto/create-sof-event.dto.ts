@@ -15,6 +15,11 @@ export class CreateSofEventDto {
   @IsDateString({ strict: true })
   eventTime!: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  sourceTimeZone?: string;
+
   /** e.g. `NOR_TENDERED`, `RAIN_STOPPAGE`, `CARGO_COMPLETED`. */
   @IsString()
   @MaxLength(50)

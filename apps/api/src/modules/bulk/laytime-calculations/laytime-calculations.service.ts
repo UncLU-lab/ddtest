@@ -1045,6 +1045,7 @@ export class LaytimeCalculationsService {
         id: event.id,
         sofId: event.sofId,
         eventTime: event.eventTime.toISOString(),
+        sourceTimeZone: event.sourceTimeZone ?? null,
         eventType: event.eventType,
         operation: event.operation ?? null,
         operationClassification: this.classifySofEventOperation(
