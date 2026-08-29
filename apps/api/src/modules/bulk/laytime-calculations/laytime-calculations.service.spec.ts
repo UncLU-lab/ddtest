@@ -59,7 +59,11 @@ function buildServiceWithCharterParty(
     dispatchRate: string | null;
     timeCountingBasis: string | null;
     norNoticePeriod: string | null;
-    laytimeOperationScope: 'Loading' | 'Discharge' | 'LoadingAndDischarge' | null;
+    laytimeOperationScope:
+      | 'Loading'
+      | 'Discharge'
+      | 'LoadingAndDischarge'
+      | null;
     settlementCurrency: 'USD' | 'EUR' | null;
   }>,
   options?: Partial<{
@@ -2906,7 +2910,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
     const { service, manager } = buildServiceWithCharterParty(0, {
       clauses: [
         opClause('loading-laytime', 'laytime_rate', 'Loading', { hours: 72 }),
-        opClause('discharge-laytime', 'laytime_rate', 'Discharge', { hours: 48 }),
+        opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+          hours: 48,
+        }),
         cpClause('reversible', 'reversible_laytime', { enabled: true }),
       ],
     });
@@ -2936,7 +2942,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
       {
         clauses: [
           opClause('loading-rate', 'laytime_rate', 'Loading', { rate: 10000 }),
-          opClause('discharge-rate', 'laytime_rate', 'Discharge', { rate: 5000 }),
+          opClause('discharge-rate', 'laytime_rate', 'Discharge', {
+            rate: 5000,
+          }),
           cpClause('reversible', 'reversible_laytime', { enabled: true }),
         ],
       },
@@ -3076,8 +3084,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
         }),
       }),
     );
-    const settlement = (parentCalculation.decisionSnapshot as Record<string, any>)
-      .reversibleSettlement;
+    const settlement = (
+      parentCalculation.decisionSnapshot as Record<string, any>
+    ).reversibleSettlement;
     expect(manager.save.mock.calls[1][0]).toEqual([]);
     expect(
       settlement.timeline.reduce(
@@ -3365,11 +3374,21 @@ describe('LaytimeCalculationsService lifecycle', () => {
     const settlement = (parent.decisionSnapshot as Record<string, any>)
       .reversibleSettlement;
 
-    expect((loading.decisionSnapshot as Record<string, any>).shexCalendar).toEqual(
-      expect.objectContaining({ clauseId: 'loading-shex', timeZone: 'Australia/Sydney' }),
+    expect(
+      (loading.decisionSnapshot as Record<string, any>).shexCalendar,
+    ).toEqual(
+      expect.objectContaining({
+        clauseId: 'loading-shex',
+        timeZone: 'Australia/Sydney',
+      }),
     );
-    expect((discharge.decisionSnapshot as Record<string, any>).shexCalendar).toEqual(
-      expect.objectContaining({ clauseId: 'discharge-shex', timeZone: 'America/New_York' }),
+    expect(
+      (discharge.decisionSnapshot as Record<string, any>).shexCalendar,
+    ).toEqual(
+      expect.objectContaining({
+        clauseId: 'discharge-shex',
+        timeZone: 'America/New_York',
+      }),
     );
     expect(settlement).toEqual(
       expect.objectContaining({
@@ -5223,6 +5242,7 @@ describe('LaytimeCalculationsService lifecycle', () => {
               voyageId: VOYAGE_ID,
               operation: 'Discharge',
               evidenceTime: '2026-03-04T00:00:00.000Z',
+              sourceTimeZone: null,
               portRelation: 'INSIDE_PORT_LIMITS',
               berthRelation: 'AT_BERTH',
               waitingPlace: 'ANCHORAGE',

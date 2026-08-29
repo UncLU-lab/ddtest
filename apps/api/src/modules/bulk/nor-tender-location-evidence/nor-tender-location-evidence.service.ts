@@ -7,6 +7,7 @@ import { NorDocument } from '../entities/nor-document.entity';
 import { NorTenderLocationEvidence } from '../entities/nor-tender-location-evidence.entity';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
+import { isValidIanaTimeZone } from '../laytime/shex-calendar';
 import { VoyagesService } from '../voyages/voyages.service';
 import { CreateNorTenderLocationEvidenceDto } from './dto/create-nor-tender-location-evidence.dto';
 import { FindNorTenderLocationEvidenceQueryDto } from './dto/find-nor-tender-location-evidence-query.dto';
@@ -105,6 +106,19 @@ export class NorTenderLocationEvidenceService {
       );
     }
 
+    const sourceTimeZone =
+      candidateEvent?.sourceTimeZone ?? dto.sourceTimeZone?.trim() ?? null;
+    if (!sourceTimeZone && !candidateEvent && !candidateDocument) {
+      throw new BadRequestException(
+        'Unassociated location evidence requires an explicit sourceTimeZone',
+      );
+    }
+    if (sourceTimeZone && !isValidIanaTimeZone(sourceTimeZone)) {
+      throw new BadRequestException(
+        'sourceTimeZone must be a valid IANA timezone identifier',
+      );
+    }
+
     const candidateTenderTime =
       candidateDocument?.tenderTime ?? candidateEvent?.eventTime;
     if (
@@ -120,6 +134,7 @@ export class NorTenderLocationEvidenceService {
       this.evidence.create({
         voyageId,
         evidenceTime: new Date(dto.evidenceTime),
+        sourceTimeZone,
         operation: dto.operation,
         portRelation: dto.portRelation,
         berthRelation: dto.berthRelation,

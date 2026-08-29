@@ -38,6 +38,7 @@ function buildService() {
       sofId: SOF_ID,
       eventType: 'NOR_TENDERED',
       eventTime: new Date('2026-03-04T14:00:00Z'),
+      sourceTimeZone: 'Australia/Perth',
     }),
   };
   const voyagesService = {
@@ -128,6 +129,21 @@ describe('NorTenderLocationEvidenceService', () => {
     expect(evidence.create.mock.calls[1][0]?.norTenderedEventId).toBe(
       NOR_EVENT_ID,
     );
+    expect(evidence.create.mock.calls[1][0]?.sourceTimeZone).toBe(
+      'Australia/Perth',
+    );
+  });
+
+  it('requires an explicit timezone for unassociated observations', async () => {
+    const { service, evidence } = buildService();
+
+    await expect(
+      service.createForVoyage(VOYAGE_ID, {
+        ...manualDto,
+        norDocumentId: undefined,
+      }),
+    ).rejects.toThrow('requires an explicit sourceTimeZone');
+    expect(evidence.save).not.toHaveBeenCalled();
   });
 
   it('rejects ambiguous association with two NOR candidate types', async () => {
@@ -207,5 +223,18 @@ describe('NorTenderLocationEvidenceService', () => {
     });
 
     expect(evidence.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('snapshots the explicit timezone for a NOR document candidate', async () => {
+    const { service, evidence } = buildService();
+
+    await service.createForVoyage(VOYAGE_ID, {
+      ...manualDto,
+      sourceTimeZone: 'Australia/Perth',
+    });
+
+    expect(evidence.create).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceTimeZone: 'Australia/Perth' }),
+    );
   });
 });

@@ -2,7 +2,8 @@ import { getAuthMode, getFirebaseAuth } from "./auth";
 
 // API client for the Demurrage Defender backend
 
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000/api/v1";
+export const API_BASE =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:3000/api/v1";
 
 async function getAccessToken(): Promise<string> {
   const authMode = getAuthMode();
@@ -57,7 +58,8 @@ export interface Vessel {
   [key: string]: unknown;
 }
 
-export type ContractExtractionStatus = "FOUND" | "NOT_FOUND" | "AMBIGUOUS" | "UNSUPPORTED" | "INVALID";
+export type ContractExtractionStatus =
+  "FOUND" | "NOT_FOUND" | "AMBIGUOUS" | "UNSUPPORTED" | "INVALID";
 
 export interface ContractExtractionField {
   rawValue: string | null;
@@ -157,9 +159,7 @@ export interface SofEvent {
 }
 
 export type NorPortRelation =
-  | "INSIDE_PORT_LIMITS"
-  | "OUTSIDE_PORT_LIMITS"
-  | "UNKNOWN";
+  "INSIDE_PORT_LIMITS" | "OUTSIDE_PORT_LIMITS" | "UNKNOWN";
 export type NorBerthRelation = "AT_BERTH" | "NOT_AT_BERTH" | "UNKNOWN";
 export type NorWaitingPlace =
   | "ANCHORAGE"
@@ -174,6 +174,7 @@ export interface NorTenderLocationEvidence {
   voyageId: string;
   operation: "Loading" | "Discharge";
   evidenceTime: string;
+  sourceTimeZone?: string | null;
   portRelation: NorPortRelation;
   berthRelation: NorBerthRelation;
   waitingPlace: NorWaitingPlace;
@@ -189,6 +190,7 @@ export interface NorTenderLocationEvidence {
 
 export interface CreateNorTenderLocationEvidenceDto {
   evidenceTime: string;
+  sourceTimeZone?: string;
   operation: "Loading" | "Discharge";
   portRelation: NorPortRelation;
   berthRelation: NorBerthRelation;
@@ -265,17 +267,15 @@ export interface ReversibleLaytimeRuleSnapshot {
   clauseParameters?: Record<string, unknown> | null;
   rawText?: string | null;
   warnings?: string[] | null;
-  contractStatus?: "absent" | "disabled" | "legacy" | "v1" | "invalid" | "ambiguous";
+  contractStatus?:
+    "absent" | "disabled" | "legacy" | "v1" | "invalid" | "ambiguous";
   settlementVersion?: 1 | null;
   allowanceMode?: "sum_operation_allowances" | null;
   conflictingClauseIds?: string[];
 }
 
 export type ReversibleSettlementStatus =
-  | "FINAL_AUTHORITATIVE"
-  | "PROVISIONAL"
-  | "NONAUTHORITATIVE"
-  | "LEGACY";
+  "FINAL_AUTHORITATIVE" | "PROVISIONAL" | "NONAUTHORITATIVE" | "LEGACY";
 
 export interface ReversibleSettlementSnapshot {
   version?: 1 | null;
@@ -428,7 +428,9 @@ export interface NonReversibleSettlementSnapshot {
   expectedOperations?: Array<"Loading" | "Discharge">;
   settlementStatus?: ReversibleSettlementStatus;
   reasonCode?: string;
-  operations?: Partial<Record<"Loading" | "Discharge", NonReversibleOperationSettlementSnapshot>>;
+  operations?: Partial<
+    Record<"Loading" | "Discharge", NonReversibleOperationSettlementSnapshot>
+  >;
   missingOperations?: Array<"Loading" | "Discharge">;
   monetaryAggregation?: {
     status?: "AVAILABLE" | "CURRENCY_AUTHORITY_REQUIRED" | "CURRENCY_MISMATCH";
@@ -514,7 +516,8 @@ export interface CharterParty {
   [key: string]: unknown;
 }
 
-export type LaytimeOperationScope = "Loading" | "Discharge" | "LoadingAndDischarge";
+export type LaytimeOperationScope =
+  "Loading" | "Discharge" | "LoadingAndDischarge";
 
 export interface CreateCpClauseDto {
   clauseType: string;
@@ -524,7 +527,9 @@ export interface CreateCpClauseDto {
 
 export interface UpdateCpClauseDto extends Partial<CreateCpClauseDto> {}
 
-export async function getVoyageCharterParty(voyageId: string): Promise<CharterParty> {
+export async function getVoyageCharterParty(
+  voyageId: string,
+): Promise<CharterParty> {
   if (!voyageId) {
     const error: ApiError = {
       message: "Voyage ID is required.",
@@ -535,7 +540,7 @@ export async function getVoyageCharterParty(voyageId: string): Promise<CharterPa
   }
 
   const response = await fetch(
-    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/charter-party`
+    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/charter-party`,
   );
 
   const result = await parseResponse(response);
@@ -562,7 +567,7 @@ export async function updateCharterParty(
 
 export async function createCpClause(
   charterPartyId: string,
-  dto: CreateCpClauseDto
+  dto: CreateCpClauseDto,
 ): Promise<CpClause> {
   if (!charterPartyId) {
     const error: ApiError = {
@@ -581,7 +586,7 @@ export async function createCpClause(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(dto),
-    }
+    },
   );
 
   const result = await parseResponse(response);
@@ -590,7 +595,7 @@ export async function createCpClause(
 
 export async function updateCpClause(
   clauseId: string,
-  dto: UpdateCpClauseDto
+  dto: UpdateCpClauseDto,
 ): Promise<CpClause> {
   if (!clauseId) {
     const error: ApiError = {
@@ -609,7 +614,7 @@ export async function updateCpClause(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(dto),
-    }
+    },
   );
 
   const result = await parseResponse(response);
@@ -652,7 +657,9 @@ export async function getBulkDispute(disputeId: string): Promise<BulkDispute> {
     throw error;
   }
 
-  const response = await fetch(`${API_BASE}/bulk-disputes/${encodeURIComponent(disputeId)}`);
+  const response = await fetch(
+    `${API_BASE}/bulk-disputes/${encodeURIComponent(disputeId)}`,
+  );
   const result = await parseResponse(response);
 
   return unwrapData<BulkDispute>(result);
@@ -660,7 +667,7 @@ export async function getBulkDispute(disputeId: string): Promise<BulkDispute> {
 
 export async function updateBulkDispute(
   disputeId: string,
-  dto: UpdateBulkDisputeDto
+  dto: UpdateBulkDisputeDto,
 ): Promise<BulkDispute> {
   if (!disputeId) {
     const error: ApiError = {
@@ -671,13 +678,16 @@ export async function updateBulkDispute(
     throw error;
   }
 
-  const response = await fetch(`${API_BASE}/bulk-disputes/${encodeURIComponent(disputeId)}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await fetch(
+    `${API_BASE}/bulk-disputes/${encodeURIComponent(disputeId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(dto),
     },
-    body: JSON.stringify(dto),
-  });
+  );
 
   const result = await parseResponse(response);
   return unwrapData<BulkDispute>(result);
@@ -809,7 +819,9 @@ function unwrapData<T>(result: any): T {
   return result?.data ?? result;
 }
 
-function buildQueryString(params?: Record<string, string | number | undefined>): string {
+function buildQueryString(
+  params?: Record<string, string | number | undefined>,
+): string {
   if (!params) {
     return "";
   }
@@ -832,12 +844,15 @@ function buildQueryString(params?: Record<string, string | number | undefined>):
 // Vessels
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function getVessels(
-  params?: { page?: number; limit?: number; search?: string; type?: string }
-): Promise<Vessel[]> {
+export async function getVessels(params?: {
+  page?: number;
+  limit?: number;
+  search?: string;
+  type?: string;
+}): Promise<Vessel[]> {
   try {
     const response = await fetch(
-      `${API_BASE}/vessels${buildQueryString(params)}`
+      `${API_BASE}/vessels${buildQueryString(params)}`,
     );
 
     const result = await parseResponse(response);
@@ -859,7 +874,9 @@ export async function getVessels(
   }
 }
 
-export async function parseContractText(sourceText: string): Promise<ContractExtractionResult> {
+export async function parseContractText(
+  sourceText: string,
+): Promise<ContractExtractionResult> {
   const response = await fetch(`${API_BASE}/contract-extractions/parse-text`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -868,12 +885,15 @@ export async function parseContractText(sourceText: string): Promise<ContractExt
   return unwrapData<ContractExtractionResult>(await parseResponse(response));
 }
 
-export async function getVesselsPage(
-  params?: { page?: number; limit?: number; search?: string; type?: string }
-): Promise<Paginated<Vessel>> {
+export async function getVesselsPage(params?: {
+  page?: number;
+  limit?: number;
+  search?: string;
+  type?: string;
+}): Promise<Paginated<Vessel>> {
   try {
     const response = await fetch(
-      `${API_BASE}/vessels${buildQueryString(params)}`
+      `${API_BASE}/vessels${buildQueryString(params)}`,
     );
 
     const result = await parseResponse(response);
@@ -926,7 +946,9 @@ export async function getVessel(vesselId: string): Promise<Vessel> {
   }
 
   try {
-    const response = await fetch(`${API_BASE}/vessels/${encodeURIComponent(vesselId)}`);
+    const response = await fetch(
+      `${API_BASE}/vessels/${encodeURIComponent(vesselId)}`,
+    );
     const result = await parseResponse(response);
 
     return unwrapData<Vessel>(result);
@@ -951,7 +973,7 @@ export async function createVessel(dto: CreateVesselDto): Promise<Vessel> {
 
 export async function updateVessel(
   vesselId: string,
-  dto: UpdateVesselDto
+  dto: UpdateVesselDto,
 ): Promise<Vessel> {
   if (!vesselId) {
     const error: ApiError = {
@@ -962,13 +984,16 @@ export async function updateVessel(
     throw error;
   }
 
-  const response = await fetch(`${API_BASE}/vessels/${encodeURIComponent(vesselId)}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await fetch(
+    `${API_BASE}/vessels/${encodeURIComponent(vesselId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(dto),
     },
-    body: JSON.stringify(dto),
-  });
+  );
 
   const result = await parseResponse(response);
   return unwrapData<Vessel>(result);
@@ -985,7 +1010,9 @@ export async function getVesselVoyages(vesselId: string): Promise<Voyage[]> {
   }
 
   try {
-    const response = await fetch(`${API_BASE}/vessels/${encodeURIComponent(vesselId)}/voyages`);
+    const response = await fetch(
+      `${API_BASE}/vessels/${encodeURIComponent(vesselId)}/voyages`,
+    );
     const result = await parseResponse(response);
 
     const voyages = unwrapData<unknown>(result);
@@ -1027,9 +1054,7 @@ export async function getVoyages(): Promise<VoyageListItem[]> {
 // Create voyage
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function createVoyage(
-  dto: CreateVoyageDto
-): Promise<Voyage> {
+export async function createVoyage(dto: CreateVoyageDto): Promise<Voyage> {
   try {
     const response = await fetch(`${API_BASE}/voyages`, {
       method: "POST",
@@ -1070,7 +1095,7 @@ export async function updateVoyage(
           "Content-Type": "application/json",
         },
         body: JSON.stringify(dto),
-      }
+      },
     );
 
     const result = await parseResponse(response);
@@ -1086,9 +1111,7 @@ export async function updateVoyage(
 // Voyage summary
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function getVoyageSummary(
-  id: string
-): Promise<any> {
+export async function getVoyageSummary(id: string): Promise<any> {
   if (!id) {
     const error: ApiError = {
       message: "Voyage ID is required.",
@@ -1100,17 +1123,14 @@ export async function getVoyageSummary(
 
   try {
     const response = await fetch(
-      `${API_BASE}/voyages/${encodeURIComponent(id)}/summary`
+      `${API_BASE}/voyages/${encodeURIComponent(id)}/summary`,
     );
 
     const result = await parseResponse(response);
 
     return unwrapData<any>(result);
   } catch (error) {
-    console.error(
-      `Failed to fetch voyage summary ${id}:`,
-      error
-    );
+    console.error(`Failed to fetch voyage summary ${id}:`, error);
 
     throw error;
   }
@@ -1122,7 +1142,7 @@ export async function getVoyageSummary(
 
 export async function getSofDocuments(
   voyageId: string,
-  params?: { page?: number; limit?: number }
+  params?: { page?: number; limit?: number },
 ): Promise<Paginated<SofDocument>> {
   if (!voyageId) {
     const error: ApiError = {
@@ -1134,7 +1154,7 @@ export async function getSofDocuments(
   }
 
   const response = await fetch(
-    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/sof-documents${buildQueryString(params)}`
+    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/sof-documents${buildQueryString(params)}`,
   );
 
   const result = await parseResponse(response);
@@ -1143,7 +1163,7 @@ export async function getSofDocuments(
 
 export async function createSofDocument(
   voyageId: string,
-  dto: CreateSofDocumentDto
+  dto: CreateSofDocumentDto,
 ): Promise<SofDocument> {
   if (!voyageId) {
     const error: ApiError = {
@@ -1162,7 +1182,7 @@ export async function createSofDocument(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(dto),
-    }
+    },
   );
 
   const result = await parseResponse(response);
@@ -1171,7 +1191,7 @@ export async function createSofDocument(
 
 export async function getSofEvents(
   sofId: string,
-  params?: { page?: number; limit?: number }
+  params?: { page?: number; limit?: number },
 ): Promise<Paginated<SofEvent>> {
   if (!sofId) {
     const error: ApiError = {
@@ -1183,7 +1203,7 @@ export async function getSofEvents(
   }
 
   const response = await fetch(
-    `${API_BASE}/sof-documents/${encodeURIComponent(sofId)}/events${buildQueryString(params)}`
+    `${API_BASE}/sof-documents/${encodeURIComponent(sofId)}/events${buildQueryString(params)}`,
   );
 
   const result = await parseResponse(response);
@@ -1192,7 +1212,7 @@ export async function getSofEvents(
 
 export async function createSofEvent(
   sofId: string,
-  dto: CreateSofEventDto
+  dto: CreateSofEventDto,
 ): Promise<SofEvent> {
   if (!sofId) {
     const error: ApiError = {
@@ -1211,7 +1231,7 @@ export async function createSofEvent(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(dto),
-    }
+    },
   );
 
   const result = await parseResponse(response);
@@ -1220,7 +1240,7 @@ export async function createSofEvent(
 
 export async function updateSofEvent(
   eventId: string,
-  dto: UpdateSofEventDto
+  dto: UpdateSofEventDto,
 ): Promise<SofEvent> {
   if (!eventId) {
     const error: ApiError = {
@@ -1239,7 +1259,7 @@ export async function updateSofEvent(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(dto),
-    }
+    },
   );
 
   const result = await parseResponse(response);
@@ -1261,7 +1281,9 @@ export async function getNorTenderLocationEvidence(
   const response = await fetch(
     `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/nor-tender-location-evidence${buildQueryString(params)}`,
   );
-  return (await parseResponse(response)) as Paginated<NorTenderLocationEvidence>;
+  return (await parseResponse(
+    response,
+  )) as Paginated<NorTenderLocationEvidence>;
 }
 
 export async function createNorTenderLocationEvidence(
@@ -1285,7 +1307,7 @@ export async function createNorTenderLocationEvidence(
 
 export async function getLaytimeCalculations(
   voyageId: string,
-  params?: { page?: number; limit?: number }
+  params?: { page?: number; limit?: number },
 ): Promise<Paginated<LaytimeCalculation>> {
   if (!voyageId) {
     const error: ApiError = {
@@ -1297,7 +1319,7 @@ export async function getLaytimeCalculations(
   }
 
   const response = await fetch(
-    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/laytime-calculations${buildQueryString(params)}`
+    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/laytime-calculations${buildQueryString(params)}`,
   );
 
   const result = await parseResponse(response);
@@ -1305,7 +1327,7 @@ export async function getLaytimeCalculations(
 }
 
 export async function getLaytimeOperationResults(
-  parentCalculationId: string
+  parentCalculationId: string,
 ): Promise<LaytimeOperationResult[]> {
   if (!parentCalculationId) {
     const error: ApiError = {
@@ -1317,7 +1339,7 @@ export async function getLaytimeOperationResults(
   }
 
   const response = await fetch(
-    `${API_BASE}/laytime-calculations/${encodeURIComponent(parentCalculationId)}/operation-results`
+    `${API_BASE}/laytime-calculations/${encodeURIComponent(parentCalculationId)}/operation-results`,
   );
 
   const result = await parseResponse(response);
@@ -1350,7 +1372,7 @@ export async function getLaytimeCalculationAudit(
 }
 
 export async function runLaytimeCalculation(
-  voyageId: string
+  voyageId: string,
 ): Promise<LaytimeCalculationResult> {
   if (!voyageId) {
     const error: ApiError = {
@@ -1365,7 +1387,7 @@ export async function runLaytimeCalculation(
     `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/laytime-calculations`,
     {
       method: "POST",
-    }
+    },
   );
 
   const result = await parseResponse(response);
@@ -1373,7 +1395,7 @@ export async function runLaytimeCalculation(
 }
 
 export async function createBulkDispute(
-  dto: CreateBulkDisputeDto
+  dto: CreateBulkDisputeDto,
 ): Promise<any> {
   const response = await fetch(`${API_BASE}/bulk-disputes`, {
     method: "POST",
@@ -1387,10 +1409,13 @@ export async function createBulkDispute(
   return unwrapData<any>(result);
 }
 
-export async function getBulkDisputes(
-  params?: { page?: number; limit?: number }
-): Promise<Paginated<BulkDispute>> {
-  const response = await fetch(`${API_BASE}/bulk-disputes${buildQueryString(params)}`);
+export async function getBulkDisputes(params?: {
+  page?: number;
+  limit?: number;
+}): Promise<Paginated<BulkDispute>> {
+  const response = await fetch(
+    `${API_BASE}/bulk-disputes${buildQueryString(params)}`,
+  );
 
   const result = await parseResponse(response);
   if (Array.isArray(result)) {
@@ -1421,4 +1446,3 @@ export async function getAllBulkDisputes(): Promise<BulkDispute[]> {
 
   return disputes;
 }
-

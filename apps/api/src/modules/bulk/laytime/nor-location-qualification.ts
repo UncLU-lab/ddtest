@@ -18,6 +18,7 @@ export interface NorLocationEvidenceInput {
   voyageId: string;
   operation: NorLocationOperation;
   evidenceTime: Date;
+  sourceTimeZone?: string | null;
   portRelation: NorPortRelation;
   berthRelation: NorBerthRelation;
   waitingPlace: NorWaitingPlace;

@@ -68,7 +68,7 @@ function buildDocument() {
   };
 }
 
-function buildEvent() {
+function buildEvent(overrides: Record<string, unknown> = {}) {
   return {
     id: "event-1",
     sofId: "sof-1",
@@ -80,6 +80,7 @@ function buildEvent() {
     isManualOverride: true,
     overrideReason: null,
     createdAt: "2026-08-25T01:00:00Z",
+    ...overrides,
   };
 }
 
@@ -104,9 +105,7 @@ function buildRainEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function buildCalculation(
-  overrides: Record<string, unknown> = {},
-) {
+function buildCalculation(overrides: Record<string, unknown> = {}) {
   return {
     id: "calc-1",
     voyageId: "voyage-1",
@@ -204,6 +203,50 @@ beforeEach(() => {
 });
 
 describe("SOFTimeline laytime error handling", () => {
+  it("uses the associated NOR source timezone for location evidence", async () => {
+    apiMocks.getSofEvents.mockResolvedValue({
+      data: [
+        buildEvent({
+          eventTime: "2026-10-10T00:30:00.000Z",
+          sourceTimeZone: "Australia/Perth",
+          operation: "Loading",
+        }),
+      ],
+    });
+    apiMocks.createNorTenderLocationEvidence.mockResolvedValue({});
+
+    render(<SOFTimeline />);
+    await screen.findByText("NOR tendered");
+    fireEvent.click(
+      screen.getByRole("button", { name: /add location evidence/i }),
+    );
+
+    const candidate = screen.getByRole("option", { name: /Australia\/Perth/ });
+    expect(candidate.textContent).toMatch(/8:30|08:30/);
+    fireEvent.change(screen.getByLabelText(/associated NOR tender/i), {
+      target: { value: "event-1" },
+    });
+    expect(screen.getByLabelText(/source timezone/i)).toHaveValue(
+      "Australia/Perth",
+    );
+
+    fireEvent.change(screen.getByLabelText(/observed at/i), {
+      target: { value: "2026-10-10T08:25" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /record evidence/i }));
+
+    await waitFor(() =>
+      expect(apiMocks.createNorTenderLocationEvidence).toHaveBeenCalledWith(
+        "voyage-1",
+        expect.objectContaining({
+          evidenceTime: "2026-10-10T00:25:00.000Z",
+          sourceTimeZone: "Australia/Perth",
+          norTenderedEventId: "event-1",
+        }),
+      ),
+    );
+  });
+
   it("keeps the page rendered and shows the backend 422 message when laytime calculation fails", async () => {
     apiMocks.runLaytimeCalculation.mockRejectedValue({
       status: 422,
@@ -213,18 +256,26 @@ describe("SOFTimeline laytime error handling", () => {
     render(<SOFTimeline />);
 
     expect(await screen.findByText("SOF event log")).toBeInTheDocument();
-    expect(screen.getByText("NOR tender-location evidence")).toBeInTheDocument();
+    expect(
+      screen.getByText("NOR tender-location evidence"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Operation selection")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /run laytime calculation/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /run laytime calculation/i }),
+    );
 
     expect(
       await screen.findByText("Laytime calculation rejected by backend"),
     ).toBeInTheDocument();
     expect(screen.getByText("SOF event log")).toBeInTheDocument();
-    expect(screen.getByText("NOR tender-location evidence")).toBeInTheDocument();
+    expect(
+      screen.getByText("NOR tender-location evidence"),
+    ).toBeInTheDocument();
     expect(screen.getByText("NOR tendered")).toBeInTheDocument();
-    expect(screen.queryByText("Backend laytime calculation loaded.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Backend laytime calculation loaded."),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("Operation selection")).not.toBeInTheDocument();
     expect(apiMocks.runLaytimeCalculation).toHaveBeenCalledWith("voyage-1");
   });
@@ -240,14 +291,18 @@ describe("SOFTimeline laytime error handling", () => {
     render(<SOFTimeline />);
 
     expect(await screen.findByText("Operation selection")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /run laytime calculation/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /run laytime calculation/i }),
+    );
 
     expect(
       await screen.findByText("Discharge completion found"),
     ).toBeInTheDocument();
     expect(screen.getByText("Voyage laytime operation")).toBeInTheDocument();
     expect(screen.getByText("Discharge")).toBeInTheDocument();
-    expect(screen.queryByText("Laytime calculation failed")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Laytime calculation failed"),
+    ).not.toBeInTheDocument();
     expect(apiMocks.runLaytimeCalculation).toHaveBeenCalledWith("voyage-1");
   });
 
@@ -280,7 +335,9 @@ describe("SOFTimeline laytime error handling", () => {
     expect(
       screen.getAllByText("Not available for this calculation version.").length,
     ).toBeGreaterThan(0);
-    expect(screen.queryByText("Discharge completion found")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Discharge completion found"),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -293,7 +350,9 @@ describe("SOFTimeline exception candidate semantics", () => {
     render(<SOFTimeline />);
 
     expect(await screen.findByText("Rain stoppage")).toBeInTheDocument();
-    expect(screen.getAllByText("Exception candidate").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Exception candidate").length).toBeGreaterThan(
+      0,
+    );
     expect(screen.queryByText("Deductible")).not.toBeInTheDocument();
   });
 
@@ -312,7 +371,9 @@ describe("SOFTimeline exception candidate semantics", () => {
         "Actual deductible time is determined by Charter Party rules during the laytime calculation.",
       ),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText(/mark as deductible/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/mark as deductible/i),
+    ).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/event type/i), {
       target: { value: "RAIN_STOPPAGE" },
@@ -388,7 +449,10 @@ describe("SOFTimeline exception candidate semantics", () => {
     expect(apiMocks.createSofEvent).toHaveBeenCalledWith(
       "sof-1",
       expect.objectContaining({
-        eventTime: resolveLocalDateTimeInTimeZone("2026-10-10T08:00", "Australia/Perth"),
+        eventTime: resolveLocalDateTimeInTimeZone(
+          "2026-10-10T08:00",
+          "Australia/Perth",
+        ),
         sourceTimeZone: "Australia/Perth",
         eventType: "VESSEL_READY_IN_ALL_RESPECTS",
         operation: "Loading",
@@ -400,13 +464,19 @@ describe("SOFTimeline exception candidate semantics", () => {
       }),
     );
     expect(apiMocks.getSofEvents).toHaveBeenCalledTimes(2);
-    expect(await screen.findByText("SOF event created successfully.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("SOF event created successfully."),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /add event/i }));
     expect(screen.getByLabelText(/source timezone/i)).toHaveValue("");
-    expect(screen.getByLabelText(/event time/i)).not.toHaveValue("2026-10-10T08:00");
+    expect(screen.getByLabelText(/event time/i)).not.toHaveValue(
+      "2026-10-10T08:00",
+    );
     expect(screen.getByLabelText(/event type/i)).toHaveValue("NOR_TENDERED");
-    expect(screen.getByRole("combobox", { name: /operation/i })).toHaveValue("Discharge");
+    expect(screen.getByRole("combobox", { name: /operation/i })).toHaveValue(
+      "Discharge",
+    );
     expect(screen.getByLabelText(/^notes$/i)).toHaveValue("");
   });
 
@@ -431,20 +501,32 @@ describe("SOFTimeline exception candidate semantics", () => {
     render(<SOFTimeline />);
 
     expect(await screen.findByText("Discharge completed")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Edit Discharge completed" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit Discharge completed" }),
+    );
 
-    expect(screen.getByRole("combobox", { name: /event type/i })).toHaveValue("DISCHARGE_COMPLETED");
-    expect(screen.getByRole("combobox", { name: /operation/i })).toHaveValue("Discharge");
-    expect(screen.getByDisplayValue("Discharge hoses disconnected")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /event type/i })).toHaveValue(
+      "DISCHARGE_COMPLETED",
+    );
+    expect(screen.getByRole("combobox", { name: /operation/i })).toHaveValue(
+      "Discharge",
+    );
+    expect(
+      screen.getByDisplayValue("Discharge hoses disconnected"),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
-    expect(screen.getByRole("alert")).toHaveTextContent("Make a change before saving.");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Make a change before saving.",
+    );
 
     fireEvent.change(screen.getByLabelText(/event type/i), {
       target: { value: "HOSES_DISCONNECTED" },
     });
     const saveChanges = screen.getByRole("button", { name: "Save changes" });
     expect(saveChanges).toBeEnabled();
-    expect(screen.queryByText(/override reason/i, { selector: "[role=alert]" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/override reason/i, { selector: "[role=alert]" }),
+    ).not.toBeInTheDocument();
     fireEvent.click(saveChanges);
 
     await waitFor(() => {
@@ -461,10 +543,16 @@ describe("SOFTimeline exception candidate semantics", () => {
         }),
       );
     });
-    expect(await screen.findByText("SOF event updated successfully.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("SOF event updated successfully."),
+    ).toBeInTheDocument();
     expect(await screen.findByText("Hoses disconnected")).toBeInTheDocument();
-    expect(screen.getByText(new Date(originalEvent.eventTime).toLocaleString())).toBeInTheDocument();
-    expect(screen.getByText("Discharge hoses disconnected")).toBeInTheDocument();
+    expect(
+      screen.getByText(new Date(originalEvent.eventTime).toLocaleString()),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Discharge hoses disconnected"),
+    ).toBeInTheDocument();
     expect(apiMocks.getSofEvents).toHaveBeenCalledTimes(2);
     expect(apiMocks.runLaytimeCalculation).not.toHaveBeenCalled();
   });
@@ -480,21 +568,29 @@ describe("SOFTimeline exception candidate semantics", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(apiMocks.updateSofEvent).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save changes" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("NOR tendered")).toBeInTheDocument();
   });
 
   it("keeps the edit open and shows the PATCH error without discarding a manual correction", async () => {
     const originalEvent = buildEvent();
     originalEvent.eventType = "DISCHARGE_COMPLETED";
-    originalEvent.remarks = JSON.stringify({ notes: "Discharge hoses disconnected" });
+    originalEvent.remarks = JSON.stringify({
+      notes: "Discharge hoses disconnected",
+    });
     apiMocks.getSofEvents.mockResolvedValue({ data: [originalEvent] });
-    apiMocks.updateSofEvent.mockRejectedValue({ message: "SOF event update was rejected" });
+    apiMocks.updateSofEvent.mockRejectedValue({
+      message: "SOF event update was rejected",
+    });
 
     render(<SOFTimeline />);
 
     expect(await screen.findByText("Discharge completed")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Edit Discharge completed" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit Discharge completed" }),
+    );
     fireEvent.change(screen.getByLabelText(/event type/i), {
       target: { value: "HOSES_DISCONNECTED" },
     });
@@ -506,10 +602,18 @@ describe("SOFTimeline exception candidate semantics", () => {
         expect.objectContaining({ eventType: "HOSES_DISCONNECTED" }),
       );
     });
-    expect(await screen.findByText("SOF event update was rejected")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Edit SOF event" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /event type/i })).toHaveValue("HOSES_DISCONNECTED");
-    expect(screen.getByDisplayValue("Discharge hoses disconnected")).toBeInTheDocument();
+    expect(
+      await screen.findByText("SOF event update was rejected"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Edit SOF event" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /event type/i })).toHaveValue(
+      "HOSES_DISCONNECTED",
+    );
+    expect(
+      screen.getByDisplayValue("Discharge hoses disconnected"),
+    ).toBeInTheDocument();
   });
 
   it('keeps engine-backed calculation totals labeled as "Deductions"', async () => {
@@ -519,7 +623,9 @@ describe("SOFTimeline exception candidate semantics", () => {
 
     render(<SOFTimeline />);
 
-    expect((await screen.findAllByText("Deductions")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Deductions")).length).toBeGreaterThan(
+      0,
+    );
     expect(screen.getByText("Backend exception periods")).toBeInTheDocument();
   });
 });
@@ -536,7 +642,9 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
     expect(screen.getAllByText("3d 00h 00m").length).toBeGreaterThan(0);
     expect(screen.getAllByText("3d 11h 15m").length).toBeGreaterThan(0);
     expect(screen.getByText("11h 15m over")).toBeInTheDocument();
-    expect(screen.getAllByText("Discharge operation result").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("Discharge operation result").length,
+    ).toBeGreaterThan(0);
   });
 
   it("shows Loading-only summary values from the persisted non-reversible operation result", async () => {
@@ -586,7 +694,9 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
     expect(screen.getAllByText("2d 00h 00m").length).toBeGreaterThan(0);
     expect(screen.getAllByText("2d 02h 00m").length).toBeGreaterThan(0);
     expect(screen.getByText("02h 00m over")).toBeInTheDocument();
-    expect(screen.getAllByText("Loading operation result").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("Loading operation result").length,
+    ).toBeGreaterThan(0);
   });
 
   it("does not fabricate aggregate time totals for LoadingAndDischarge scope", async () => {
@@ -679,7 +789,9 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
 
     render(<SOFTimeline />);
 
-    expect((await screen.findAllByText("See operation results")).length).toBeGreaterThan(0);
+    expect(
+      (await screen.findAllByText("See operation results")).length,
+    ).toBeGreaterThan(0);
     expect(screen.getAllByText("Loading").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Discharge").length).toBeGreaterThan(0);
     expect(screen.queryByText("5d 11h 15m")).not.toBeInTheDocument();
@@ -692,7 +804,9 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
 
     render(<SOFTimeline />);
 
-    const expectedCompletion = new Date("2026-09-19T04:00:00.000Z").toLocaleString();
+    const expectedCompletion = new Date(
+      "2026-09-19T04:00:00.000Z",
+    ).toLocaleString();
     expect(await screen.findByText("Cargo completion")).toBeInTheDocument();
     expect(screen.getByText(expectedCompletion)).toBeInTheDocument();
   });
@@ -741,18 +855,20 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
 
   it("does not present unavailable reversible parent time as zero when settlement is non-authoritative", async () => {
     apiMocks.getLaytimeCalculations.mockResolvedValue({
-      data: [buildCalculation({
-        allowedLaytime: null,
-        usedLaytime: null,
-        settlementAuthorityStatus: "NONAUTHORITATIVE",
-        decisionSnapshot: {
-          reversibleLaytimeRule: { enabled: true },
-          reversibleSettlement: {
-            settlementStatus: "NONAUTHORITATIVE",
-            reasonCode: "REVERSIBLE_EXPLICIT_OPERATION_ALLOWANCES_REQUIRED",
+      data: [
+        buildCalculation({
+          allowedLaytime: null,
+          usedLaytime: null,
+          settlementAuthorityStatus: "NONAUTHORITATIVE",
+          decisionSnapshot: {
+            reversibleLaytimeRule: { enabled: true },
+            reversibleSettlement: {
+              settlementStatus: "NONAUTHORITATIVE",
+              reasonCode: "REVERSIBLE_EXPLICIT_OPERATION_ALLOWANCES_REQUIRED",
+            },
           },
-        },
-      })],
+        }),
+      ],
     });
     apiMocks.getLaytimeOperationResults.mockResolvedValue([
       {
@@ -776,7 +892,9 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
 
     render(<SOFTimeline />);
 
-    expect(await screen.findAllByText("Not authoritative — see operation results")).not.toHaveLength(0);
+    expect(
+      await screen.findAllByText("Not authoritative — see operation results"),
+    ).not.toHaveLength(0);
     expect(screen.getByText("3d 23h 00m")).toBeInTheDocument();
   });
 
@@ -820,7 +938,9 @@ describe("SOFTimeline non-reversible single-operation summary", () => {
       (await screen.findAllByText("USD 9,375.00 NET_PAYABLE")).length,
     ).toBeGreaterThan(0);
     expect(
-      screen.getByText("Informational only - operation results remain separate"),
+      screen.getByText(
+        "Informational only - operation results remain separate",
+      ),
     ).toBeInTheDocument();
   });
 });

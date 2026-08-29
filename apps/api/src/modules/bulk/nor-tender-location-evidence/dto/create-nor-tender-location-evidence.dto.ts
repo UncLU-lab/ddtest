@@ -28,6 +28,11 @@ export class CreateNorTenderLocationEvidenceDto {
   @IsISO8601({ strict: true, strictSeparator: true })
   evidenceTime!: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  sourceTimeZone?: string;
+
   @IsEnum(NOR_LOCATION_OPERATIONS)
   operation!: NorLocationOperation;
 

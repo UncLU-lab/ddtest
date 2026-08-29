@@ -77,6 +77,15 @@ export class NorTenderLocationEvidence extends UuidEntity {
   @Column({ name: 'evidence_time', type: 'timestamptz' })
   evidenceTime!: Date;
 
+  /** Source-local timezone used to interpret this observation; null for legacy rows. */
+  @Column({
+    name: 'source_time_zone',
+    type: 'varchar',
+    length: 100,
+    nullable: true,
+  })
+  sourceTimeZone?: string | null;
+
   @Column({ name: 'port_relation', type: 'varchar', length: 30 })
   portRelation!: NorPortRelation;
 

@@ -360,23 +360,26 @@ export class LaytimeCalculationsService {
     const useReversibleSettlementTotals =
       reversibleSettlement?.settlementStatus !== 'LEGACY' &&
       typeof reversibleSettlement?.combinedAllowedSeconds === 'number';
-    const nonReversibleSettlement = decisionSnapshot
-      ?.nonReversibleSettlement as Record<string, unknown> | undefined;
+    const nonReversibleSettlement =
+      decisionSnapshot?.nonReversibleSettlement as
+        | Record<string, unknown>
+        | undefined;
     const useNonReversibleSummary = nonReversibleSettlement?.version === 1;
-    const allowedSeconds =
-      useNonReversibleSummary
-        ? undefined
-        : useReversibleSettlementTotals
-        ? this.readSnapshotNumber(reversibleSettlement, 'combinedAllowedSeconds')
+    const allowedSeconds = useNonReversibleSummary
+      ? undefined
+      : useReversibleSettlementTotals
+        ? this.readSnapshotNumber(
+            reversibleSettlement,
+            'combinedAllowedSeconds',
+          )
         : this.readSnapshotNumber(
             calculation.decisionSnapshot,
             'allowedLaytime',
             'allowedSeconds',
           );
-    const usedSeconds =
-      useNonReversibleSummary
-        ? undefined
-        : useReversibleSettlementTotals
+    const usedSeconds = useNonReversibleSummary
+      ? undefined
+      : useReversibleSettlementTotals
         ? this.readSnapshotNumber(reversibleSettlement, 'combinedUsedSeconds')
         : this.readSnapshotNumber(
             calculation.decisionSnapshot,
@@ -551,8 +554,7 @@ export class LaytimeCalculationsService {
       !charterParty.laytimeOperationScope
         ? null
         : resolveNonReversibleSettlement({
-            expectedOperationScope:
-              charterParty.laytimeOperationScope ?? null,
+            expectedOperationScope: charterParty.laytimeOperationScope ?? null,
             settlementCurrency,
             children: childPlans.created.map((plan) => ({
               operation: plan.operation,
@@ -623,34 +625,33 @@ export class LaytimeCalculationsService {
           demurrageAmount: null,
           despatchAmount: null,
         }
-      :
-      reversibleSettlement?.settlementStatus === 'FINAL_AUTHORITATIVE' ||
-      reversibleSettlement?.settlementStatus === 'PROVISIONAL' ||
-      reversibleSettlement?.settlementStatus === 'NONAUTHORITATIVE'
-      ? {
-          allowedLaytime: secondsToInterval(
-            reversibleSettlement.combinedAllowedSeconds ?? 0,
-          ),
-          usedLaytime: secondsToInterval(
-            reversibleSettlement.combinedAllowedSeconds === null
-              ? 0
-              : reversibleSettlement.combinedUsedSeconds,
-          ),
-          demurrageAmount:
-            reversibleSettlement.settlementStatus === 'FINAL_AUTHORITATIVE'
-              ? reversibleSettlement.demurrageAmount.toFixed(2)
-              : '0.00',
-          despatchAmount:
-            reversibleSettlement.settlementStatus === 'FINAL_AUTHORITATIVE'
-              ? reversibleSettlement.despatchAmount.toFixed(2)
-              : '0.00',
-        }
-      : {
-          allowedLaytime: secondsToInterval(result.allowedSeconds),
-          usedLaytime: secondsToInterval(result.usedSeconds),
-          demurrageAmount: result.demurrageAmount.toFixed(2),
-          despatchAmount: result.despatchAmount.toFixed(2),
-        };
+      : reversibleSettlement?.settlementStatus === 'FINAL_AUTHORITATIVE' ||
+          reversibleSettlement?.settlementStatus === 'PROVISIONAL' ||
+          reversibleSettlement?.settlementStatus === 'NONAUTHORITATIVE'
+        ? {
+            allowedLaytime: secondsToInterval(
+              reversibleSettlement.combinedAllowedSeconds ?? 0,
+            ),
+            usedLaytime: secondsToInterval(
+              reversibleSettlement.combinedAllowedSeconds === null
+                ? 0
+                : reversibleSettlement.combinedUsedSeconds,
+            ),
+            demurrageAmount:
+              reversibleSettlement.settlementStatus === 'FINAL_AUTHORITATIVE'
+                ? reversibleSettlement.demurrageAmount.toFixed(2)
+                : '0.00',
+            despatchAmount:
+              reversibleSettlement.settlementStatus === 'FINAL_AUTHORITATIVE'
+                ? reversibleSettlement.despatchAmount.toFixed(2)
+                : '0.00',
+          }
+        : {
+            allowedLaytime: secondsToInterval(result.allowedSeconds),
+            usedLaytime: secondsToInterval(result.usedSeconds),
+            demurrageAmount: result.demurrageAmount.toFixed(2),
+            despatchAmount: result.despatchAmount.toFixed(2),
+          };
     if (reversibleSettlement?.warnings.length) {
       calculationWarnings.push(...reversibleSettlement.warnings);
     }
@@ -827,11 +828,10 @@ export class LaytimeCalculationsService {
         where: { id },
       });
       const settlement = calculation.decisionSnapshot
-        ?.nonReversibleSettlement as
-        | NonReversibleSettlementResult
-        | undefined;
+        ?.nonReversibleSettlement as NonReversibleSettlementResult | undefined;
 
-      if (!settlement) throw new ConflictException('Settlement evidence is unavailable.');
+      if (!settlement)
+        throw new ConflictException('Settlement evidence is unavailable.');
       if (calculation.parentCalculationId) {
         throw new ConflictException(
           'A non-reversible operation result must be finalized through its voyage settlement parent.',
@@ -851,25 +851,27 @@ export class LaytimeCalculationsService {
       const children = await manager.find(LaytimeCalculation, {
         where: { parentCalculationId: calculation.id },
       });
-      const expectedChildren = settlement.expectedOperations.map((operation) => {
-        const summary = settlement.operations[operation];
-        const child = children.find(
-          (candidate) =>
-            candidate.operation === operation &&
-            candidate.id === summary?.childCalculationId,
-        );
-        if (
-          !child ||
-          child.parentCalculationId !== calculation.id ||
-          child.version !== calculation.version
-          || child.currency !== calculation.currency
-        ) {
-          throw new ConflictException(
-            `${operation} child calculation does not belong to this parent calculation version.`,
+      const expectedChildren = settlement.expectedOperations.map(
+        (operation) => {
+          const summary = settlement.operations[operation];
+          const child = children.find(
+            (candidate) =>
+              candidate.operation === operation &&
+              candidate.id === summary?.childCalculationId,
           );
-        }
-        return child;
-      });
+          if (
+            !child ||
+            child.parentCalculationId !== calculation.id ||
+            child.version !== calculation.version ||
+            child.currency !== calculation.currency
+          ) {
+            throw new ConflictException(
+              `${operation} child calculation does not belong to this parent calculation version.`,
+            );
+          }
+          return child;
+        },
+      );
 
       calculation.status = 'Final';
       calculation.settlementAuthorityStatus = 'FINAL_AUTHORITATIVE';
@@ -1017,6 +1019,7 @@ export class LaytimeCalculationsService {
           voyageId: observation.voyageId,
           operation: observation.operation,
           evidenceTime: observation.evidenceTime.toISOString(),
+          sourceTimeZone: observation.sourceTimeZone ?? null,
           portRelation: observation.portRelation,
           berthRelation: observation.berthRelation,
           waitingPlace: observation.waitingPlace,
@@ -1692,7 +1695,10 @@ export class LaytimeCalculationsService {
         : null,
     };
 
-    if (reversibleSettlement && reversibleLaytimeRule?.contractStatus === 'v1') {
+    if (
+      reversibleSettlement &&
+      reversibleLaytimeRule?.contractStatus === 'v1'
+    ) {
       snapshot.referencePrimaryOperation = {
         commencement: snapshot.commencement,
         cargoCompletion: snapshot.cargoCompletion,
@@ -1720,7 +1726,8 @@ export class LaytimeCalculationsService {
         rateBasis: 'per_day',
         currency: charterParty.settlementCurrency ?? null,
         excessSeconds: reversibleSettlement.combinedOverrunSeconds,
-        startedAt: reversibleSettlement.threshold?.timestamp.toISOString() ?? null,
+        startedAt:
+          reversibleSettlement.threshold?.timestamp.toISOString() ?? null,
         amount: reversibleSettlement.demurrageAmount,
         amountCurrency: charterParty.settlementCurrency ?? null,
       };
@@ -1771,7 +1778,10 @@ export class LaytimeCalculationsService {
     loadingChild: PreparedOperationChildCalculation | undefined,
     dischargeChild: PreparedOperationChildCalculation | undefined,
   ): ReversibleSettlementResult | null {
-    if (rule.contractStatus === 'absent' || rule.contractStatus === 'disabled') {
+    if (
+      rule.contractStatus === 'absent' ||
+      rule.contractStatus === 'disabled'
+    ) {
       return null;
     }
 
@@ -1880,8 +1890,14 @@ export class LaytimeCalculationsService {
     const hours = this.readStrictNumber(clause.parameters, 'hours');
     const days = this.readStrictNumber(clause.parameters, 'days');
     const rateEntries = ['rate', 'ratePerDay', 'rate_per_day']
-      .map((key) => ({ key, value: this.readStrictNumber(clause.parameters, key) }))
-      .filter((entry): entry is { key: string; value: number } => entry.value !== null);
+      .map((key) => ({
+        key,
+        value: this.readStrictNumber(clause.parameters, key),
+      }))
+      .filter(
+        (entry): entry is { key: string; value: number } =>
+          entry.value !== null,
+      );
     const mechanisms = [
       hours !== null ? 'hours' : null,
       days !== null ? 'days' : null,
