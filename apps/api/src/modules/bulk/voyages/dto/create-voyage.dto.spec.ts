@@ -62,6 +62,30 @@ describe('CreateVoyageDto', () => {
     expect(bulkOperationTypeError).toBeDefined();
   });
 
+  it('accepts optional Charter Party creation fields and the reversible V1 contract', () => {
+    const errors = validate({
+      ...baseDto,
+      settlementCurrency: 'USD',
+      laytimeOperationScope: 'LoadingAndDischarge',
+      reversibleLaytime: {
+        enabled: true,
+        settlementVersion: 1,
+        allowanceMode: 'sum_operation_allowances',
+      },
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects unsupported creation currency and reversible V1 values', () => {
+    const errors = validate({
+      ...baseDto,
+      settlementCurrency: 'XYZ',
+      reversibleLaytime: { enabled: true, settlementVersion: 2, allowanceMode: 'other' },
+    });
+    expect(JSON.stringify(errors)).toContain('settlementCurrency');
+    expect(JSON.stringify(errors)).toContain('reversibleLaytime');
+  });
+
   it('accepts nested commercial terms blocks for initial clause persistence', () => {
     const errors = validate({
       ...baseDto,

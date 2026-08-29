@@ -725,6 +725,13 @@ export interface CreateVoyageDto {
   timeCountingBasis?: string;
   shexCalendar?: VoyageShexCalendarDto;
   norNoticePeriod?: string;
+  settlementCurrency?: string;
+  laytimeOperationScope?: LaytimeOperationScope;
+  reversibleLaytime?: {
+    enabled: boolean;
+    settlementVersion?: 1;
+    allowanceMode?: "sum_operation_allowances";
+  };
   loadingTerms?: VoyageCommercialTermsDto;
   dischargeTerms?: VoyageCommercialTermsDto;
   status?: "Planned" | "Active" | "Completed" | "Cancelled";

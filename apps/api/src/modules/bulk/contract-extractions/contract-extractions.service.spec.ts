@@ -19,6 +19,13 @@ NOR NOTICE: 6 HOURS
 LAYTIME OPERATION: DISCHARGE
 BULK OPERATION TYPE: TANKER`;
 
+const STAGE_REV_001 = `${STAGE_BASIC_001.replace('STAGE-BASIC-001', 'STAGE-REV-001')}
+SETTLEMENT CURRENCY: USD
+LAYTIME APPLIES TO: LOADING AND DISCHARGE
+REVERSIBLE LAYTIME: ENABLED
+REVERSIBLE SETTLEMENT VERSION: 1
+REVERSIBLE ALLOWANCE MODE: SUM_OPERATION_ALLOWANCES`;
+
 describe('ContractExtractionsService', () => {
   const vessels = { findAll: jest.fn() };
   const service = new ContractExtractionsService(vessels as any);
@@ -52,5 +59,38 @@ PRODUCT: Ammonia`);
     vessels.findAll.mockResolvedValue({ data: [] });
     const result = await service.parseText('VESSEL: MV Staging Explorer');
     expect(result.fields.vessel).toMatchObject({ status: 'INVALID', normalizedValue: null });
+  });
+
+  it('extracts the supported STAGE-REV-001 creation contract without inferring scope', async () => {
+    const result = await service.parseText(STAGE_REV_001);
+
+    expect(result.fields.settlementCurrency).toMatchObject({ status: 'FOUND', normalizedValue: 'USD' });
+    expect(result.fields.laytimeOperationScope).toMatchObject({ status: 'FOUND', normalizedValue: 'LoadingAndDischarge' });
+    expect(result.fields.reversibleLaytime).toMatchObject({ status: 'FOUND', normalizedValue: 'Enabled' });
+    expect(result.fields.reversibleSettlementVersion).toMatchObject({ normalizedValue: 1 });
+    expect(result.fields.reversibleAllowanceMode).toMatchObject({ normalizedValue: 'sum_operation_allowances' });
+  });
+
+  it('flags unsupported currency and incomplete or unsupported reversible terms for review', async () => {
+    const result = await service.parseText(`SETTLEMENT CURRENCY: XYZ
+LAYTIME APPLIES TO: LOADING AND DISCHARGE
+REVERSIBLE LAYTIME: ENABLED
+REVERSIBLE SETTLEMENT VERSION: 2
+REVERSIBLE ALLOWANCE MODE: OTHER`);
+
+    expect(result.fields.settlementCurrency.status).toBe('INVALID');
+    expect(result.fields.laytimeOperationScope.status).toBe('FOUND');
+    expect(result.fields.reversibleLaytime).toMatchObject({ status: 'INVALID' });
+    expect(result.fields.reversibleSettlementVersion.status).toBe('UNSUPPORTED');
+    expect(result.fields.reversibleAllowanceMode.status).toBe('UNSUPPORTED');
+  });
+
+  it('leaves absent scope as NOT_FOUND and does not enable reversible laytime from scope', async () => {
+    const result = await service.parseText('LAYTIME APPLIES TO: LOADING AND DISCHARGE');
+    expect(result.fields.laytimeOperationScope.status).toBe('FOUND');
+    expect(result.fields.reversibleLaytime.status).toBe('NOT_FOUND');
+
+    const missingScope = await service.parseText('REVERSIBLE LAYTIME: DISABLED');
+    expect(missingScope.fields.laytimeOperationScope.status).toBe('NOT_FOUND');
   });
 });

@@ -145,6 +145,9 @@ export interface ShipmentDraft {
   timeCountingBasis: string;
   shexCalendar: ShipmentShexCalendarDraft;
   norNoticePeriod: string;
+  settlementCurrency: string;
+  laytimeOperationScope: "" | "Loading" | "Discharge" | "LoadingAndDischarge";
+  reversibleLaytime: "" | "Enabled" | "Disabled";
   receiverLaycanOpen: string;
   receiverLaycanClose: string;
   receiverLaytimeAllowed: string;
@@ -213,6 +216,9 @@ export const emptyDraft: ShipmentDraft = {
   timeCountingBasis: "6h SHINC",
   shexCalendar: { ...emptyShipmentShexCalendarDraft },
   norNoticePeriod: "6 hours",
+  settlementCurrency: "",
+  laytimeOperationScope: "",
+  reversibleLaytime: "",
   receiverLaycanOpen: "",
   receiverLaycanClose: "",
   receiverLaytimeAllowed: "",

@@ -13,6 +13,7 @@ import {
 import {
   createVoyage,
   getVessels,
+  type CreateVoyageDto,
   type VoyageCommercialTermsDto,
 } from "../lib/api";
 import {
@@ -81,6 +82,18 @@ function normalizeEnabledValue(value?: string | null): boolean | undefined {
   }
 
   return undefined;
+}
+
+export function toCreateVoyageCharterPartyFields(
+  draft: Pick<ShipmentDraft, "settlementCurrency" | "laytimeOperationScope" | "reversibleLaytime">,
+): Pick<CreateVoyageDto, "settlementCurrency" | "laytimeOperationScope" | "reversibleLaytime"> {
+  return {
+    settlementCurrency: draft.settlementCurrency?.trim() || undefined,
+    laytimeOperationScope: draft.laytimeOperationScope || undefined,
+    reversibleLaytime: draft.reversibleLaytime === "Enabled"
+      ? { enabled: true, settlementVersion: 1, allowanceMode: "sum_operation_allowances" }
+      : undefined,
+  };
 }
 
 function parseNoticeHours(value?: string | null): number | undefined {
@@ -939,6 +952,8 @@ export default function PreOpsRiskEngine() {
         norNoticePeriod:
           draft.norNoticePeriod?.trim() ||
           undefined,
+
+        ...toCreateVoyageCharterPartyFields(draft),
 
         loadingTerms:
           toVoyageCommercialTermsDto(

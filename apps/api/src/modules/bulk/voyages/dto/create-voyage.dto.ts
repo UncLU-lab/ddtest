@@ -16,6 +16,28 @@ import {
 } from 'class-validator';
 import { BULK_OPERATION_TYPES, VOYAGE_STATUSES } from '../../entities/voyage.entity';
 import type { BulkOperationType, VoyageStatus } from '../../entities/voyage.entity';
+import {
+  LAYTIME_OPERATION_SCOPES,
+  type LaytimeOperationScope,
+} from '../../entities/charter-party.entity';
+import {
+  SUPPORTED_SETTLEMENT_CURRENCIES,
+  type SettlementCurrency,
+} from '../../currency/settlement-currency';
+
+export class CreateVoyageReversibleLaytimeDto {
+  @IsBoolean()
+  enabled!: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsIn([1])
+  settlementVersion?: 1;
+
+  @IsOptional()
+  @IsIn(['sum_operation_allowances'])
+  allowanceMode?: 'sum_operation_allowances';
+}
 
 export class CreateVoyageShexCalendarDto {
   @Type(() => Number)
@@ -161,6 +183,19 @@ export class CreateVoyageDto {
   @IsString()
   @MaxLength(20)
   norNoticePeriod?: string;
+
+  @IsOptional()
+  @IsIn(SUPPORTED_SETTLEMENT_CURRENCIES)
+  settlementCurrency?: SettlementCurrency;
+
+  @IsOptional()
+  @IsIn(LAYTIME_OPERATION_SCOPES)
+  laytimeOperationScope?: LaytimeOperationScope;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateVoyageReversibleLaytimeDto)
+  reversibleLaytime?: CreateVoyageReversibleLaytimeDto;
 
   @IsOptional()
   @ValidateNested()

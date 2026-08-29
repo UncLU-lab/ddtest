@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { VesselsService } from '../vessels/vessels.service';
 import { ListVesselsQueryDto } from '../vessels/dto/list-vessels-query.dto';
+import { isSupportedSettlementCurrency } from '../currency/settlement-currency';
 
 export const EXTRACTION_STATUSES = [
   'FOUND',
@@ -46,6 +47,11 @@ const LABELS: LabelDefinition[] = [
   { field: 'norNoticePeriod', labels: ['NOR NOTICE', 'NOR NOTICE PERIOD'] },
   { field: 'laytimeOperation', labels: ['LAYTIME OPERATION'] },
   { field: 'bulkOperationType', labels: ['BULK OPERATION TYPE'] },
+  { field: 'settlementCurrency', labels: ['SETTLEMENT CURRENCY'] },
+  { field: 'laytimeOperationScope', labels: ['LAYTIME APPLIES TO'] },
+  { field: 'reversibleLaytime', labels: ['REVERSIBLE LAYTIME'] },
+  { field: 'reversibleSettlementVersion', labels: ['REVERSIBLE SETTLEMENT VERSION'] },
+  { field: 'reversibleAllowanceMode', labels: ['REVERSIBLE ALLOWANCE MODE'] },
 ];
 
 @Injectable()
@@ -65,6 +71,8 @@ export class ContractExtractionsService {
         ? this.normalize(definition.field, match.value, match.snippet, vessels)
         : notFound();
     }
+
+    validateReversibleFields(fields);
 
     return { fields, warnings: Object.values(fields).flatMap((field) => field.warning ?? []) };
   }
@@ -106,6 +114,23 @@ export class ContractExtractionsService {
       }
       case 'laytimeOperation': return /^loading$/i.test(text) ? found(text, 'Loading', sourceSnippet) : /^discharge$/i.test(text) ? found(text, 'Discharge', sourceSnippet) : unsupported(text, sourceSnippet, 'Laytime operation must be Loading or Discharge.');
       case 'bulkOperationType': return /^(dry[ _-]?bulk)$/i.test(text) ? found(text, 'dry_bulk', sourceSnippet) : /^(tanker|liquid[ _-]?bulk)$/i.test(text) ? found(text, 'tanker', sourceSnippet) : unsupported(text, sourceSnippet, 'Bulk operation type must be dry_bulk or tanker.');
+      case 'settlementCurrency': {
+        const currency = text.toUpperCase();
+        return isSupportedSettlementCurrency(currency) ? found(text, currency, sourceSnippet) : invalid(text, sourceSnippet, 'Settlement currency must be a supported ISO 4217 code.');
+      }
+      case 'laytimeOperationScope': {
+        const scope = text.replace(/[ _-]+/g, ' ').trim().toUpperCase();
+        if (scope === 'LOADING') return found(text, 'Loading', sourceSnippet);
+        if (scope === 'DISCHARGE') return found(text, 'Discharge', sourceSnippet);
+        if (scope === 'LOADING AND DISCHARGE') return found(text, 'LoadingAndDischarge', sourceSnippet);
+        return invalid(text, sourceSnippet, 'Laytime applies to must be Loading, Discharge, or Loading and Discharge.');
+      }
+      case 'reversibleLaytime':
+        return /^enabled$/i.test(text) ? found(text, 'Enabled', sourceSnippet) : /^disabled$/i.test(text) ? found(text, 'Disabled', sourceSnippet) : invalid(text, sourceSnippet, 'Reversible laytime must be ENABLED or DISABLED.');
+      case 'reversibleSettlementVersion':
+        return text.trim() === '1' ? found(text, 1, sourceSnippet) : unsupported(text, sourceSnippet, 'Only reversible settlement version 1 is supported.');
+      case 'reversibleAllowanceMode':
+        return /^sum[ _-]?operation[ _-]?allowances$/i.test(text) ? found(text, 'sum_operation_allowances', sourceSnippet) : unsupported(text, sourceSnippet, 'Only sum_operation_allowances is supported.');
       default: return found(text, text, sourceSnippet);
     }
   }
@@ -143,4 +168,21 @@ function date(rawValue: string, sourceSnippet: string): ExtractedContractField {
   const value = rawValue.trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) return invalid(rawValue, sourceSnippet, 'Date must be a valid YYYY-MM-DD value.');
   return found(rawValue, value, sourceSnippet);
+}
+
+function validateReversibleFields(fields: Record<string, ExtractedContractField>): void {
+  if (fields.reversibleLaytime?.normalizedValue !== 'Enabled' || fields.reversibleLaytime.status !== 'FOUND') {
+    return;
+  }
+  const version = fields.reversibleSettlementVersion;
+  const mode = fields.reversibleAllowanceMode;
+  if (version?.status === 'FOUND' && mode?.status === 'FOUND') {
+    return;
+  }
+  fields.reversibleLaytime = {
+    ...fields.reversibleLaytime,
+    normalizedValue: null,
+    status: 'INVALID',
+    warning: 'Enabled reversible laytime requires settlement version 1 and sum_operation_allowances.',
+  };
 }

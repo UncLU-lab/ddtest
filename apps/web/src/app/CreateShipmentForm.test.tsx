@@ -20,6 +20,9 @@ describe("CreateShipmentForm contract text autofill", () => {
       fields: {
         vessel: { rawValue: "MV Staging Explorer", normalizedValue: "MV Staging Explorer", vesselId: "vessel-1", status: "FOUND", sourceSnippet: "VESSEL: MV Staging Explorer" },
         voyageRef: { rawValue: "STAGE-BASIC-001", normalizedValue: "STAGE-BASIC-001", status: "FOUND", sourceSnippet: "VOYAGE REFERENCE: STAGE-BASIC-001" },
+        settlementCurrency: { rawValue: "USD", normalizedValue: "USD", status: "FOUND", sourceSnippet: "SETTLEMENT CURRENCY: USD" },
+        laytimeOperationScope: { rawValue: "LOADING AND DISCHARGE", normalizedValue: "LoadingAndDischarge", status: "FOUND", sourceSnippet: "LAYTIME APPLIES TO: LOADING AND DISCHARGE" },
+        reversibleLaytime: { rawValue: "ENABLED", normalizedValue: "Enabled", status: "FOUND", sourceSnippet: "REVERSIBLE LAYTIME: ENABLED" },
         loadPort: { rawValue: "Port Hedland", normalizedValue: null, status: "INVALID", sourceSnippet: "LOAD PORT: Port Hedland", warning: "Backend requires an accepted 5–10 character port code." },
       },
     });
@@ -34,6 +37,9 @@ describe("CreateShipmentForm contract text autofill", () => {
 
     await user.click(screen.getByRole("button", { name: "Apply extracted terms" }));
     await waitFor(() => expect(screen.getByDisplayValue("STAGE-BASIC-001")).toBeInTheDocument());
+    expect(screen.getByDisplayValue("USD")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("LoadingAndDischarge")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Enabled")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("Port Hedland")).not.toBeInTheDocument();
     expect(api.parseContractText).toHaveBeenCalledTimes(1);
   });

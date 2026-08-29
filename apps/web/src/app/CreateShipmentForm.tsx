@@ -521,7 +521,8 @@ export default function CreateShipmentForm() {
       ["receiver", "receiver"], ["laycanOpen", "laycanOpen"], ["laycanClose", "laycanClose"],
       ["laytimeAllowed", "laytimeAllowed"], ["demurrageRate", "demurrageRate"], ["dispatchRate", "dispatchRate"],
       ["timeCountingBasis", "timeCountingBasis"], ["norNoticePeriod", "norNoticePeriod"], ["laytimeOperation", "laytimeOperation"],
-      ["bulkOperationType", "bulkOperationType"],
+      ["bulkOperationType", "bulkOperationType"], ["settlementCurrency", "settlementCurrency"],
+      ["laytimeOperationScope", "laytimeOperationScope"], ["reversibleLaytime", "reversibleLaytime"],
     ];
     for (const [draftKey, extractionKey] of mappings) {
       const extracted = value(extractionKey);
@@ -875,6 +876,22 @@ export default function CreateShipmentForm() {
             <FormField label="Intermediary / trader">
               <Input value={draft.intermediary} onChange={(v) => update("intermediary", v)} placeholder="Search entity database…" />
             </FormField>
+            <div className="grid grid-cols-2 gap-3 mt-3">
+              <FormField label="Settlement currency">
+                <Select value={draft.settlementCurrency} onChange={(v) => update("settlementCurrency", v)} options={["", "USD", "EUR", "GBP", "AUD", "SGD"]} />
+              </FormField>
+              <FormField label="Laytime applies to">
+                <Select value={draft.laytimeOperationScope} onChange={(v) => update("laytimeOperationScope", v as ShipmentDraft["laytimeOperationScope"])} options={["", "Loading", "Discharge", "LoadingAndDischarge"]} />
+              </FormField>
+            </div>
+            <div className="mt-3 rounded-lg border p-3" style={{ borderColor: "#E5E7EB", backgroundColor: "#F9FAFB" }}>
+              <FormField label="Reversible laytime">
+                <Select value={draft.reversibleLaytime} onChange={(v) => update("reversibleLaytime", v as ShipmentDraft["reversibleLaytime"])} options={["", "Enabled", "Disabled"]} />
+              </FormField>
+              {draft.reversibleLaytime === "Enabled" && (
+                <p className="mt-2" style={{ fontSize: "10px", color: "#6B7280" }}>Version 1: settlement version 1 · sum operation allowances.</p>
+              )}
+            </div>
           </div>
 
           {/* Card 3 — Laytime terms */}

@@ -433,6 +433,44 @@ describe('VoyagesService voyage persistence', () => {
     expect(result).toBe(persistedVoyage);
   });
 
+  it('persists explicitly supplied Charter Party creation fields and exactly one reversible V1 clause', async () => {
+    const persistedVoyage = { id: VOYAGE_ID, organizationId: ORGANIZATION_ID, vessel: { id: VESSEL_ID }, counterpartyLinks: [] } as Voyage;
+    const { service, manager } = buildService(persistedVoyage);
+
+    await service.create({
+      vesselId: VESSEL_ID, cargoQuantity: 50000, cargoType: 'Products', reference: 'STAGE-REV-001',
+      loadPort: 'AUPHE', dischargePort: 'CNQDG', laycanStart: '2026-09-28', laycanEnd: '2026-09-30',
+      settlementCurrency: 'USD', laytimeOperationScope: 'LoadingAndDischarge',
+      reversibleLaytime: { enabled: true, settlementVersion: 1, allowanceMode: 'sum_operation_allowances' },
+    });
+
+    expect(manager.create).toHaveBeenCalledWith(CharterParty, expect.objectContaining({
+      settlementCurrency: 'USD', laytimeOperationScope: 'LoadingAndDischarge',
+    }));
+    const reversible = manager.create.mock.calls
+      .filter(([entity]) => entity === CpClause)
+      .map(([, value]) => value)
+      .filter((value) => (value as any).clauseType === 'reversible_laytime');
+    expect(reversible).toEqual([expect.objectContaining({ parameters: {
+      enabled: true, settlementVersion: 1, allowanceMode: 'sum_operation_allowances',
+    } })]);
+  });
+
+  it('does not create a reversible clause unless it is explicitly enabled with the V1 contract', async () => {
+    const persistedVoyage = { id: VOYAGE_ID, organizationId: ORGANIZATION_ID, vessel: { id: VESSEL_ID }, counterpartyLinks: [] } as Voyage;
+    const { service, manager } = buildService(persistedVoyage);
+    await service.create({
+      vesselId: VESSEL_ID, cargoQuantity: 1, cargoType: 'Products', reference: 'STAGE-SCOPE-001', loadPort: 'AUPHE', dischargePort: 'CNQDG',
+      laycanStart: '2026-09-28', laycanEnd: '2026-09-30', laytimeOperationScope: 'LoadingAndDischarge',
+    });
+    expect(manager.create.mock.calls.some(([, value]) => (value as any).clauseType === 'reversible_laytime')).toBe(false);
+    await expect(service.create({
+      vesselId: VESSEL_ID, cargoQuantity: 1, cargoType: 'Products', reference: 'STAGE-INVALID-001', loadPort: 'AUPHE', dischargePort: 'CNQDG',
+      laycanStart: '2026-09-28', laycanEnd: '2026-09-30',
+      reversibleLaytime: { enabled: true } as any,
+    })).rejects.toThrow('Enabled reversible laytime requires');
+  });
+
   it('rolls back the create transaction when a clause write fails', async () => {
     const persistedVoyage = {
       id: VOYAGE_ID,

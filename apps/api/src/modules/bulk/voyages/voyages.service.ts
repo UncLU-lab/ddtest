@@ -351,6 +351,7 @@ export class VoyagesService {
   }
 
   async create(dto: CreateVoyageDto): Promise<Voyage> {
+    this.assertReversibleLaytimeInitialization(dto.reversibleLaytime);
     const organizationId = this.tenantContext.getOrganizationId();
     const vessel = await this.vessels.findOne({
       where: {
@@ -400,6 +401,9 @@ export class VoyagesService {
       dischargeTerms,
       laytimeOperation,
       bulkOperationType,
+      settlementCurrency,
+      laytimeOperationScope,
+      reversibleLaytime,
       ...voyageDto
     } = dto;
 
@@ -450,6 +454,8 @@ export class VoyagesService {
               dispatchRate !== undefined ? dispatchRate.toFixed(2) : null,
             timeCountingBasis: timeCountingBasis ?? null,
             norNoticePeriod: norNoticePeriod ?? null,
+            settlementCurrency: settlementCurrency ?? null,
+            laytimeOperationScope: laytimeOperationScope ?? null,
           }),
         );
 
@@ -602,9 +608,29 @@ export class VoyagesService {
         dto.timeCountingBasis?.trim() ||
         dto.shexCalendar !== undefined ||
         dto.norNoticePeriod?.trim() ||
+        dto.settlementCurrency !== undefined ||
+        dto.laytimeOperationScope !== undefined ||
+        dto.reversibleLaytime?.enabled === true ||
         this.hasOperationCommercialTerms(dto.loadingTerms) ||
         this.hasOperationCommercialTerms(dto.dischargeTerms),
     );
+  }
+
+  private assertReversibleLaytimeInitialization(
+    reversibleLaytime: CreateVoyageDto['reversibleLaytime'],
+  ): void {
+    if (reversibleLaytime?.enabled !== true) {
+      return;
+    }
+
+    if (
+      reversibleLaytime.settlementVersion !== 1 ||
+      reversibleLaytime.allowanceMode !== 'sum_operation_allowances'
+    ) {
+      throw new BadRequestException(
+        'Enabled reversible laytime requires settlementVersion 1 and allowanceMode sum_operation_allowances.',
+      );
+    }
   }
 
   private buildCharterPartySummary(dto: CreateVoyageDto): string {
@@ -622,6 +648,9 @@ export class VoyagesService {
         : null,
       dto.timeCountingBasis ? `Basis: ${dto.timeCountingBasis}` : null,
       dto.norNoticePeriod ? `NOR notice: ${dto.norNoticePeriod}` : null,
+      dto.settlementCurrency ? `Settlement currency: ${dto.settlementCurrency}` : null,
+      dto.laytimeOperationScope ? `Laytime applies to: ${dto.laytimeOperationScope}` : null,
+      dto.reversibleLaytime?.enabled ? 'Reversible laytime: enabled (V1)' : null,
       this.buildOperationTermsSummary('Loading terms', dto.loadingTerms),
       this.buildOperationTermsSummary('Discharge terms', dto.dischargeTerms),
     ]
@@ -666,6 +695,20 @@ export class VoyagesService {
         charterPartyId,
         'Discharge',
       ),
+      ...(dto.reversibleLaytime?.enabled === true
+        ? [
+            {
+              charterPartyId,
+              clauseType: 'reversible_laytime',
+              rawText: 'Reversible laytime: enabled (V1 sum operation allowances)',
+              parameters: {
+                enabled: true,
+                settlementVersion: 1,
+                allowanceMode: 'sum_operation_allowances',
+              },
+            },
+          ]
+        : []),
     ];
   }
 
