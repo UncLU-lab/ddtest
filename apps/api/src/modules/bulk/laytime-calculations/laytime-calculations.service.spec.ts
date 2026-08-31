@@ -4452,6 +4452,87 @@ describe('LaytimeCalculationsService lifecycle', () => {
     );
   });
 
+  it.each([
+    {
+      voyageOperation: 'Loading' as const,
+      documentOperation: 'Loading' as const,
+    },
+    {
+      voyageOperation: 'Discharge' as const,
+      documentOperation: 'Discharge' as const,
+    },
+  ])(
+    'recognizes an operation-specific CARGO_COMPLETED event for $voyageOperation',
+    async ({ voyageOperation, documentOperation }) => {
+      const { service, manager } = buildServiceWithCharterParty(0, undefined, {
+        laytimeOperation: voyageOperation,
+        sofDocuments: [
+          {
+            id: `${voyageOperation.toLowerCase()}-doc`,
+            status: 'Final',
+            uploadDate: new Date('2026-03-03T00:00:00Z'),
+            operation: documentOperation,
+          },
+        ],
+        sofEvents: [
+          {
+            id: `${voyageOperation.toLowerCase()}-completion`,
+            sofId: `${voyageOperation.toLowerCase()}-doc`,
+            eventTime: new Date('2026-03-05T00:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+            operation: documentOperation,
+            isManualOverride: false,
+          },
+        ],
+      });
+
+      await service.calculate(VOYAGE_ID);
+
+      const created = manager.create.mock.calls.find(
+        ([entity]) => entity === LaytimeCalculation,
+      )?.[1] as LaytimeCalculation;
+      const inputSnapshot = created.inputSnapshot as Record<string, any>;
+      const completionId = `${voyageOperation.toLowerCase()}-completion`;
+
+      expect(inputSnapshot.sofDocumentSelection).toEqual(
+        expect.objectContaining({
+          matchingDocumentIds: [`${voyageOperation.toLowerCase()}-doc`],
+          legacyNullDocumentIds: [],
+          oppositeOperationDocumentIds: [],
+        }),
+      );
+      expect(inputSnapshot.operationSelection).toEqual(
+        expect.objectContaining({
+          voyageLaytimeOperation: voyageOperation,
+          hasLoadingCompletion: voyageOperation === 'Loading',
+          hasDischargeCompletion: voyageOperation === 'Discharge',
+          includedCompletionEventIds: [completionId],
+          excludedCompletionEventIds: [],
+        }),
+      );
+      const child = manager.create.mock.calls
+        .filter(([entity]) => entity === LaytimeCalculation)
+        .map(([, value]) => value as LaytimeCalculation)
+        .find((calculation) => calculation.operation === voyageOperation);
+      expect(child).toBeDefined();
+      expect(
+        (child?.inputSnapshot as Record<string, any>).operationResult,
+      ).toEqual(
+        expect.objectContaining({
+          documentSelection: expect.objectContaining({
+            matchingDocumentIds: [`${voyageOperation.toLowerCase()}-doc`],
+            usedLegacyFallback: false,
+          }),
+          eventSelection: expect.objectContaining({
+            matchingCompletionEventId: completionId,
+            selectedCompletionEventId: completionId,
+            usedLegacyFallback: false,
+          }),
+        }),
+      );
+    },
+  );
+
   it('fails when only opposite-operation documents exist', async () => {
     const { service } = buildServiceWithCharterParty(0, undefined, {
       laytimeOperation: 'Loading',

@@ -447,6 +447,7 @@ export interface NonReversibleSettlementSnapshot {
   expectedOperationScope?: LaytimeOperationScope | null;
   expectedOperations?: Array<"Loading" | "Discharge">;
   settlementStatus?: ReversibleSettlementStatus;
+  finalizationEligible?: boolean;
   reasonCode?: string;
   operations?: Partial<
     Record<"Loading" | "Discharge", NonReversibleOperationSettlementSnapshot>

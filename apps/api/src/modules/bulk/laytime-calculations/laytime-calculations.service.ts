@@ -2556,19 +2556,18 @@ export class LaytimeCalculationsService {
     calculationEventSelection: CalculationEventSelection,
   ): OperationSelectionAudit {
     const isExplicitOperationCompletion = (event: SofEvent) =>
-      (event.eventType === 'LOADING_COMPLETED' ||
-        event.eventType === 'DISCHARGE_COMPLETED') &&
+      COMPLETION_EVENT_TYPES.has(event.eventType) &&
       event.operation !== null &&
       event.operation !== undefined;
 
     const hasLoadingCompletion = loadedSofEvents.some(
       (event) =>
-        event.eventType === 'LOADING_COMPLETED' &&
+        COMPLETION_EVENT_TYPES.has(event.eventType) &&
         event.operation === 'Loading',
     );
     const hasDischargeCompletion = loadedSofEvents.some(
       (event) =>
-        event.eventType === 'DISCHARGE_COMPLETED' &&
+        COMPLETION_EVENT_TYPES.has(event.eventType) &&
         event.operation === 'Discharge',
     );
     const completionEvents = loadedSofEvents.filter(

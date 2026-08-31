@@ -170,6 +170,7 @@ function buildNonReversibleCalculation(
         expectedOperationScope: "Discharge",
         expectedOperations: ["Discharge"],
         settlementStatus: "PROVISIONAL",
+        finalizationEligible: true,
         operations: {
           Discharge: {
             operation: "Discharge",
@@ -488,6 +489,36 @@ describe("SOFTimeline laytime error handling", () => {
     expect(apiMocks.createLaytimeStatement).not.toHaveBeenCalled();
   });
 
+  it("allows an eligible non-reversible calculation to be finalized while its settlement is provisional", async () => {
+    const calculation = buildNonReversibleCalculation({
+      settlementAuthorityStatus: "PROVISIONAL",
+      status: "Draft",
+    });
+    apiMocks.getLaytimeCalculations.mockResolvedValue({ data: [calculation] });
+    apiMocks.finalizeLaytimeCalculation.mockResolvedValue({
+      ...calculation,
+      status: "Final",
+      settlementAuthorityStatus: "FINAL_AUTHORITATIVE",
+    });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("Calculation status")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Finalise calculation" }),
+    ).toBeEnabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Finalise calculation" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Confirm finalise" }));
+
+    await waitFor(() =>
+      expect(apiMocks.finalizeLaytimeCalculation).toHaveBeenCalledWith(
+        calculation.id,
+      ),
+    );
+  });
+
   it("keeps the created latest calculation when a stale refresh response arrives", async () => {
     const version2 = buildCalculation({
       id: "calc-2",
@@ -736,6 +767,42 @@ describe("SOFTimeline exception candidate semantics", () => {
           notes: "Rain stopped cargo work",
         }),
       }),
+    );
+  });
+
+  it("persists the selected operation on an automatically created SOF document", async () => {
+    const user = userEvent.setup();
+    const loadingDocument = {
+      ...buildDocument(),
+      operation: "Loading" as const,
+    };
+    apiMocks.getSofDocuments.mockResolvedValue({ data: [] });
+    apiMocks.getSofEvents.mockResolvedValue({ data: [] });
+    apiMocks.createSofDocument.mockResolvedValue(loadingDocument);
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("SOF event log")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /add event/i }));
+    fireEvent.change(screen.getByLabelText(/source timezone/i), {
+      target: { value: "Australia/Sydney" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: /operation/i }), {
+      target: { value: "Loading" },
+    });
+
+    await user.click(screen.getByRole("button", { name: /save event/i }));
+
+    await waitFor(() =>
+      expect(apiMocks.createSofDocument).toHaveBeenCalledWith("voyage-1", {
+        filePath: "voyages/voyage-1/statement-of-facts.pdf",
+        status: "Draft",
+        operation: "Loading",
+      }),
+    );
+    expect(apiMocks.createSofEvent).toHaveBeenCalledWith(
+      loadingDocument.id,
+      expect.objectContaining({ operation: "Loading" }),
     );
   });
 

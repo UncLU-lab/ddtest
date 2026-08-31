@@ -2063,6 +2063,7 @@ export default function SOFTimeline() {
         targetDocument = await createSofDocument(id, {
           filePath: `voyages/${id}/statement-of-facts.pdf`,
           status: "Draft",
+          ...(form.operation ? { operation: form.operation } : {}),
         });
       }
 
@@ -2375,18 +2376,25 @@ export default function SOFTimeline() {
 
   const calculationFinalizationReady = Boolean(
     laytimeCalculation?.status === "Draft" &&
-    laytimeCalculation.settlementAuthorityStatus === "FINAL_AUTHORITATIVE" &&
-    laytimeCalculation.currency,
+      (laytimeCalculation.settlementAuthorityStatus === "FINAL_AUTHORITATIVE" ||
+        (calculationSnapshot?.nonReversibleSettlement?.version === 1 &&
+          calculationSnapshot.nonReversibleSettlement.finalizationEligible ===
+            true)) &&
+      laytimeCalculation.currency,
   );
+  const nonReversibleFinalizationBlockers =
+    calculationSnapshot?.nonReversibleSettlement?.finalizationBlockers ?? [];
   const calculationFinalizationBlockReason = !laytimeCalculation
     ? "No persisted calculation is available."
     : laytimeCalculation.status !== "Draft"
       ? "This calculation is already Final."
-      : laytimeCalculation.settlementAuthorityStatus !== "FINAL_AUTHORITATIVE"
-        ? "Only FINAL_AUTHORITATIVE calculations can be finalized."
-        : !laytimeCalculation.currency
-          ? "The calculation has no authoritative settlement currency."
-          : null;
+      : nonReversibleFinalizationBlockers.length > 0
+        ? nonReversibleFinalizationBlockers.join(" ")
+        : laytimeCalculation.settlementAuthorityStatus !== "FINAL_AUTHORITATIVE"
+          ? "Only FINAL_AUTHORITATIVE calculations can be finalized."
+          : !laytimeCalculation.currency
+            ? "The calculation has no authoritative settlement currency."
+            : null;
 
   async function handleFinalizeLaytimeCalculation() {
     if (!laytimeCalculation || !calculationFinalizationReady) return;
