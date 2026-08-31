@@ -826,6 +826,16 @@ function fileNameFromPath(filePath?: string | null) {
   return parts[parts.length - 1] || filePath;
 }
 
+function shortSofDocumentId(id?: string | null) {
+  if (!id) return "Not available";
+  return `…${id.slice(-8)}`;
+}
+
+function sofDocumentOptionLabel(document: SofDocument) {
+  const operation = document.operation ? ` · ${document.operation}` : "";
+  return `${fileNameFromPath(document.filePath)} · ${document.status} · ${formatDateTime(document.uploadDate)} · ${shortSofDocumentId(document.id)}${operation}`;
+}
+
 function humanizeLabel(value?: string | null) {
   if (!value) return "Event";
 
@@ -3249,8 +3259,7 @@ export default function SOFTimeline() {
                 >
                   {documents.map((document) => (
                     <option key={document.id} value={document.id}>
-                      {fileNameFromPath(document.filePath)} · {document.status}
-                      {document.operation ? ` · ${document.operation}` : ""}
+                      {sofDocumentOptionLabel(document)}
                     </option>
                   ))}
                 </select>
@@ -3313,10 +3322,17 @@ export default function SOFTimeline() {
                       lineHeight: 1.45,
                     }}
                   >
-                    Finalise {sourceFileName}? This selected SOF document will
-                    become Final and may be used as authoritative evidence by
-                    future laytime calculations. Existing calculation versions
-                    remain immutable; run a new calculation after finalisation.
+                    <strong>Selected SOF document</strong>
+                    <br />
+                    {sourceFileName} · {activeDocument.status} · uploaded{" "}
+                    {formatDateTime(activeDocument.uploadDate)} · ID{" "}
+                    {activeDocument.id}
+                    <br />
+                    <br />
+                    Finalise this document? It will become Final and may be used
+                    as authoritative evidence by future laytime calculations.
+                    Existing calculation versions remain immutable; run a new
+                    calculation after finalisation.
                   </p>
                   {finalizeSofError && (
                     <p

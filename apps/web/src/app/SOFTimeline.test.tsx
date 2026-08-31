@@ -1,5 +1,11 @@
 import type { ReactNode } from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import SOFTimeline from "./SOFTimeline";
@@ -228,6 +234,57 @@ describe("SOFTimeline laytime error handling", () => {
       }),
     );
     expect(apiMocks.runLaytimeCalculation).not.toHaveBeenCalled();
+  });
+
+  it("identifies each SOF and finalises only the selected document", async () => {
+    const olderDraft = {
+      ...buildDocument(),
+      id: "11111111-1111-4111-8111-aaaaaaaa1111",
+      uploadDate: "2026-08-28T07:47:00.000Z",
+      status: "Draft" as const,
+    };
+    const newerDraft = {
+      ...buildDocument(),
+      id: "22222222-2222-4222-8222-bbbbbbbb2222",
+      uploadDate: "2026-08-29T07:47:00.000Z",
+      status: "Draft" as const,
+    };
+    apiMocks.getSofDocuments.mockResolvedValue({
+      data: [olderDraft, newerDraft],
+    });
+    apiMocks.getSofEvents.mockResolvedValue({ data: [] });
+    apiMocks.updateSofDocument.mockResolvedValue({
+      ...olderDraft,
+      status: "Final",
+    });
+
+    render(<SOFTimeline />);
+
+    const selector = await screen.findByRole("combobox", {
+      name: "Reviewing SOF document",
+    });
+    const options = within(selector).getAllByRole("option");
+    expect(options[0]).toHaveTextContent(/statement-of-facts\.pdf · Draft/);
+    expect(options[0]).toHaveTextContent(/…bbbb2222/);
+    expect(options[1]).toHaveTextContent(/…aaaa1111/);
+    expect(selector).toHaveValue(newerDraft.id);
+
+    fireEvent.change(selector, { target: { value: olderDraft.id } });
+    await waitFor(() => expect(selector).toHaveValue(olderDraft.id));
+    fireEvent.click(screen.getByRole("button", { name: "Finalise SOF" }));
+
+    expect(screen.getByText(new RegExp(olderDraft.id))).toBeInTheDocument();
+    expect(screen.getAllByText(/uploaded.*2026/i).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm finalise" }));
+
+    await waitFor(() =>
+      expect(apiMocks.updateSofDocument).toHaveBeenCalledWith(olderDraft.id, {
+        status: "Final",
+      }),
+    );
+    expect(apiMocks.updateSofDocument).not.toHaveBeenCalledWith(newerDraft.id, {
+      status: "Final",
+    });
   });
   it("uses the associated NOR source timezone for location evidence", async () => {
     apiMocks.getSofEvents.mockResolvedValue({
