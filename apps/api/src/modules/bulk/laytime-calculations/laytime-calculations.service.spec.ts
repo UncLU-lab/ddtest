@@ -337,7 +337,7 @@ describe('LaytimeCalculationsService lifecycle', () => {
 
     expect(calculations.findAndCount).toHaveBeenCalledWith({
       where: { voyageId: VOYAGE_ID, parentCalculationId: IsNull() },
-      order: { version: 'DESC' },
+      order: { version: 'DESC', calculatedAt: 'DESC', id: 'DESC' },
       skip: 0,
       take: 10,
     });

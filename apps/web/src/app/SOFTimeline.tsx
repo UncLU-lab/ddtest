@@ -149,6 +149,32 @@ type ManualEventDetails = {
   notes?: string;
 };
 
+function compareLaytimeCalculations(
+  left: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id">,
+  right: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id">,
+) {
+  if (left.version !== right.version) return left.version - right.version;
+
+  const calculatedAtDifference =
+    new Date(left.calculatedAt).getTime() -
+    new Date(right.calculatedAt).getTime();
+  if (calculatedAtDifference !== 0) return calculatedAtDifference;
+
+  return left.id.localeCompare(right.id);
+}
+
+function selectLatestLaytimeCalculation(
+  calculations: LaytimeCalculation[],
+): LaytimeCalculation | null {
+  return calculations.reduce<LaytimeCalculation | null>(
+    (latest, calculation) =>
+      !latest || compareLaytimeCalculations(calculation, latest) > 0
+        ? calculation
+        : latest,
+    null,
+  );
+}
+
 function readManualEventFormSnapshot(
   form: HTMLFormElement,
   mode: "add" | "edit",
@@ -1650,6 +1676,37 @@ export default function SOFTimeline() {
   const [operationResultsError, setOperationResultsError] = useState<
     string | null
   >(null);
+  const latestLaytimeCalculationRef = useRef<LaytimeCalculation | null>(null);
+
+  function acceptLaytimeCalculation(
+    calculation: LaytimeCalculation | null,
+    warnings?: string[] | null,
+  ) {
+    const current = latestLaytimeCalculationRef.current;
+    if (
+      calculation &&
+      current &&
+      calculation.voyageId === current.voyageId &&
+      compareLaytimeCalculations(calculation, current) < 0
+    ) {
+      return false;
+    }
+
+    if (!calculation) {
+      if (current?.voyageId === id) return false;
+      latestLaytimeCalculationRef.current = null;
+    } else {
+      latestLaytimeCalculationRef.current = calculation;
+    }
+
+    if (calculation?.id !== current?.id) {
+      setOperationResults([]);
+      setOperationResultsError(null);
+    }
+    setLaytimeCalculation(calculation);
+    setLaytimeWarnings(warnings ?? calculation?.warnings ?? []);
+    return true;
+  }
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimSuccess, setClaimSuccess] = useState<string | null>(null);
@@ -1807,13 +1864,11 @@ export default function SOFTimeline() {
         const result = await getLaytimeCalculations(id, { page: 1, limit: 1 });
         if (!alive) return;
 
-        const latest = result.data?.[0] ?? null;
-        setLaytimeCalculation(latest);
-        setLaytimeWarnings((latest as any)?.warnings ?? []);
+        const latest = selectLatestLaytimeCalculation(result.data ?? []);
+        acceptLaytimeCalculation(latest, latest?.warnings);
       } catch (error: any) {
         if (!alive) return;
-        setLaytimeCalculation(null);
-        setLaytimeWarnings([]);
+        if (!acceptLaytimeCalculation(null, [])) return;
         setLaytimeError(
           error?.message ?? "Unable to load laytime calculation.",
         );
@@ -1850,6 +1905,21 @@ export default function SOFTimeline() {
       try {
         const results = await getLaytimeOperationResults(laytimeCalculation.id);
         if (!alive) return;
+        if (latestLaytimeCalculationRef.current?.id !== laytimeCalculation.id) {
+          return;
+        }
+
+        const mismatchedResult = results.find(
+          (result) =>
+            result.parentCalculationId !== laytimeCalculation.id ||
+            result.voyageId !== laytimeCalculation.voyageId ||
+            result.version !== laytimeCalculation.version,
+        );
+        if (mismatchedResult) {
+          throw new Error(
+            "Operation results do not belong to the selected laytime calculation version.",
+          );
+        }
 
         setOperationResults(results);
       } catch (error: any) {
@@ -2191,8 +2261,7 @@ export default function SOFTimeline() {
 
     try {
       const result = await runLaytimeCalculation(id);
-      setLaytimeCalculation(result.calculation);
-      setLaytimeWarnings(result.warnings ?? []);
+      acceptLaytimeCalculation(result.calculation, result.warnings);
       setRefreshKey((current) => current + 1);
     } catch (error: any) {
       setLaytimeError(error?.message ?? "Unable to run laytime calculation.");

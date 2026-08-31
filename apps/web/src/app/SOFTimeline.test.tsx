@@ -306,6 +306,113 @@ describe("SOFTimeline laytime error handling", () => {
     expect(apiMocks.runLaytimeCalculation).toHaveBeenCalledWith("voyage-1");
   });
 
+  it("keeps the created latest calculation when a stale refresh response arrives", async () => {
+    const version2 = buildCalculation({
+      id: "calc-2",
+      version: 2,
+      settlementAuthorityStatus: "FINAL_AUTHORITATIVE",
+      status: "Final",
+      decisionSnapshot: {
+        commencement: { commencedAt: "2026-09-15T06:45:00.000Z" },
+        reversibleSettlement: { settlementStatus: "FINAL_AUTHORITATIVE" },
+      },
+    });
+    const version3 = buildCalculation({
+      id: "calc-3",
+      version: 3,
+      settlementAuthorityStatus: "PROVISIONAL",
+      status: "Draft",
+      decisionSnapshot: {
+        commencement: { commencedAt: "2026-09-15T06:45:00.000Z" },
+        reversibleSettlement: {
+          settlementStatus: "PROVISIONAL",
+          reasonCode: "DRAFT_SOF_EVIDENCE",
+          reason:
+            "No finalised Statement of Facts was available; the calculation used draft SOF events.",
+        },
+      },
+    });
+
+    apiMocks.getLaytimeCalculations
+      .mockResolvedValueOnce({ data: [version2] })
+      .mockResolvedValueOnce({ data: [version2] });
+    apiMocks.runLaytimeCalculation.mockResolvedValueOnce({
+      calculation: version3,
+      warnings: [],
+    });
+
+    render(<SOFTimeline />);
+    expect(
+      (await screen.findAllByText("FINAL_AUTHORITATIVE")).length,
+    ).toBeGreaterThan(0);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /run laytime calculation/i }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByText("PROVISIONAL").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("FINAL_AUTHORITATIVE")).toHaveLength(0);
+    expect(apiMocks.getLaytimeCalculations).toHaveBeenCalledTimes(2);
+  });
+
+  it("selects the highest version when the calculation list is not insertion ordered", async () => {
+    const version2 = buildCalculation({ id: "calc-2", version: 2 });
+    const version3 = buildCalculation({
+      id: "calc-3",
+      version: 3,
+      settlementAuthorityStatus: "PROVISIONAL",
+    });
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [version3, version2],
+    });
+
+    render(<SOFTimeline />);
+
+    await waitFor(() =>
+      expect(apiMocks.getLaytimeOperationResults).toHaveBeenCalledWith(
+        "calc-3",
+      ),
+    );
+    expect(apiMocks.getLaytimeOperationResults).not.toHaveBeenCalledWith(
+      "calc-2",
+    );
+  });
+
+  it("does not render operation children from another parent version", async () => {
+    const calculation = buildCalculation({ id: "calc-3", version: 3 });
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [calculation],
+    });
+    apiMocks.getLaytimeOperationResults.mockResolvedValue([
+      {
+        id: "loading-v2",
+        parentCalculationId: "calc-2",
+        operation: "Loading",
+        voyageId: "voyage-1",
+        version: 2,
+        allowedLaytime: "1 days 00:00:00",
+        usedLaytime: "0 days 00:00:00",
+        demurrageAmount: "0.00",
+        despatchAmount: "0.00",
+        status: "Draft",
+        calculatedAt: "2026-09-15T06:45:00.000Z",
+      },
+    ]);
+
+    render(<SOFTimeline />);
+
+    expect(
+      await screen.findByText(
+        "Operation results do not belong to the selected laytime calculation version.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Loading operation result"),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders a persisted calculation reload using inputSnapshot.operationSelection without crashing", async () => {
     const calculation = buildCalculation();
     apiMocks.getLaytimeCalculations.mockResolvedValue({

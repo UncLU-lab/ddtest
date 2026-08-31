@@ -267,7 +267,7 @@ export class LaytimeCalculationsService {
 
     const result = await this.calculations.findAndCount({
       where: { voyageId, parentCalculationId: IsNull() },
-      order: { version: 'DESC' },
+      order: { version: 'DESC', calculatedAt: 'DESC', id: 'DESC' },
       skip: query.skip,
       take: query.limit,
     });
