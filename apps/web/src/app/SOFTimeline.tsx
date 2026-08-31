@@ -1079,9 +1079,9 @@ const ENGINE_EVENT_PRESETS = [
   { value: "WEATHER_CLEARED", label: "Weather cleared" },
 ] as const;
 
-const SOF_FIXTURE_IMPORT_ENABLED =
-  import.meta.env.MODE !== "production" ||
-  import.meta.env.VITE_APP_ENV === "staging";
+function isSofFixtureImportEnabled() {
+  return import.meta.env.VITE_ENABLE_SOF_FIXTURE_IMPORT === "true";
+}
 const LOCAL_FIXTURE_EVENT_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 
 function parseSofFixtureJson(
@@ -1790,6 +1790,7 @@ function AddEventModal({
 
 export default function SOFTimeline() {
   const { id } = useParams();
+  const sofFixtureImportEnabled = isSofFixtureImportEnabled();
   const { getShipmentById } = useShipments();
   const shipment = getShipmentById(id);
 
@@ -3653,7 +3654,7 @@ export default function SOFTimeline() {
                 ) : null}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                {SOF_FIXTURE_IMPORT_ENABLED && (
+                {sofFixtureImportEnabled && (
                   <button
                     type="button"
                     className="flex items-center gap-1 px-2.5 rounded-md border"
@@ -3834,7 +3835,7 @@ export default function SOFTimeline() {
                 </div>
               )}
 
-            {showFixtureImport && SOF_FIXTURE_IMPORT_ENABLED && (
+            {showFixtureImport && sofFixtureImportEnabled && (
               <div
                 className="rounded-lg border p-3 mb-4"
                 style={{ borderColor: "#93C5FD", backgroundColor: "#EFF6FF" }}

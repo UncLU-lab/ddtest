@@ -195,6 +195,7 @@ function buildNonReversibleCalculation(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  import.meta.env.VITE_ENABLE_SOF_FIXTURE_IMPORT = "true";
   apiMocks.createBulkDispute.mockReset();
   apiMocks.createLaytimeStatement.mockReset();
   apiMocks.finalizeLaytimeCalculation.mockReset();
@@ -230,6 +231,20 @@ beforeEach(() => {
 });
 
 describe("SOFTimeline laytime error handling", () => {
+  it("hides fixture import unless the explicit feature flag is true", async () => {
+    import.meta.env.VITE_ENABLE_SOF_FIXTURE_IMPORT = "false";
+    apiMocks.getSofDocuments.mockResolvedValue({ data: [] });
+    apiMocks.getSofEvents.mockResolvedValue({ data: [] });
+
+    render(<SOFTimeline />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Import fixture" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
   it("previews and imports a valid fixture without finalising or calculating", async () => {
     const user = userEvent.setup();
     const fixture = {
