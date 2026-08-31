@@ -56,6 +56,10 @@ import {
   type NonReversibleSettlementResult,
 } from './non-reversible-laytime-settlement';
 import type { SettlementCurrency } from '../currency/settlement-currency';
+import {
+  SOF_COMPLETION_EVENT_TYPES,
+  SOF_GLOBAL_EVENT_TYPES,
+} from '../sof-documents/sof-event-types';
 
 /** A calculation plus the engine notes that produced it. */
 export interface CalculationResult {
@@ -184,34 +188,8 @@ type CreateOperationChildResultInput = {
   calculatedAt?: Date;
 };
 
-const GLOBAL_SOF_EVENT_TYPES = new Set([
-  'NOR_TENDERED',
-  'VESSEL_READY_IN_ALL_RESPECTS',
-  'FREE_PRATIQUE_GRANTED',
-  'RAIN_STOPPAGE',
-  'RAIN_COMMENCED',
-  'WEATHER_STOPPAGE',
-  'RAIN_STOPPED',
-  'WEATHER_CLEARED',
-  'BREAKDOWN',
-  'STOPPAGE_START',
-  'WORK_STOPPED',
-  'BREAKDOWN_REPAIRED',
-  'STOPPAGE_END',
-  'WORK_RESUMED',
-  'CARGO_STARTED',
-  'CARGO_COMPLETED',
-  'COMPLETION_OF_CARGO',
-  'HOSES_DISCONNECTED',
-]);
-
-const COMPLETION_EVENT_TYPES = new Set([
-  'CARGO_COMPLETED',
-  'LOADING_COMPLETED',
-  'DISCHARGE_COMPLETED',
-  'COMPLETION_OF_CARGO',
-  'HOSES_DISCONNECTED',
-]);
+const GLOBAL_SOF_EVENT_TYPES: ReadonlySet<string> = new Set(SOF_GLOBAL_EVENT_TYPES);
+const COMPLETION_EVENT_TYPES: ReadonlySet<string> = new Set(SOF_COMPLETION_EVENT_TYPES);
 
 /** Read-only explanation assembled solely from a calculation's stored evidence. */
 export interface CalculationAuditResponse {

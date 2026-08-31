@@ -731,6 +731,30 @@ export interface CreateSofEventDto {
   confidenceScore?: number;
 }
 
+export interface SofFixtureEvent {
+  eventTime: string;
+  eventType: string;
+  operation?: "Loading" | "Discharge";
+  cause?: string;
+  durationHours?: number | null;
+  exceptionCandidate: boolean;
+  notes?: string;
+}
+
+export interface SofFixture {
+  version: 1;
+  operation: "Loading" | "Discharge";
+  sourceTimeZone: string;
+  events: SofFixtureEvent[];
+}
+
+export interface SofFixtureImportResult {
+  sofDocumentId: string;
+  operation: "Loading" | "Discharge";
+  eventCount: number;
+  createdDocument: boolean;
+}
+
 export interface UpdateSofEventDto {
   eventTime?: string;
   sourceTimeZone?: string;
@@ -1234,6 +1258,33 @@ export async function updateSofDocument(
 
   const result = await parseResponse(response);
   return unwrapData<SofDocument>(result);
+}
+
+export async function importSofFixture(
+  voyageId: string,
+  fixture: SofFixture,
+): Promise<SofFixtureImportResult> {
+  if (!voyageId) {
+    const error: ApiError = {
+      message: "Voyage ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/sof-fixtures/import`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(fixture),
+    },
+  );
+
+  return unwrapData<SofFixtureImportResult>(await parseResponse(response));
 }
 
 export async function getSofEvents(

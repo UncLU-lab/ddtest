@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router";
 import {
   Plus,
@@ -22,6 +22,7 @@ import {
   getLaytimeOperationResults,
   getSofDocuments,
   getSofEvents,
+  importSofFixture,
   getNorTenderLocationEvidence,
   reversibleSettlementStatusLabel,
   runLaytimeCalculation,
@@ -33,6 +34,8 @@ import {
   type LaytimeStatement,
   type SofDocument,
   type SofEvent,
+  type SofFixture,
+  type SofFixtureEvent,
   type NorTenderLocationEvidence,
   type NorPortRelation,
   type NorBerthRelation,
@@ -1076,6 +1079,123 @@ const ENGINE_EVENT_PRESETS = [
   { value: "WEATHER_CLEARED", label: "Weather cleared" },
 ] as const;
 
+const SOF_FIXTURE_IMPORT_ENABLED =
+  import.meta.env.MODE !== "production" ||
+  import.meta.env.VITE_APP_ENV === "staging";
+const LOCAL_FIXTURE_EVENT_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+
+function parseSofFixtureJson(
+  text: string,
+): { fixture: SofFixture | null; errors: string[] } {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { fixture: null, errors: ["The file is not valid JSON."] };
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { fixture: null, errors: ["The fixture must be a JSON object."] };
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const errors: string[] = [];
+  if (candidate.version !== 1) errors.push("version must equal 1.");
+  if (candidate.operation !== "Loading" && candidate.operation !== "Discharge") {
+    errors.push("operation must be Loading or Discharge.");
+  }
+  const sourceTimeZone = candidate.sourceTimeZone;
+  const validTimeZone =
+    typeof sourceTimeZone === "string" && isValidIanaTimeZone(sourceTimeZone);
+  if (!validTimeZone) {
+    errors.push("sourceTimeZone must be a valid IANA timezone identifier.");
+  }
+  if (!Array.isArray(candidate.events) || candidate.events.length === 0) {
+    errors.push("events must contain at least one event.");
+    return { fixture: null, errors };
+  }
+
+  const eventTypes = new Set([
+    ...ENGINE_EVENT_PRESETS.map((preset) => preset.value),
+    "RAIN_COMMENCED",
+    "WEATHER_STOPPAGE",
+  ]);
+  const events = candidate.events.map((event, index) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      errors.push(`events[${index}] must be an object.`);
+      return null;
+    }
+
+    const row = event as Record<string, unknown>;
+    const allowedKeys = new Set([
+      "eventTime",
+      "eventType",
+      "operation",
+      "cause",
+      "durationHours",
+      "exceptionCandidate",
+      "notes",
+    ]);
+    for (const key of Object.keys(row)) {
+      if (!allowedKeys.has(key)) errors.push(`events[${index}].${key} is not supported.`);
+    }
+    if (
+      typeof row.eventTime !== "string" ||
+      !LOCAL_FIXTURE_EVENT_TIME_PATTERN.test(row.eventTime)
+    ) {
+      errors.push(`events[${index}].eventTime must use YYYY-MM-DDTHH:mm.`);
+    } else if (validTimeZone) {
+      try {
+        resolveLocalDateTimeInTimeZone(row.eventTime, sourceTimeZone as string);
+      } catch (error: any) {
+        errors.push(`events[${index}].eventTime: ${error.message}`);
+      }
+    }
+    if (typeof row.eventType !== "string" || !eventTypes.has(row.eventType)) {
+      errors.push(`events[${index}].eventType is not supported.`);
+    }
+    if (
+      row.operation !== undefined &&
+      (row.operation !== "Loading" && row.operation !== "Discharge" ||
+        row.operation !== candidate.operation)
+    ) {
+      errors.push(`events[${index}].operation must match fixture operation.`);
+    }
+    if (row.cause !== undefined && typeof row.cause !== "string") {
+      errors.push(`events[${index}].cause must be a string.`);
+    }
+    if (
+      row.durationHours !== undefined &&
+      row.durationHours !== null &&
+      (typeof row.durationHours !== "number" ||
+        !Number.isFinite(row.durationHours) ||
+        row.durationHours < 0 ||
+        row.durationHours > 168 ||
+        !Number.isInteger(row.durationHours * 100))
+    ) {
+      errors.push(`events[${index}].durationHours must be null or a number from 0 to 168.`);
+    }
+    if (typeof row.exceptionCandidate !== "boolean") {
+      errors.push(`events[${index}].exceptionCandidate must be boolean.`);
+    }
+    if (row.notes !== undefined && typeof row.notes !== "string") {
+      errors.push(`events[${index}].notes must be a string.`);
+    }
+    return row as unknown as SofFixtureEvent;
+  });
+
+  if (errors.length > 0) return { fixture: null, errors };
+  return {
+    fixture: {
+      version: 1,
+      operation: candidate.operation as "Loading" | "Discharge",
+      sourceTimeZone: sourceTimeZone as string,
+      events: events as SofFixtureEvent[],
+    },
+    errors: [],
+  };
+}
+
 function parseManualDetails(
   remarks?: string | null,
 ): ManualEventDetails | null {
@@ -1681,6 +1801,14 @@ export default function SOFTimeline() {
   const [timelineLoading, setTimelineLoading] = useState(true);
   const [timelineError, setTimelineError] = useState<string | null>(null);
   const [showAddEvent, setShowAddEvent] = useState(false);
+  const [showFixtureImport, setShowFixtureImport] = useState(false);
+  const [fixtureImportFileName, setFixtureImportFileName] = useState("");
+  const [fixtureImport, setFixtureImport] = useState<SofFixture | null>(null);
+  const [fixtureImportErrors, setFixtureImportErrors] = useState<string[]>([]);
+  const [fixtureImportRunning, setFixtureImportRunning] = useState(false);
+  const [fixtureImportError, setFixtureImportError] = useState<string | null>(
+    null,
+  );
   const [editingEvent, setEditingEvent] = useState<TimelineRow | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [savingEvent, setSavingEvent] = useState(false);
@@ -2173,6 +2301,65 @@ export default function SOFTimeline() {
       );
     } finally {
       setSavingLocationEvidence(false);
+    }
+  }
+
+  async function handleFixtureFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    setFixtureImportFileName(file?.name ?? "");
+    setFixtureImport(null);
+    setFixtureImportErrors([]);
+    setFixtureImportError(null);
+
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".json")) {
+      setFixtureImportErrors(["Choose a UTF-8 .json fixture file."]);
+      return;
+    }
+
+    let text: string;
+    try {
+      text =
+        typeof file.text === "function"
+          ? await file.text()
+          : await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result ?? ""));
+              reader.onerror = () =>
+                reject(reader.error ?? new Error("Unable to read fixture file."));
+              reader.readAsText(file, "UTF-8");
+            });
+    } catch {
+      setFixtureImportErrors(["Unable to read the fixture as UTF-8 JSON."]);
+      return;
+    }
+    const parsed = parseSofFixtureJson(text);
+    setFixtureImport(parsed.fixture);
+    setFixtureImportErrors(parsed.errors);
+  }
+
+  async function handleImportFixture() {
+    if (!id || !fixtureImport || fixtureImportErrors.length > 0) return;
+
+    setFixtureImportRunning(true);
+    setFixtureImportError(null);
+    setTimelineError(null);
+    try {
+      const result = await importSofFixture(id, fixtureImport);
+      setSelectedSofDocumentId(result.sofDocumentId);
+      setShowFixtureImport(false);
+      setFixtureImport(null);
+      setFixtureImportFileName("");
+      setTimelineSuccess(
+        `Imported ${result.eventCount} SOF event(s) into the ${result.operation} Draft document. Finalise SOF and run calculation separately.`,
+      );
+      setRefreshKey((current) => current + 1);
+    } catch (error: any) {
+      setFixtureImportError(
+        error?.message ?? "Unable to import the SOF fixture.",
+      );
+    } finally {
+      setFixtureImportRunning(false);
     }
   }
 
@@ -3466,7 +3653,29 @@ export default function SOFTimeline() {
                 ) : null}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                {" "}
+                {SOF_FIXTURE_IMPORT_ENABLED && (
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 px-2.5 rounded-md border"
+                    style={{
+                      height: "28px",
+                      fontSize: "11px",
+                      color: "#374151",
+                      borderColor: "#E5E7EB",
+                      borderWidth: "0.5px",
+                      backgroundColor: "#ffffff",
+                    }}
+                    onClick={() => {
+                      setFixtureImportError(null);
+                      setFixtureImportErrors([]);
+                      setFixtureImport(null);
+                      setFixtureImportFileName("");
+                      setShowFixtureImport(true);
+                    }}
+                  >
+                    Import fixture
+                  </button>
+                )}
                 <button
                   className="flex items-center gap-1 px-2.5 rounded-md border transition-colors cursor-pointer"
                   style={{
@@ -3624,6 +3833,93 @@ export default function SOFTimeline() {
                   </div>
                 </div>
               )}
+
+            {showFixtureImport && SOF_FIXTURE_IMPORT_ENABLED && (
+              <div
+                className="rounded-lg border p-3 mb-4"
+                style={{ borderColor: "#93C5FD", backgroundColor: "#EFF6FF" }}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p style={{ fontSize: "12px", fontWeight: 600, color: "#1E3A8A" }}>
+                      Import SOF fixture
+                    </p>
+                    <p style={{ fontSize: "11px", color: "#1E40AF", lineHeight: 1.4 }}>
+                      UTF-8 JSON only. Events will be persisted as Draft SOF evidence;
+                      finalisation and calculation remain separate actions.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="rounded-md border px-2 py-1"
+                    style={{ fontSize: "10px", borderColor: "#BFDBFE" }}
+                    onClick={() => setShowFixtureImport(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <label
+                  className="mt-3 block"
+                  style={{ fontSize: "11px", color: "#1F2937" }}
+                >
+                  Choose fixture JSON
+                  <input
+                    aria-label="Choose fixture JSON"
+                    className="mt-1 block w-full text-xs"
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={(event) => void handleFixtureFileChange(event)}
+                  />
+                </label>
+                {fixtureImportFileName && (
+                  <p className="mt-2" style={{ fontSize: "11px", color: "#374151" }}>
+                    File: {fixtureImportFileName}
+                  </p>
+                )}
+                {fixtureImportErrors.length > 0 && (
+                  <div
+                    role="alert"
+                    className="mt-2 rounded-md border p-2"
+                    style={{ borderColor: "#FCA5A5", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "11px" }}
+                  >
+                    <p className="font-medium">Fixture validation failed.</p>
+                    <ul className="list-disc pl-4">
+                      {fixtureImportErrors.map((error) => (
+                        <li key={error}>{error}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {fixtureImport && fixtureImportErrors.length === 0 && (
+                  <div className="mt-3 rounded-md border bg-white p-2" style={{ borderColor: "#BFDBFE" }}>
+                    <p style={{ fontSize: "11px", color: "#1F2937" }}>
+                      {fixtureImport.operation} | {fixtureImport.sourceTimeZone} | {fixtureImport.events.length} events
+                    </p>
+                    <ol className="mt-2 max-h-48 overflow-y-auto space-y-1 pl-5" style={{ fontSize: "10px", color: "#4B5563" }}>
+                      {fixtureImport.events.map((event, index) => (
+                        <li key={`${event.eventTime}-${event.eventType}-${index}`}>
+                          {event.eventTime} | {eventLabel(event.eventType)} | {event.operation ?? fixtureImport.operation}
+                        </li>
+                      ))}
+                    </ol>
+                    <button
+                      type="button"
+                      className="mt-3 rounded-md px-2.5 py-1.5 text-white"
+                      style={{ fontSize: "11px", backgroundColor: "#1A4ED8" }}
+                      disabled={fixtureImportRunning}
+                      onClick={() => void handleImportFixture()}
+                    >
+                      {fixtureImportRunning ? "Importing..." : "Import events"}
+                    </button>
+                  </div>
+                )}
+                {fixtureImportError && (
+                  <p role="alert" className="mt-2" style={{ fontSize: "11px", color: "#991B1B" }}>
+                    {fixtureImportError}
+                  </p>
+                )}
+              </div>
+            )}
 
             <LaytimeBar />
           </div>

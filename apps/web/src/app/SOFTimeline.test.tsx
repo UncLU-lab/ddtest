@@ -24,6 +24,7 @@ const apiMocks = vi.hoisted(() => ({
   getNorTenderLocationEvidence: vi.fn(),
   getSofDocuments: vi.fn(),
   getSofEvents: vi.fn(),
+  importSofFixture: vi.fn(),
   reversibleSettlementStatusLabel: vi.fn(
     (status?: string | null) => status ?? "Not available",
   ),
@@ -206,6 +207,7 @@ beforeEach(() => {
   apiMocks.getNorTenderLocationEvidence.mockReset();
   apiMocks.getSofDocuments.mockReset();
   apiMocks.getSofEvents.mockReset();
+  apiMocks.importSofFixture.mockReset();
   apiMocks.runLaytimeCalculation.mockReset();
   apiMocks.updateSofDocument.mockReset();
   apiMocks.updateSofEvent.mockReset();
@@ -219,9 +221,100 @@ beforeEach(() => {
   apiMocks.getLaytimeStatements.mockResolvedValue([]);
   apiMocks.createLaytimeStatement.mockResolvedValue({});
   apiMocks.finalizeLaytimeCalculation.mockResolvedValue({});
+  apiMocks.importSofFixture.mockResolvedValue({
+    sofDocumentId: "sof-1",
+    operation: "Discharge",
+    eventCount: 1,
+    createdDocument: true,
+  });
 });
 
 describe("SOFTimeline laytime error handling", () => {
+  it("previews and imports a valid fixture without finalising or calculating", async () => {
+    const user = userEvent.setup();
+    const fixture = {
+      version: 1,
+      operation: "Loading" as const,
+      sourceTimeZone: "Australia/Sydney",
+      events: [
+        {
+          eventTime: "2026-09-07T00:00",
+          eventType: "NOR_TENDERED",
+          exceptionCandidate: false,
+        },
+        {
+          eventTime: "2026-09-09T06:00",
+          eventType: "CARGO_COMPLETED",
+          exceptionCandidate: false,
+        },
+      ],
+    };
+    apiMocks.getSofDocuments.mockResolvedValue({ data: [] });
+    apiMocks.getSofEvents.mockResolvedValue({ data: [] });
+    apiMocks.importSofFixture.mockResolvedValue({
+      sofDocumentId: "fixture-sof",
+      operation: "Loading",
+      eventCount: 2,
+      createdDocument: true,
+    });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByRole("button", { name: "Import fixture" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Import fixture" }));
+    const input = screen.getByLabelText("Choose fixture JSON");
+    await user.upload(
+      input,
+      new File([JSON.stringify(fixture)], "stage-wx-003.json", {
+        type: "application/json",
+      }),
+    );
+
+    expect(await screen.findByText(/Loading \| Australia\/Sydney \| 2 events/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Import events" }));
+
+    await waitFor(() =>
+      expect(apiMocks.importSofFixture).toHaveBeenCalledWith("voyage-1", fixture),
+    );
+    expect(apiMocks.getSofDocuments).toHaveBeenCalledTimes(2);
+    expect(apiMocks.finalizeLaytimeCalculation).not.toHaveBeenCalled();
+    expect(apiMocks.runLaytimeCalculation).not.toHaveBeenCalled();
+  });
+
+  it("shows local fixture validation errors and does not call the import endpoint", async () => {
+    const user = userEvent.setup();
+    apiMocks.getSofDocuments.mockResolvedValue({ data: [] });
+    apiMocks.getSofEvents.mockResolvedValue({ data: [] });
+
+    render(<SOFTimeline />);
+    await screen.findByRole("button", { name: "Import fixture" });
+    await user.click(screen.getByRole("button", { name: "Import fixture" }));
+    await user.upload(
+      screen.getByLabelText("Choose fixture JSON"),
+      new File(
+        [
+          JSON.stringify({
+            version: 1,
+            operation: "Loading",
+            sourceTimeZone: "Australia/Nowhere",
+            events: [
+              {
+                eventTime: "2026-09-07T00:00",
+                eventType: "NOT_A_SOF_EVENT",
+                exceptionCandidate: false,
+              },
+            ],
+          }),
+        ],
+        "invalid.json",
+        { type: "application/json" },
+      ),
+    );
+
+    expect(await screen.findByText("Fixture validation failed.")).toBeInTheDocument();
+    expect(apiMocks.importSofFixture).not.toHaveBeenCalled();
+  });
+
   it("finalises the explicitly selected SOF and keeps recalculation explicit", async () => {
     const draft = { ...buildDocument(), status: "Draft" as const };
     apiMocks.getSofDocuments.mockResolvedValue({ data: [draft] });

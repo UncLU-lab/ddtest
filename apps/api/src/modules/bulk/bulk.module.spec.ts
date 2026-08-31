@@ -64,6 +64,7 @@ const EXPECTED_ROUTES = [
   'PATCH /sof-documents/:sofId',
   'GET /sof-documents/:sofId/events',
   'POST /sof-documents/:sofId/events',
+  'POST /voyages/:voyageId/sof-fixtures/import',
   'PATCH /sof-events/:eventId',
   'GET /voyages/:voyageId/nor-documents',
   'POST /voyages/:voyageId/nor-documents',

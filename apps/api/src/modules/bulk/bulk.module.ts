@@ -37,6 +37,8 @@ import { VoyagesService } from './voyages/voyages.service';
 import { TenantContextModule } from '../cross-cutting/tenant-context/tenant-context.module';
 import { ContractExtractionsController } from './contract-extractions/contract-extractions.controller';
 import { ContractExtractionsService } from './contract-extractions/contract-extractions.service';
+import { SofFixtureImportController } from './sof-fixtures/sof-fixture-import.controller';
+import { SofFixtureImportService } from './sof-fixtures/sof-fixture-import.service';
 
 const BULK_ENTITIES = [
   CalculationPeriod,
@@ -73,6 +75,7 @@ const BULK_ENTITIES = [
     BulkDisputesController,
     CounterpartiesController,
     ContractExtractionsController,
+    SofFixtureImportController,
   ],
   providers: [
     ...createTenantRepositoryProviders(BULK_ENTITIES),
@@ -87,6 +90,7 @@ const BULK_ENTITIES = [
     BulkDisputesService,
     CounterpartiesService,
     ContractExtractionsService,
+    SofFixtureImportService,
   ],
 })
 export class BulkModule {}
