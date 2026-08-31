@@ -508,6 +508,7 @@ export class LaytimeCalculationsService {
       sofSource.documents,
       sofSource.events,
       locationEvidence,
+      reversibleLaytimeRule.contractStatus === 'v1',
     );
     const operationChildren: OperationChildAudit = {
       requestedOperations: this.sortOperations(childPlans.requestedOperations),
@@ -1121,6 +1122,7 @@ export class LaytimeCalculationsService {
     sofDocuments: SofDocument[],
     sofEvents: SofEvent[],
     locationEvidence: NorTenderLocationEvidence[],
+    allowLegacyOperationDocuments: boolean,
   ): Promise<{
     requestedOperations: LaytimeOperation[];
     created: PreparedOperationChildCalculation[];
@@ -1144,6 +1146,7 @@ export class LaytimeCalculationsService {
         sofEvents,
         locationEvidence,
         operation,
+        { allowLegacyOperationDocuments },
       );
 
       if ('skipReason' in plan) {
@@ -1206,7 +1209,10 @@ export class LaytimeCalculationsService {
     sofEvents: SofEvent[],
     locationEvidence: NorTenderLocationEvidence[],
     operation: LaytimeOperation,
-    options?: { allowLegacyFallback?: boolean },
+    options?: {
+      allowLegacyFallback?: boolean;
+      allowLegacyOperationDocuments?: boolean;
+    },
   ): PreparedOperationChildCalculation | { skipReason: string } {
     const childWarnings: string[] = [];
 
@@ -1230,18 +1236,19 @@ export class LaytimeCalculationsService {
       throw error;
     }
 
+    const childLoadedSofEvents = sofEvents.filter((event) =>
+      childDocumentSelection.includedDocumentIds.includes(event.sofId),
+    );
     if (
+      childDocumentSelection.matchingDocumentIds.length === 0 &&
       options?.allowLegacyFallback !== true &&
-      childDocumentSelection.matchingDocumentIds.length === 0
+      (options?.allowLegacyOperationDocuments !== true ||
+        !childLoadedSofEvents.some((event) => event.operation === operation))
     ) {
       return {
         skipReason: `No explicit ${operation} SOF document exists for a child calculation.`,
       };
     }
-
-    const childLoadedSofEvents = sofEvents.filter((event) =>
-      childDocumentSelection.includedDocumentIds.includes(event.sofId),
-    );
     const childEventSelection = this.selectOperationSpecificSofEventsForEngine(
       operation,
       childLoadedSofEvents,

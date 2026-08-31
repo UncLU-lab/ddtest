@@ -2704,6 +2704,113 @@ describe('LaytimeCalculationsService lifecycle', () => {
     ).toBeUndefined();
   });
 
+  it('orchestrates both reversible children when legacy SOF documents contain explicit operation events', async () => {
+    const { service, manager } = buildServiceWithCharterParty(
+      0,
+      {
+        laytimeOperationScope: 'LoadingAndDischarge',
+        settlementCurrency: 'USD',
+        clauses: [
+          opClause('loading-laytime', 'laytime_rate', 'Loading', {
+            hours: 72,
+            noticeHours: 6,
+          }),
+          opClause('loading-demurrage', 'demurrage_rate', 'Loading', {
+            rate: 20000,
+          }),
+          opClause('discharge-laytime', 'laytime_rate', 'Discharge', {
+            hours: 72,
+            noticeHours: 6,
+          }),
+          opClause('discharge-demurrage', 'demurrage_rate', 'Discharge', {
+            rate: 20000,
+          }),
+          cpClause('reversible-laytime', 'reversible_laytime', {
+            enabled: true,
+            settlementVersion: 1,
+            allowanceMode: 'sum_operation_allowances',
+          }),
+        ],
+      },
+      {
+        laytimeOperation: 'Discharge',
+        norDocuments: [],
+        sofDocuments: [
+          {
+            id: 'legacy-sof',
+            status: 'Draft',
+            uploadDate: new Date('2026-10-01T00:00:00Z'),
+            operation: null,
+          },
+        ],
+        sofEvents: [
+          {
+            id: 'loading-nor',
+            sofId: 'legacy-sof',
+            eventTime: new Date('2026-10-10T00:30:00Z'),
+            eventType: 'NOR_TENDERED',
+            operation: 'Loading',
+            isManualOverride: true,
+          },
+          {
+            id: 'loading-completion',
+            sofId: 'legacy-sof',
+            eventTime: new Date('2026-10-12T06:30:00Z'),
+            eventType: 'HOSES_DISCONNECTED',
+            operation: 'Loading',
+            isManualOverride: true,
+          },
+          {
+            id: 'discharge-nor',
+            sofId: 'legacy-sof',
+            eventTime: new Date('2026-10-14T00:30:00Z'),
+            eventType: 'NOR_TENDERED',
+            operation: 'Discharge',
+            isManualOverride: true,
+          },
+          {
+            id: 'discharge-completion',
+            sofId: 'legacy-sof',
+            eventTime: new Date('2026-10-18T06:30:00Z'),
+            eventType: 'HOSES_DISCONNECTED',
+            operation: 'Discharge',
+            isManualOverride: true,
+          },
+        ],
+      },
+    );
+
+    await service.calculate(VOYAGE_ID);
+
+    const created = getCreatedCalculations(manager);
+    const parent = created.find((calculation) => calculation.operation === null);
+    const loading = created.find((calculation) => calculation.operation === 'Loading');
+    const discharge = created.find((calculation) => calculation.operation === 'Discharge');
+
+    expect(loading).toEqual(expect.objectContaining({
+      operation: 'Loading',
+      allowedLaytime: '3 days 00:00:00',
+      usedLaytime: '2 days 00:00:00',
+    }));
+    expect(discharge).toEqual(expect.objectContaining({
+      operation: 'Discharge',
+      allowedLaytime: '3 days 00:00:00',
+      usedLaytime: '4 days 00:00:00',
+    }));
+    expect(parent).toEqual(expect.objectContaining({
+      allowedLaytime: '6 days 00:00:00',
+      usedLaytime: '6 days 00:00:00',
+      demurrageAmount: '0.00',
+    }));
+    expect(
+      (parent?.inputSnapshot as Record<string, any>).operationChildren,
+    ).toEqual(expect.objectContaining({
+      requestedOperations: ['Loading', 'Discharge'],
+      createdOperations: ['Loading', 'Discharge'],
+      skippedOperations: [],
+    }));
+  });
+
   it('records a contract-aware reversible laytime analysis when the clause is enabled', async () => {
     const { service, manager } = buildServiceWithCharterParty(
       0,
