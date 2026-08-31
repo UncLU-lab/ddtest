@@ -19,6 +19,7 @@ const apiMocks = vi.hoisted(() => ({
     (status?: string | null) => status ?? "Not available",
   ),
   runLaytimeCalculation: vi.fn(),
+  updateSofDocument: vi.fn(),
   updateSofEvent: vi.fn(),
 }));
 
@@ -193,9 +194,11 @@ beforeEach(() => {
   apiMocks.getSofDocuments.mockReset();
   apiMocks.getSofEvents.mockReset();
   apiMocks.runLaytimeCalculation.mockReset();
+  apiMocks.updateSofDocument.mockReset();
   apiMocks.updateSofEvent.mockReset();
   apiMocks.getSofDocuments.mockResolvedValue({ data: [buildDocument()] });
   apiMocks.createSofDocument.mockResolvedValue(buildDocument());
+  apiMocks.updateSofDocument.mockResolvedValue(buildDocument());
   apiMocks.getSofEvents.mockResolvedValue({ data: [buildEvent()] });
   apiMocks.getNorTenderLocationEvidence.mockResolvedValue({ data: [] });
   apiMocks.getLaytimeCalculations.mockResolvedValue({ data: [] });
@@ -203,6 +206,29 @@ beforeEach(() => {
 });
 
 describe("SOFTimeline laytime error handling", () => {
+  it("finalises the explicitly selected SOF and keeps recalculation explicit", async () => {
+    const draft = { ...buildDocument(), status: "Draft" as const };
+    apiMocks.getSofDocuments.mockResolvedValue({ data: [draft] });
+    apiMocks.updateSofDocument.mockResolvedValue({ ...draft, status: "Final" });
+
+    render(<SOFTimeline />);
+
+    expect(await screen.findByText("SOF source")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Finalise SOF" }));
+    expect(
+      screen.getByText(
+        /will become Final and may be used as authoritative evidence/i,
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm finalise" }));
+
+    await waitFor(() =>
+      expect(apiMocks.updateSofDocument).toHaveBeenCalledWith("sof-1", {
+        status: "Final",
+      }),
+    );
+    expect(apiMocks.runLaytimeCalculation).not.toHaveBeenCalled();
+  });
   it("uses the associated NOR source timezone for location evidence", async () => {
     apiMocks.getSofEvents.mockResolvedValue({
       data: [

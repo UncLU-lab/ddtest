@@ -1189,6 +1189,32 @@ export async function createSofDocument(
   return unwrapData<SofDocument>(result);
 }
 
+export async function updateSofDocument(
+  sofId: string,
+  dto: UpdateSofDocumentDto,
+): Promise<SofDocument> {
+  if (!sofId) {
+    const error: ApiError = {
+      message: "SOF document ID is required.",
+      status: 400,
+    };
+
+    throw error;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/sof-documents/${encodeURIComponent(sofId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dto),
+    },
+  );
+
+  const result = await parseResponse(response);
+  return unwrapData<SofDocument>(result);
+}
+
 export async function getSofEvents(
   sofId: string,
   params?: { page?: number; limit?: number },

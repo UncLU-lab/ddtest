@@ -22,6 +22,7 @@ import {
   getNorTenderLocationEvidence,
   reversibleSettlementStatusLabel,
   runLaytimeCalculation,
+  updateSofDocument,
   updateSofEvent,
   type LaytimeDecisionSnapshot,
   type LaytimeCalculation,
@@ -1655,6 +1656,9 @@ export default function SOFTimeline() {
   const shipment = getShipmentById(id);
 
   const [documents, setDocuments] = useState<SofDocument[]>([]);
+  const [selectedSofDocumentId, setSelectedSofDocumentId] = useState<
+    string | null
+  >(null);
   const [timelineEvents, setTimelineEvents] = useState<TimelineRow[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(true);
   const [timelineError, setTimelineError] = useState<string | null>(null);
@@ -1676,6 +1680,10 @@ export default function SOFTimeline() {
   const [operationResultsError, setOperationResultsError] = useState<
     string | null
   >(null);
+  const [finalizeSofRunning, setFinalizeSofRunning] = useState(false);
+  const [finalizeSofError, setFinalizeSofError] = useState<string | null>(null);
+  const [showFinalizeSofConfirmation, setShowFinalizeSofConfirmation] =
+    useState(false);
   const latestLaytimeCalculationRef = useRef<LaytimeCalculation | null>(null);
 
   function acceptLaytimeCalculation(
@@ -1760,8 +1768,16 @@ export default function SOFTimeline() {
         );
 
         setDocuments(sortedDocuments);
+        const selectedDocumentId = sortedDocuments.some(
+          (document) => document.id === selectedSofDocumentId,
+        )
+          ? selectedSofDocumentId
+          : (sortedDocuments[0]?.id ?? null);
+        setSelectedSofDocumentId(selectedDocumentId);
 
-        const activeDocument = sortedDocuments[0];
+        const activeDocument = sortedDocuments.find(
+          (document) => document.id === selectedDocumentId,
+        );
         if (!activeDocument) {
           setTimelineEvents([]);
           return;
@@ -1943,7 +1959,10 @@ export default function SOFTimeline() {
     };
   }, [laytimeCalculation?.id]);
 
-  const activeDocument = documents[0] ?? null;
+  const activeDocument =
+    documents.find((document) => document.id === selectedSofDocumentId) ??
+    documents[0] ??
+    null;
   const evidenceAudit = getEvidenceAuditIds(laytimeCalculation);
   const displayEvents = (id ? timelineEvents : initialEvents).map((event) => ({
     ...event,
@@ -2103,6 +2122,27 @@ export default function SOFTimeline() {
       );
     } finally {
       setSavingLocationEvidence(false);
+    }
+  }
+
+  async function handleFinalizeSof() {
+    if (!activeDocument || activeDocument.status !== "Draft") return;
+
+    setFinalizeSofRunning(true);
+    setFinalizeSofError(null);
+    try {
+      await updateSofDocument(activeDocument.id, { status: "Final" });
+      setShowFinalizeSofConfirmation(false);
+      setTimelineSuccess(
+        "SOF document finalised. Run a new laytime calculation to use final evidence.",
+      );
+      setRefreshKey((current) => current + 1);
+    } catch (error: any) {
+      setFinalizeSofError(
+        error?.message ?? "Unable to finalise the SOF document.",
+      );
+    } finally {
+      setFinalizeSofRunning(false);
     }
   }
 
@@ -3189,11 +3229,138 @@ export default function SOFTimeline() {
               </div>
             </div>
 
+            {documents.length > 1 && (
+              <label
+                className="block mb-4"
+                style={{ fontSize: "11px", color: "#374151" }}
+              >
+                Reviewing document
+                <select
+                  aria-label="Reviewing SOF document"
+                  className="mt-1 w-full rounded-md border bg-white px-2 py-2"
+                  style={{ borderColor: "#D1D5DB" }}
+                  value={activeDocument?.id ?? ""}
+                  onChange={(event) => {
+                    setSelectedSofDocumentId(event.target.value || null);
+                    setFinalizeSofError(null);
+                    setShowFinalizeSofConfirmation(false);
+                    setRefreshKey((current) => current + 1);
+                  }}
+                >
+                  {documents.map((document) => (
+                    <option key={document.id} value={document.id}>
+                      {fileNameFromPath(document.filePath)} · {document.status}
+                      {document.operation ? ` · ${document.operation}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <div>
+                <p style={{ fontSize: "11px", color: "#6B7280" }}>
+                  Review status
+                </p>
+                <p style={{ fontSize: "12px", color: "#374151" }}>
+                  {eventCounts.deductible + eventCounts.pending} pending review
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-md border px-2.5 py-1.5"
+                  style={{
+                    fontSize: "11px",
+                    color: "#374151",
+                    borderColor: "#E5E7EB",
+                    backgroundColor: "#ffffff",
+                  }}
+                  onClick={() =>
+                    document
+                      .getElementById("sof-event-log")
+                      ?.scrollIntoView({ behavior: "smooth" })
+                  }
+                >
+                  Review SOF
+                </button>
+                {activeDocument?.status === "Draft" && (
+                  <button
+                    type="button"
+                    className="rounded-md px-2.5 py-1.5 text-white"
+                    style={{ fontSize: "11px", backgroundColor: "#1A4ED8" }}
+                    onClick={() => {
+                      setFinalizeSofError(null);
+                      setShowFinalizeSofConfirmation(true);
+                    }}
+                  >
+                    Finalise SOF
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {showFinalizeSofConfirmation &&
+              activeDocument?.status === "Draft" && (
+                <div
+                  className="rounded-lg border p-3 mb-4"
+                  style={{ borderColor: "#F59E0B", backgroundColor: "#FFFBEB" }}
+                >
+                  <p
+                    style={{
+                      fontSize: "11px",
+                      color: "#7B341E",
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    Finalise {sourceFileName}? This selected SOF document will
+                    become Final and may be used as authoritative evidence by
+                    future laytime calculations. Existing calculation versions
+                    remain immutable; run a new calculation after finalisation.
+                  </p>
+                  {finalizeSofError && (
+                    <p
+                      role="alert"
+                      className="mt-2"
+                      style={{ fontSize: "11px", color: "#991B1B" }}
+                    >
+                      {finalizeSofError}
+                    </p>
+                  )}
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      type="button"
+                      className="rounded-md px-2.5 py-1.5 text-white"
+                      style={{ fontSize: "11px", backgroundColor: "#1A4ED8" }}
+                      disabled={finalizeSofRunning}
+                      onClick={() => void handleFinalizeSof()}
+                    >
+                      {finalizeSofRunning
+                        ? "Finalising..."
+                        : "Confirm finalise"}
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border px-2.5 py-1.5"
+                      style={{
+                        fontSize: "11px",
+                        color: "#374151",
+                        borderColor: "#E5E7EB",
+                      }}
+                      onClick={() => setShowFinalizeSofConfirmation(false)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
             <LaytimeBar />
           </div>
 
           {/* Card 2 — SOF Event Log */}
           <div
+            id="sof-event-log"
             className="rounded-xl border overflow-hidden"
             style={{
               borderColor: "#E5E7EB",

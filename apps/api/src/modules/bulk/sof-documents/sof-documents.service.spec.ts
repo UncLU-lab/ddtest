@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { SofDocument } from '../entities/sof-document.entity';
 import { SofEvent } from '../entities/sof-event.entity';
@@ -59,7 +60,9 @@ function buildService() {
     ensureExists: jest.fn().mockResolvedValue({ id: SOF_ID }),
   };
   const tenantContext = {
-    getOrganizationId: jest.fn().mockReturnValue('00000000-0000-0000-0000-000000000001'),
+    getOrganizationId: jest
+      .fn()
+      .mockReturnValue('00000000-0000-0000-0000-000000000001'),
   };
 
   return {
@@ -146,15 +149,90 @@ describe('SofDocumentsService documents', () => {
       id: DOCUMENT_ID,
       voyageId: '22222222-2222-4222-8222-222222222222',
     });
-    voyagesService.ensureExists.mockRejectedValueOnce(new Error('Voyage not found'));
+    voyagesService.ensureExists.mockRejectedValueOnce(
+      new Error('Voyage not found'),
+    );
 
     await expect(service.update(DOCUMENT_ID, {})).rejects.toThrow(
       'Voyage not found',
     );
   });
+
+  it('persists the Draft to Final transition through the document contract', async () => {
+    const { service, documents } = buildService();
+    documents.findOne.mockResolvedValueOnce({
+      id: DOCUMENT_ID,
+      voyageId: SOF_ID,
+      filePath: 'voyages/sof.pdf',
+      status: 'Draft',
+    });
+
+    await expect(
+      service.update(DOCUMENT_ID, { status: 'Final' } as UpdateSofDocumentDto),
+    ).resolves.toEqual(expect.objectContaining({ status: 'Final' }));
+    expect(documents.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: DOCUMENT_ID, status: 'Final' }),
+    );
+  });
+
+  it('does not reopen or mutate a Final SOF document', async () => {
+    const { service, documents } = buildService();
+    documents.findOne.mockResolvedValueOnce({
+      id: DOCUMENT_ID,
+      voyageId: SOF_ID,
+      filePath: 'voyages/sof.pdf',
+      status: 'Final',
+    });
+
+    await expect(
+      service.update(DOCUMENT_ID, { status: 'Draft' } as UpdateSofDocumentDto),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(documents.save).not.toHaveBeenCalled();
+  });
 });
 
 describe('SofDocumentsService events', () => {
+  it('does not add evidence to a Final SOF document', async () => {
+    const { service, documents, events } = buildService();
+    documents.findOne.mockResolvedValueOnce({
+      id: SOF_ID,
+      voyageId: SOF_ID,
+      status: 'Final',
+    });
+
+    await expect(
+      service.addEvent(SOF_ID, {
+        eventTime: '2026-08-17T10:00:00.000Z',
+        eventType: 'CARGO_COMPLETED',
+        sourceTimeZone: 'Australia/Perth',
+      }),
+    ).rejects.toThrow('Final SOF documents are immutable');
+    expect(events.save).not.toHaveBeenCalled();
+  });
+
+  it('does not edit evidence belonging to a Final SOF document', async () => {
+    const { service, documents, events } = buildService();
+    events.findOne.mockResolvedValueOnce({
+      id: EVENT_ID,
+      sofId: SOF_ID,
+      eventTime: new Date('2026-08-17T09:00:00Z'),
+      eventType: 'CARGO_COMPLETED',
+      isManualOverride: true,
+    });
+    documents.findOne.mockResolvedValueOnce({
+      id: SOF_ID,
+      voyageId: SOF_ID,
+      status: 'Final',
+    });
+
+    await expect(
+      service.updateEvent(EVENT_ID, {
+        eventType: 'DISCHARGE_COMPLETED',
+      } as UpdateSofEventDto),
+    ).rejects.toThrow('Final SOF documents are immutable');
+    expect(events.save).not.toHaveBeenCalled();
+  });
+
   it('persists vessel readiness with its evidence timestamp', async () => {
     const { service, events } = buildService();
     const eventTime = '2026-08-17T09:30:00.000Z';
@@ -454,7 +532,9 @@ describe('SofDocumentsService events', () => {
       service.updateEvent(EVENT_ID, {
         eventType: 'HOSES_DISCONNECTED',
       } as UpdateSofEventDto),
-    ).rejects.toThrow('overrideReason is required when changing an event time or type');
+    ).rejects.toThrow(
+      'overrideReason is required when changing an event time or type',
+    );
     expect(events.save).not.toHaveBeenCalled();
   });
 
@@ -467,6 +547,8 @@ describe('SofDocumentsService events', () => {
       page: 1,
     } as any);
 
-    expect(result.data[0]).toEqual(expect.objectContaining({ operation: 'Loading' }));
+    expect(result.data[0]).toEqual(
+      expect.objectContaining({ operation: 'Loading' }),
+    );
   });
 });

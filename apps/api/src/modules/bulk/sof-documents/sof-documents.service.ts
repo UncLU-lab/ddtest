@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -76,6 +77,12 @@ export class SofDocumentsService {
   async update(id: string, dto: UpdateSofDocumentDto): Promise<SofDocument> {
     const document = await this.findOne(id);
 
+    if (document.status === 'Final') {
+      throw new ConflictException(
+        'Final SOF documents are immutable; reopen or create a new document before editing.',
+      );
+    }
+
     return this.documents.save(this.documents.merge(document, dto));
   }
 
@@ -97,10 +104,21 @@ export class SofDocumentsService {
 
   /** Events added through the API are manual by definition. */
   async addEvent(sofId: string, dto: CreateSofEventDto): Promise<SofEvent> {
-    await this.findOne(sofId);
+    const document = await this.findOne(sofId);
 
-    if (dto.sourceTimeZone !== undefined && !isValidIanaTimeZone(dto.sourceTimeZone)) {
-      throw new BadRequestException('sourceTimeZone must be a valid IANA timezone identifier');
+    if (document.status === 'Final') {
+      throw new ConflictException(
+        'Final SOF documents are immutable; reopen or create a new document before adding evidence.',
+      );
+    }
+
+    if (
+      dto.sourceTimeZone !== undefined &&
+      !isValidIanaTimeZone(dto.sourceTimeZone)
+    ) {
+      throw new BadRequestException(
+        'sourceTimeZone must be a valid IANA timezone identifier',
+      );
     }
 
     return this.events.save(
@@ -130,10 +148,21 @@ export class SofDocumentsService {
       throw new NotFoundException(`SOF event ${id} not found`);
     }
 
-    await this.findOne(event.sofId);
+    const document = await this.findOne(event.sofId);
 
-    if (dto.sourceTimeZone !== undefined && !isValidIanaTimeZone(dto.sourceTimeZone)) {
-      throw new BadRequestException('sourceTimeZone must be a valid IANA timezone identifier');
+    if (document.status === 'Final') {
+      throw new ConflictException(
+        'Final SOF documents are immutable; reopen or create a new document before editing evidence.',
+      );
+    }
+
+    if (
+      dto.sourceTimeZone !== undefined &&
+      !isValidIanaTimeZone(dto.sourceTimeZone)
+    ) {
+      throw new BadRequestException(
+        'sourceTimeZone must be a valid IANA timezone identifier',
+      );
     }
 
     const changesTimeOrType =
