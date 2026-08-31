@@ -12,6 +12,7 @@ export type ReversibleSettlementStatus = LaytimeSettlementAuthorityStatus;
 
 export type ReversibleSettlementReasonCode =
   | 'SETTLED'
+  | 'DRAFT_SOF_EVIDENCE'
   | 'DESPATCH_NOT_CONTRACTUALLY_AGREED'
   | 'LEGACY_REVERSIBLE_CONTRACT'
   | 'REVERSIBLE_CONTRACT_AMBIGUOUS'
@@ -134,7 +135,9 @@ export type ReversibleSettlementResult = {
 
 const DAY_SECONDS = 86400;
 
-function resultBase(input: ReversibleSettlementInput): ReversibleSettlementResult {
+function resultBase(
+  input: ReversibleSettlementInput,
+): ReversibleSettlementResult {
   const countableInputSeconds = (
     operation: ReversibleOperationSettlementInput | null,
   ): number | null =>
@@ -147,9 +150,7 @@ function resultBase(input: ReversibleSettlementInput): ReversibleSettlementResul
   return {
     version: input.rule.contractStatus === 'v1' ? 1 : null,
     allowanceMode:
-      input.rule.contractStatus === 'v1'
-        ? 'sum_operation_allowances'
-        : null,
+      input.rule.contractStatus === 'v1' ? 'sum_operation_allowances' : null,
     cargoQuantityBasis:
       input.rule.contractStatus === 'v1' ? 'voyage_cargo_quantity' : null,
     thresholdMode: input.rule.contractStatus === 'v1' ? 'combined_pool' : null,
@@ -157,7 +158,8 @@ function resultBase(input: ReversibleSettlementInput): ReversibleSettlementResul
     reasonCode: 'REVERSIBLE_CONTRACT_INVALID',
     reason: 'The reversible settlement contract is invalid.',
     reversibleClauseId: input.rule.clauseId,
-    loadingChildCalculationId: input.operations.Loading?.childCalculationId ?? null,
+    loadingChildCalculationId:
+      input.operations.Loading?.childCalculationId ?? null,
     dischargeChildCalculationId:
       input.operations.Discharge?.childCalculationId ?? null,
     loadingAllowance: input.allowances.Loading,
@@ -203,7 +205,9 @@ function withFailure(
   };
 }
 
-function durationSeconds(period: Pick<EnginePeriod, 'startTime' | 'endTime'>): number {
+function durationSeconds(
+  period: Pick<EnginePeriod, 'startTime' | 'endTime'>,
+): number {
   return (period.endTime.getTime() - period.startTime.getTime()) / 1000;
 }
 
@@ -258,7 +262,10 @@ function buildCombinedTimeline(
   let threshold: ReversibleSettlementResult['threshold'] = null;
 
   for (const operation of [loading, discharge]) {
-    for (const [sourcePeriodIndex, sourcePeriod] of operation.timeline.entries()) {
+    for (const [
+      sourcePeriodIndex,
+      sourcePeriod,
+    ] of operation.timeline.entries()) {
       const duration = durationSeconds(sourcePeriod);
       if (duration <= 0) continue;
 
@@ -355,7 +362,7 @@ function buildCombinedTimeline(
 }
 
 function price(seconds: number, rate: number): number {
-  return Math.round(((seconds / DAY_SECONDS) * rate) * 100) / 100;
+  return Math.round((seconds / DAY_SECONDS) * rate * 100) / 100;
 }
 
 export function resolveReversibleLaytimeSettlement(
@@ -470,7 +477,8 @@ export function resolveReversibleLaytimeSettlement(
       ...result,
       settlementStatus: 'FINAL_AUTHORITATIVE',
       reasonCode: 'SETTLED',
-      reason: 'The completed reversible voyage was settled against the combined allowance and common demurrage rate.',
+      reason:
+        'The completed reversible voyage was settled against the combined allowance and common demurrage rate.',
       demurrageRate: loadingRate,
       demurrageAmount: price(combinedOverrunSeconds, loadingRate),
     };
@@ -484,7 +492,8 @@ export function resolveReversibleLaytimeSettlement(
         ...result,
         settlementStatus: 'FINAL_AUTHORITATIVE',
         reasonCode: 'DESPATCH_NOT_CONTRACTUALLY_AGREED',
-        reason: 'Time was saved, but neither operation contains a contractual despatch agreement.',
+        reason:
+          'Time was saved, but neither operation contains a contractual despatch agreement.',
       };
     }
     if (!loadingDespatch || !dischargeDespatch) {
@@ -527,7 +536,8 @@ export function resolveReversibleLaytimeSettlement(
       ...result,
       settlementStatus: 'FINAL_AUTHORITATIVE',
       reasonCode: 'SETTLED',
-      reason: 'The completed reversible voyage was settled using pooled working time saved.',
+      reason:
+        'The completed reversible voyage was settled using pooled working time saved.',
       despatchRate: loadingDespatch.rate,
       despatchTimeBasis: 'working_time_saved',
       despatchAmount: price(combinedSavedSeconds, loadingDespatch.rate),
@@ -538,7 +548,8 @@ export function resolveReversibleLaytimeSettlement(
     ...result,
     settlementStatus: 'FINAL_AUTHORITATIVE',
     reasonCode: 'SETTLED',
-    reason: 'The completed reversible voyage exactly consumed the combined allowance.',
+    reason:
+      'The completed reversible voyage exactly consumed the combined allowance.',
   };
 }
 
@@ -546,7 +557,11 @@ export function readReversibleSettlementStatus(
   decisionSnapshot: Record<string, unknown> | null | undefined,
 ): ReversibleSettlementStatus | null {
   const settlement = decisionSnapshot?.reversibleSettlement;
-  if (!settlement || typeof settlement !== 'object' || Array.isArray(settlement)) {
+  if (
+    !settlement ||
+    typeof settlement !== 'object' ||
+    Array.isArray(settlement)
+  ) {
     return null;
   }
   const status = (settlement as Record<string, unknown>).settlementStatus;

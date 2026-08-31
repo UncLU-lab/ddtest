@@ -90,6 +90,9 @@ type SofDocumentSelection = {
   rule: 'matching-operation-plus-legacy-null';
 };
 
+const DRAFT_SOF_AUTHORITY_WARNING =
+  'No finalised Statement of Facts was available; the calculation used draft SOF events.';
+
 type OperationSelectionAudit = {
   voyageLaytimeOperation: LaytimeOperation;
   hasLoadingCompletion: boolean;
@@ -540,15 +543,18 @@ export class LaytimeCalculationsService {
         : null,
       reversibleLaytimeRule.enabled === true,
     );
-    const reversibleSettlement = this.applyReversibleCurrencyAuthority(
-      this.resolveReversibleSettlement(
-        reversibleLaytimeRule,
-        clauses,
-        Number(voyage.cargoQuantity),
-        loadingChild,
-        dischargeChild,
+    const reversibleSettlement = this.applyReversibleEvidenceAuthority(
+      this.applyReversibleCurrencyAuthority(
+        this.resolveReversibleSettlement(
+          reversibleLaytimeRule,
+          clauses,
+          Number(voyage.cargoQuantity),
+          loadingChild,
+          dischargeChild,
+        ),
+        settlementCurrency,
       ),
-      settlementCurrency,
+      sofSource.hasFinalisedDocument,
     );
     const nonReversibleSettlement =
       reversibleLaytimeRule.enabled === true ||
@@ -708,7 +714,9 @@ export class LaytimeCalculationsService {
         settlementAuthorityStatus:
           nonReversibleSettlement?.expectedOperations.includes(plan.operation)
             ? ('PROVISIONAL' as const)
-            : null,
+            : reversibleSettlement?.version === 1
+              ? reversibleSettlement.settlementStatus
+              : null,
         periods: plan.childResult.periods,
         calculatedAt: new Date(),
       };
@@ -892,7 +900,11 @@ export class LaytimeCalculationsService {
   private async loadSofEvents(
     voyageId: string,
     warnings: string[],
-  ): Promise<{ documents: SofDocument[]; events: SofEvent[] }> {
+  ): Promise<{
+    documents: SofDocument[];
+    events: SofEvent[];
+    hasFinalisedDocument: boolean;
+  }> {
     const documents = await this.sofDocuments.find({
       where: { voyageId },
       select: { id: true, status: true, uploadDate: true, operation: true },
@@ -910,9 +922,7 @@ export class LaytimeCalculationsService {
     const source = finalDocuments.length > 0 ? finalDocuments : documents;
 
     if (finalDocuments.length === 0) {
-      warnings.push(
-        'No finalised Statement of Facts was available; the calculation used draft SOF events.',
-      );
+      warnings.push(DRAFT_SOF_AUTHORITY_WARNING);
     }
 
     const events = await this.sofEvents.find({
@@ -920,7 +930,34 @@ export class LaytimeCalculationsService {
       order: { eventTime: 'ASC' },
     });
 
-    return { documents: source, events };
+    return {
+      documents: source,
+      events,
+      hasFinalisedDocument: finalDocuments.length > 0,
+    };
+  }
+
+  private applyReversibleEvidenceAuthority(
+    settlement: ReversibleSettlementResult | null,
+    hasFinalisedDocument: boolean,
+  ): ReversibleSettlementResult | null {
+    if (
+      !settlement ||
+      settlement.settlementStatus !== 'FINAL_AUTHORITATIVE' ||
+      hasFinalisedDocument
+    ) {
+      return settlement;
+    }
+
+    return {
+      ...settlement,
+      settlementStatus: 'PROVISIONAL',
+      reasonCode: 'DRAFT_SOF_EVIDENCE',
+      reason: DRAFT_SOF_AUTHORITY_WARNING,
+      warnings: settlement.warnings.includes(DRAFT_SOF_AUTHORITY_WARNING)
+        ? settlement.warnings
+        : [...settlement.warnings, DRAFT_SOF_AUTHORITY_WARNING],
+    };
   }
 
   private buildInputSnapshot(
