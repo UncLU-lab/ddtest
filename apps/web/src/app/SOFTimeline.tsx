@@ -4625,7 +4625,11 @@ export default function SOFTimeline() {
                           marginBottom: "2px",
                         }}
                       >
-                        Type / reason: {exception.reason}
+                        Type / reason: {(
+                          exception.exceptionKinds?.length
+                            ? exception.exceptionKinds.join(" + ")
+                            : exception.exceptionKind ?? "exception"
+                        )} · {exception.reason}
                       </p>
                       <p
                         style={{

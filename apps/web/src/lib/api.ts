@@ -275,6 +275,8 @@ export interface LaytimeDecisionIgnoredException {
   startTime: string;
   endTime: string;
   appliedClauseId: string | null;
+  exceptionKind?: "generic" | "weather" | "shex";
+  exceptionKinds?: Array<"generic" | "weather" | "shex">;
   reason: string;
 }
 

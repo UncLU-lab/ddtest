@@ -1830,6 +1830,90 @@ describe('runLaytimeEngine', () => {
     ).toBe(true);
   });
 
+  it('unions overlapping weather and generic stoppage evidence once', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [laytimeRate, demurrageRate, despatch, weatherWorking],
+        sofEvents: [
+          { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
+          {
+            eventTime: new Date('2026-03-04T12:00:00Z'),
+            eventType: 'BREAKDOWN',
+          },
+          {
+            eventTime: new Date('2026-03-04T16:00:00Z'),
+            eventType: 'BREAKDOWN_REPAIRED',
+          },
+          {
+            eventTime: new Date('2026-03-04T14:00:00Z'),
+            eventType: 'RAIN_STOPPAGE',
+          },
+          {
+            eventTime: new Date('2026-03-04T18:00:00Z'),
+            eventType: 'RAIN_STOPPED',
+          },
+          {
+            eventTime: new Date('2026-03-05T06:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(secondsToInterval(result.usedSeconds)).toBe('0 days 18:00:00');
+    expect(result.periods).toContainEqual(
+      expect.objectContaining({
+        periodType: 'exception',
+        exceptionKinds: ['generic', 'weather'],
+      }),
+    );
+    expect(secondsToInterval(result.weatherDeductedSeconds)).toBe(
+      '0 days 04:00:00',
+    );
+  });
+
+  it('restores actual work inside a generic exception when ATUTC applies', () => {
+    const result = runLaytimeEngine(
+      buildInput({
+        clauses: [
+          {
+            id: 'clause-laytime-sixteen',
+            clauseType: 'laytime_rate',
+            parameters: { hours: 16, noticeHours: 6 },
+          },
+          demurrageRate,
+          despatch,
+          atutcEnabled,
+        ],
+        sofEvents: [
+          { eventTime: NOR_TENDERED, eventType: 'NOR_TENDERED' },
+          {
+            eventTime: new Date('2026-03-04T14:00:00Z'),
+            eventType: 'BREAKDOWN',
+          },
+          {
+            eventTime: new Date('2026-03-04T16:00:00Z'),
+            eventType: 'CARGO_STARTED',
+          },
+          {
+            eventTime: new Date('2026-03-04T18:00:00Z'),
+            eventType: 'BREAKDOWN_REPAIRED',
+          },
+          {
+            eventTime: new Date('2026-03-04T20:00:00Z'),
+            eventType: 'CARGO_COMPLETED',
+          },
+        ],
+      }),
+    );
+
+    expect(result.atutc.restoredSeconds).toBe(2 * 3600);
+    expect(secondsToInterval(result.usedSeconds)).toBe('0 days 12:00:00');
+    expect(result.periods).toContainEqual(
+      expect.objectContaining({ periodType: 'exception' }),
+    );
+  });
+
   it('counts the same rain interval as laytime when WWD is disabled', () => {
     const weatherWorking: EngineClause = {
       id: 'clause-weather-working-disabled',
@@ -2224,7 +2308,7 @@ describe('runLaytimeEngine', () => {
         enabled: true,
         applied: false,
         limitation:
-          'ATUTC is applied only to SHEX-excepted periods in this engine version.',
+          'ATUTC restores actual cargo-working time inside supported contractual exception periods before demurrage.',
       }),
     );
   });
@@ -2466,7 +2550,7 @@ describe('runLaytimeEngine', () => {
     ).toBe(true);
   });
 
-  it('keeps weather deductions separate from ATUTC-restored SHEX time', () => {
+  it('restores actual weather-overlap work under ATUTC without deducting it twice', () => {
     const result = runLaytimeEngine(
       buildInput({
         clauses: [
@@ -2489,7 +2573,7 @@ describe('runLaytimeEngine', () => {
     );
 
     expect(secondsToInterval(result.weatherDeductedSeconds)).toBe(
-      '0 days 02:00:00',
+      '0 days 00:00:00',
     );
     expect(result.atutc).toEqual(
       expect.objectContaining({
@@ -2498,17 +2582,15 @@ describe('runLaytimeEngine', () => {
         restoredSeconds: 57_600,
       }),
     );
-    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 14:00:00');
+    expect(secondsToInterval(result.usedSeconds)).toBe('2 days 16:00:00');
     expect(result.periods.map((period) => period.periodType)).toEqual([
-      'laytime',
-      'exception',
       'laytime',
       'exception',
       'laytime',
     ]);
   });
 
-  it('keeps generic stoppages separate from ATUTC-restored SHEX time', () => {
+  it('preserves generic and SHEX provenance around ATUTC-restored time', () => {
     const result = runLaytimeEngine(
       buildInput({
         clauses: [
@@ -2541,6 +2623,7 @@ describe('runLaytimeEngine', () => {
       'laytime',
       'exception',
       'laytime',
+      'exception',
       'exception',
       'laytime',
     ]);

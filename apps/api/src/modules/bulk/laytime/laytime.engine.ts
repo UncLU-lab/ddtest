@@ -78,6 +78,8 @@ interface ExceptionInterval {
   end: Date;
   clauseId: string | null;
   kind: 'generic' | 'weather' | 'shex';
+  /** Every contractual/evidence source contributing to this canonical interval. */
+  sourceKinds?: Array<'generic' | 'weather' | 'shex'>;
   calendarDates?: Array<{
     localDate: string;
     reasons: ShexCalendarInterval['reasons'];
@@ -179,23 +181,18 @@ export function runLaytimeEngine(
     );
     warnings.push(...workingIntervals.warnings);
 
-    const shexIntervals = exceptions.filter(
-      (interval) => interval.kind === 'shex',
-    );
+    const exceptedIntervals = exceptions;
     const restoredOverlap = intersectWorkingWithExceptedIntervals(
       workingIntervals.intervals as CargoWorkingInterval[],
-      shexIntervals as TimeInterval[],
+      exceptedIntervals as TimeInterval[],
     );
-    const adjustedShexIntervals = subtractIntervals(
-      shexIntervals,
+    const adjustedExceptedIntervals = subtractIntervals(
+      exceptions,
       restoredOverlap.intervals,
     );
 
     exceptions = mergeIntervals(
-      sortExceptionIntervals([
-        ...exceptions.filter((interval) => interval.kind !== 'shex'),
-        ...adjustedShexIntervals,
-      ]),
+      sortExceptionIntervals([...adjustedExceptedIntervals]),
     );
 
     atutc.applied = restoredOverlap.totalOverlapSeconds > 0;
@@ -214,13 +211,7 @@ export function runLaytimeEngine(
     ignoredExceptions,
     demurrageStartedAt,
     weatherDeductedSeconds,
-  } = buildPeriods(
-    commencedAt,
-    completedAt,
-    exceptions,
-    allowedSeconds,
-    collectedExceptions.weatherDeductedSeconds,
-  );
+  } = buildPeriods(commencedAt, completedAt, exceptions, allowedSeconds);
   const preDemurragePeriods = buildPreDemurragePeriods(
     commencedAt,
     completedAt,
@@ -514,7 +505,7 @@ function resolveAtutcState(
     restoredSeconds: 0,
     restoredIntervals: [],
     limitation: enabled
-      ? 'ATUTC is applied only to SHEX-excepted periods in this engine version.'
+      ? 'ATUTC restores actual cargo-working time inside supported contractual exception periods before demurrage.'
       : 'ATUTC is not enabled by the persisted Charter Party rule.',
   };
 }
@@ -795,7 +786,6 @@ function resolveAllowedLaytime(
 
 interface CollectedExceptions {
   intervals: ExceptionInterval[];
-  weatherDeductedSeconds: number;
 }
 
 function collectExceptions(
@@ -831,6 +821,7 @@ function collectExceptions(
       end: new Date(Math.min(end.getTime(), completedAt.getTime())),
       clauseId,
       kind,
+      sourceKinds: [kind],
       calendarDates,
     }))
     .filter((interval) => interval.end.getTime() > interval.start.getTime())
@@ -838,13 +829,6 @@ function collectExceptions(
 
   return {
     intervals: clamped,
-    weatherDeductedSeconds: clamped
-      .filter((interval) => interval.kind === 'weather')
-      .reduce(
-        (sum, interval) =>
-          sum + (interval.end.getTime() - interval.start.getTime()) / 1000,
-        0,
-      ),
   };
 }
 
@@ -894,6 +878,7 @@ function collectGenericStoppages(
         end: event.eventTime,
         clauseId: null,
         kind: 'generic',
+        sourceKinds: ['generic'],
       });
       openedAt = null;
     }
@@ -908,6 +893,7 @@ function collectGenericStoppages(
       end: completedAt,
       clauseId: null,
       kind: 'generic',
+      sourceKinds: ['generic'],
     });
   }
 
@@ -942,6 +928,7 @@ function collectWeatherStoppages(
         end: event.eventTime,
         clauseId: null,
         kind: 'weather',
+        sourceKinds: ['weather'],
       });
       openedAt = null;
     }
@@ -956,33 +943,75 @@ function collectWeatherStoppages(
       end: completedAt,
       clauseId: null,
       kind: 'weather',
+      sourceKinds: ['weather'],
     });
   }
 
   return stoppages;
 }
 
-/** Unions overlapping intervals; a clause-attributed interval keeps its clause. */
+/**
+ * Canonicalizes exception intervals into non-overlapping segments. Every
+ * segment retains the complete set of rules contributing to that exact
+ * second, so overlap arithmetic and audit attribution cannot diverge.
+ */
 function mergeIntervals(sorted: ExceptionInterval[]): ExceptionInterval[] {
-  const merged: ExceptionInterval[] = [];
+  const positive = sorted.filter(
+    (interval) => interval.end.getTime() > interval.start.getTime(),
+  );
+  const boundaries = [
+    ...new Set(
+      positive.flatMap((interval) => [
+        interval.start.getTime(),
+        interval.end.getTime(),
+      ]),
+    ),
+  ].sort((left, right) => left - right);
+  const segments: ExceptionInterval[] = [];
 
-  for (const interval of sorted) {
-    const previous = merged.at(-1);
-    if (previous && interval.start.getTime() <= previous.end.getTime()) {
-      if (interval.end.getTime() > previous.end.getTime()) {
-        previous.end = interval.end;
-      }
-      previous.clauseId ??= interval.clauseId;
-      previous.calendarDates = mergeCalendarDates(
-        previous.calendarDates,
-        interval.calendarDates,
-      );
-      continue;
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    const active = positive.filter(
+      (interval) =>
+        interval.start.getTime() <= start && interval.end.getTime() >= end,
+    );
+    if (active.length === 0 || end <= start) continue;
+
+    const sourceKinds = [
+      ...new Set(
+        active.flatMap((interval) => interval.sourceKinds ?? [interval.kind]),
+      ),
+    ];
+    const segment: ExceptionInterval = {
+      start: new Date(start),
+      end: new Date(end),
+      clauseId: active.find((interval) => interval.clauseId)?.clauseId ?? null,
+      kind: active[0].kind,
+      sourceKinds,
+      calendarDates: active.reduce<ExceptionInterval['calendarDates']>(
+        (dates, interval) => mergeCalendarDates(dates, interval.calendarDates),
+        undefined,
+      ),
+    };
+
+    const previous = segments.at(-1);
+    if (
+      previous &&
+      previous.end.getTime() === segment.start.getTime() &&
+      previous.clauseId === segment.clauseId &&
+      JSON.stringify(previous.sourceKinds) ===
+        JSON.stringify(segment.sourceKinds) &&
+      JSON.stringify(previous.calendarDates) ===
+        JSON.stringify(segment.calendarDates)
+    ) {
+      previous.end = segment.end;
+    } else {
+      segments.push(segment);
     }
-    merged.push({ ...interval });
   }
 
-  return merged;
+  return segments;
 }
 
 function mergeCalendarDates(
@@ -1036,11 +1065,6 @@ function subtractIntervals(
   let removalIndex = 0;
 
   for (const interval of orderedSource) {
-    if (interval.kind !== 'shex') {
-      result.push({ ...interval });
-      continue;
-    }
-
     while (
       removalIndex < orderedRemovals.length &&
       orderedRemovals[removalIndex].end.getTime() <= interval.start.getTime()
@@ -1066,6 +1090,7 @@ function subtractIntervals(
           end: fragmentEnd,
           clauseId: interval.clauseId,
           kind: interval.kind,
+          sourceKinds: interval.sourceKinds,
           calendarDates: interval.calendarDates,
         });
       }
@@ -1087,6 +1112,7 @@ function subtractIntervals(
         end: new Date(interval.end),
         clauseId: interval.clauseId,
         kind: interval.kind,
+        sourceKinds: interval.sourceKinds,
         calendarDates: interval.calendarDates,
       });
     }
@@ -1102,7 +1128,6 @@ function buildPeriods(
   completedAt: Date,
   exceptions: ExceptionInterval[],
   allowedSeconds: number,
-  _weatherDeductedSeconds: number,
 ): {
   periods: EnginePeriod[];
   usedSeconds: number;
@@ -1181,6 +1206,11 @@ function buildPeriods(
         startTime: exception.start,
         endTime: exception.end,
         appliedClauseId: exception.clauseId,
+        ...(exception.sourceKinds && exception.sourceKinds.length > 1
+          ? {
+              exceptionKinds: [...exception.sourceKinds],
+            }
+          : {}),
         calendarDates: exception.calendarDates,
       });
       periods.push({
@@ -1198,9 +1228,14 @@ function buildPeriods(
         endTime: exception.end,
         periodType: 'exception',
         appliedClauseId: exception.clauseId,
+        ...(exception.sourceKinds && exception.sourceKinds.length > 1
+          ? {
+              exceptionKinds: [...exception.sourceKinds],
+            }
+          : {}),
         calendarDates: exception.calendarDates,
       });
-      if (exception.kind === 'weather') {
+      if ((exception.sourceKinds ?? [exception.kind]).includes('weather')) {
         weatherDeductedSeconds +=
           (exception.end.getTime() - exception.start.getTime()) / 1000;
       }
@@ -1245,6 +1280,11 @@ function buildPreDemurragePeriods(
       periodType: 'exception',
       appliedClauseId: exception.clauseId,
       exceptionKind: exception.kind,
+      ...(exception.sourceKinds && exception.sourceKinds.length > 1
+        ? {
+            exceptionKinds: [...exception.sourceKinds],
+          }
+        : {}),
       calendarDates: exception.calendarDates?.map((entry) => ({
         localDate: entry.localDate,
         reasons: [...entry.reasons],

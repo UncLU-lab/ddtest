@@ -75,6 +75,8 @@ export interface EnginePeriod {
   appliedClauseId: string | null;
   /** Original exception category before once-on-demurrage treatment. */
   exceptionKind?: 'generic' | 'weather' | 'shex';
+  /** All exception categories contributing to a canonical merged interval. */
+  exceptionKinds?: Array<'generic' | 'weather' | 'shex'>;
   calendarDates?: EngineCalendarDateAudit[];
 }
 
@@ -82,6 +84,8 @@ export interface EngineIgnoredException {
   startTime: Date;
   endTime: Date;
   appliedClauseId: string | null;
+  exceptionKind?: 'generic' | 'weather' | 'shex';
+  exceptionKinds?: Array<'generic' | 'weather' | 'shex'>;
   calendarDates?: EngineCalendarDateAudit[];
 }
 

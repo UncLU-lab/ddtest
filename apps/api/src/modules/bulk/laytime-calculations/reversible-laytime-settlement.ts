@@ -84,6 +84,7 @@ export type ReversibleSettlementSegment = {
   countedSeconds: number;
   appliedClauseId: string | null;
   exceptionKind: EnginePeriod['exceptionKind'] | null;
+  exceptionKinds: EnginePeriod['exceptionKinds'] | null;
   thresholdCrossing: boolean;
   onceOnDemurrageOverrideReason: 'COMBINED_THRESHOLD_ALREADY_REACHED' | null;
   calendarDates: EnginePeriod['calendarDates'] | null;
@@ -238,6 +239,9 @@ function appendSegment(
     countedSeconds,
     appliedClauseId: sourcePeriod.appliedClauseId,
     exceptionKind: sourcePeriod.exceptionKind ?? null,
+    exceptionKinds: sourcePeriod.exceptionKinds
+      ? [...sourcePeriod.exceptionKinds]
+      : null,
     thresholdCrossing,
     onceOnDemurrageOverrideReason: overrideReason,
     calendarDates: sourcePeriod.calendarDates

@@ -1452,6 +1452,8 @@ export class LaytimeCalculationsService {
         endTime: Date;
         periodType: string;
         appliedClauseId: string | null;
+        exceptionKind?: 'generic' | 'weather' | 'shex';
+        exceptionKinds?: Array<'generic' | 'weather' | 'shex'>;
         calendarDates?: Array<{
           localDate: string;
           reasons: string[];
@@ -1461,6 +1463,8 @@ export class LaytimeCalculationsService {
         startTime: Date;
         endTime: Date;
         appliedClauseId: string | null;
+        exceptionKind?: 'generic' | 'weather' | 'shex';
+        exceptionKinds?: Array<'generic' | 'weather' | 'shex'>;
         calendarDates?: Array<{
           localDate: string;
           reasons: string[];
@@ -1645,6 +1649,10 @@ export class LaytimeCalculationsService {
         endTime: period.endTime.toISOString(),
         periodType: period.periodType,
         appliedClauseId: period.appliedClauseId,
+        exceptionKind: period.exceptionKind,
+        exceptionKinds: period.exceptionKinds
+          ? [...period.exceptionKinds]
+          : undefined,
         calendarDates: period.calendarDates
           ? period.calendarDates.map((entry) => ({
               localDate: entry.localDate,
@@ -1686,6 +1694,10 @@ export class LaytimeCalculationsService {
           startTime: exception.startTime.toISOString(),
           endTime: exception.endTime.toISOString(),
           appliedClauseId: exception.appliedClauseId,
+          exceptionKind: exception.exceptionKind,
+          exceptionKinds: exception.exceptionKinds
+            ? [...exception.exceptionKinds]
+            : undefined,
           calendarDates: exception.calendarDates
             ? exception.calendarDates.map((entry) => ({
                 localDate: entry.localDate,
