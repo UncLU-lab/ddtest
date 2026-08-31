@@ -427,6 +427,43 @@ describe("SOFTimeline laytime error handling", () => {
     expect(screen.getByText("Loading completion found")).toBeInTheDocument();
   });
 
+  it("shows the reversible contract rule as applied when authority is provisional", async () => {
+    const calculation = buildCalculation({
+      settlementAuthorityStatus: "PROVISIONAL",
+      status: "Draft",
+      decisionSnapshot: {
+        reversibleLaytimeRule: {
+          enabled: true,
+          contractStatus: "v1",
+          settlementVersion: 1,
+          allowanceMode: "sum_operation_allowances",
+        },
+        reversibleLaytimeAnalysis: {
+          status: "available",
+          mode: "contract-enabled",
+          contractRuleApplied: true,
+          loading: null,
+          discharge: null,
+          pool: null,
+        },
+        reversibleSettlement: {
+          settlementStatus: "PROVISIONAL",
+          reasonCode: "DRAFT_SOF_EVIDENCE",
+          reason: "Draft SOF evidence",
+        },
+      },
+    });
+    apiMocks.getLaytimeCalculations.mockResolvedValue({
+      data: [calculation],
+    });
+
+    render(<SOFTimeline />);
+
+    const ruleLabel = await screen.findByText("Contract rule applied");
+    expect(ruleLabel.parentElement).toHaveTextContent("Yes");
+    expect(screen.getAllByText("PROVISIONAL").length).toBeGreaterThan(0);
+  });
+
   it("renders the operation-selection section defensively when the optional audit data is absent", async () => {
     apiMocks.getLaytimeCalculations.mockResolvedValue({
       data: [

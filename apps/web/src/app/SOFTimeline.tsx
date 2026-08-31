@@ -796,7 +796,7 @@ function getReversibleLaytimeAudit(calc?: LaytimeCalculation | null) {
     ),
     hasAnalysis: Boolean(reversibleAnalysis),
     statusLabel: reversibleSettlementStatusLabel(settlementStatus),
-    contractRuleApplied: settlementStatus === "FINAL_AUTHORITATIVE",
+    contractRuleApplied: reversibleAnalysis?.contractRuleApplied ?? false,
     ruleEnabled,
     reason: settlement?.reason ?? reversibleAnalysis?.reason ?? null,
     note:

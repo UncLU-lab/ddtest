@@ -3313,6 +3313,9 @@ describe('LaytimeCalculationsService lifecycle', () => {
           despatchAmount: '0.00',
           currency: 'USD',
           decisionSnapshot: expect.objectContaining({
+            reversibleLaytimeAnalysis: expect.objectContaining({
+              contractRuleApplied: true,
+            }),
             reversibleSettlement: expect.objectContaining({
               version: 1,
               allowanceMode: 'sum_operation_allowances',
