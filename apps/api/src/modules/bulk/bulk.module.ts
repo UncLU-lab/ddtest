@@ -12,6 +12,7 @@ import { Counterparty } from './entities/counterparty.entity';
 import { CpClause } from './entities/cp-clause.entity';
 import { DisputeCaseBulk } from './entities/dispute-case-bulk.entity';
 import { LaytimeCalculation } from './entities/laytime-calculation.entity';
+import { LaytimeStatement } from './entities/laytime-statement.entity';
 import { NorDocument } from './entities/nor-document.entity';
 import { NorTenderLocationEvidence } from './entities/nor-tender-location-evidence.entity';
 import { SofDocument } from './entities/sof-document.entity';
@@ -21,6 +22,8 @@ import { VoyageCounterparty } from './entities/voyage-counterparty.entity';
 import { Voyage } from './entities/voyage.entity';
 import { LaytimeCalculationsController } from './laytime-calculations/laytime-calculations.controller';
 import { LaytimeCalculationsService } from './laytime-calculations/laytime-calculations.service';
+import { LaytimeStatementsController } from './laytime-statements/laytime-statements.controller';
+import { LaytimeStatementsService } from './laytime-statements/laytime-statements.service';
 import { NorDocumentsController } from './nor-documents/nor-documents.controller';
 import { NorDocumentsService } from './nor-documents/nor-documents.service';
 import { NorTenderLocationEvidenceController } from './nor-tender-location-evidence/nor-tender-location-evidence.controller';
@@ -42,6 +45,7 @@ const BULK_ENTITIES = [
   CpClause,
   DisputeCaseBulk,
   LaytimeCalculation,
+  LaytimeStatement,
   NorDocument,
   NorTenderLocationEvidence,
   SofDocument,
@@ -65,6 +69,7 @@ const BULK_ENTITIES = [
     NorDocumentsController,
     NorTenderLocationEvidenceController,
     LaytimeCalculationsController,
+    LaytimeStatementsController,
     BulkDisputesController,
     CounterpartiesController,
     ContractExtractionsController,
@@ -78,6 +83,7 @@ const BULK_ENTITIES = [
     NorDocumentsService,
     NorTenderLocationEvidenceService,
     LaytimeCalculationsService,
+    LaytimeStatementsService,
     BulkDisputesService,
     CounterpartiesService,
     ContractExtractionsService,

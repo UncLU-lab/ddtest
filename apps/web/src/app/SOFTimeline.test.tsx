@@ -13,11 +13,13 @@ import { resolveLocalDateTimeInTimeZone } from "../lib/sourceTimeZone";
 
 const apiMocks = vi.hoisted(() => ({
   createBulkDispute: vi.fn(),
+  createLaytimeStatement: vi.fn(),
   createNorTenderLocationEvidence: vi.fn(),
   createSofDocument: vi.fn(),
   createSofEvent: vi.fn(),
   getLaytimeCalculations: vi.fn(),
   getLaytimeOperationResults: vi.fn(),
+  getLaytimeStatements: vi.fn(),
   getNorTenderLocationEvidence: vi.fn(),
   getSofDocuments: vi.fn(),
   getSofEvents: vi.fn(),
@@ -191,11 +193,13 @@ function buildNonReversibleCalculation(
 beforeEach(() => {
   vi.clearAllMocks();
   apiMocks.createBulkDispute.mockReset();
+  apiMocks.createLaytimeStatement.mockReset();
   apiMocks.createNorTenderLocationEvidence.mockReset();
   apiMocks.createSofDocument.mockReset();
   apiMocks.createSofEvent.mockReset();
   apiMocks.getLaytimeCalculations.mockReset();
   apiMocks.getLaytimeOperationResults.mockReset();
+  apiMocks.getLaytimeStatements.mockReset();
   apiMocks.getNorTenderLocationEvidence.mockReset();
   apiMocks.getSofDocuments.mockReset();
   apiMocks.getSofEvents.mockReset();
@@ -209,6 +213,8 @@ beforeEach(() => {
   apiMocks.getNorTenderLocationEvidence.mockResolvedValue({ data: [] });
   apiMocks.getLaytimeCalculations.mockResolvedValue({ data: [] });
   apiMocks.getLaytimeOperationResults.mockResolvedValue([]);
+  apiMocks.getLaytimeStatements.mockResolvedValue([]);
+  apiMocks.createLaytimeStatement.mockResolvedValue({});
 });
 
 describe("SOFTimeline laytime error handling", () => {
@@ -387,6 +393,62 @@ describe("SOFTimeline laytime error handling", () => {
       screen.queryByText("Laytime calculation failed"),
     ).not.toBeInTheDocument();
     expect(apiMocks.runLaytimeCalculation).toHaveBeenCalledWith("voyage-1");
+  });
+
+  it("creates a Laytime Statement only from the authoritative calculation", async () => {
+    const calculation = buildCalculation({
+      settlementAuthorityStatus: "FINAL_AUTHORITATIVE",
+      status: "Final",
+      currency: "USD",
+    });
+    apiMocks.getLaytimeCalculations.mockResolvedValue({ data: [calculation] });
+    apiMocks.createLaytimeStatement.mockResolvedValue({
+      id: "statement-1",
+      organizationId: "org-1",
+      voyageId: "voyage-1",
+      sourceCalculationId: calculation.id,
+      sourceCalculationVersion: calculation.version,
+      authoritativeSofDocumentIds: ["sof-1"],
+      settlementAuthorityStatus: "FINAL_AUTHORITATIVE",
+      currency: "USD",
+      version: 1,
+      createdAt: "2026-09-15T06:45:00.000Z",
+      statementSnapshot: {
+        voyage: { reference: "VOY-1" },
+        calculation: {
+          calculatedAt: calculation.calculatedAt,
+          settlement: {
+            combinedAllowedSeconds: 86400,
+            combinedUsedSeconds: 86400,
+            combinedOverrunSeconds: 0,
+            demurrageAmount: 0,
+            despatchAmount: 0,
+          },
+          reversibleAnalysis: { pool: { transferableSurplusSeconds: 0 } },
+          children: [],
+        },
+        sofDocuments: [{ filePath: "statement-of-facts.pdf", id: "sof-1" }],
+      },
+    });
+
+    render(<SOFTimeline />);
+    expect(
+      await screen.findByRole("button", { name: "Create Laytime Statement" }),
+    ).toBeEnabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create Laytime Statement" }),
+    );
+
+    await waitFor(() =>
+      expect(apiMocks.createLaytimeStatement).toHaveBeenCalledWith(
+        calculation.id,
+      ),
+    );
+    expect(await screen.findByText("Statement V1")).toBeInTheDocument();
+    expect(screen.getByText("FINAL_AUTHORITATIVE")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Final commercial position: USD 0\.00/),
+    ).toBeInTheDocument();
   });
 
   it("keeps the created latest calculation when a stale refresh response arrives", async () => {

@@ -222,6 +222,24 @@ export interface LaytimeCalculation {
   [key: string]: unknown;
 }
 
+export interface LaytimeStatement {
+  id: string;
+  organizationId: string;
+  voyageId: string;
+  charterPartyId?: string | null;
+  sourceCalculationId: string;
+  sourceCalculationVersion: number;
+  loadingCalculationId?: string | null;
+  dischargeCalculationId?: string | null;
+  authoritativeSofDocumentIds: string[];
+  settlementAuthorityStatus: "FINAL_AUTHORITATIVE";
+  currency: string;
+  version: number;
+  statementSnapshot: Record<string, any>;
+  createdAt: string;
+  createdByUserId?: string | null;
+}
+
 export interface LaytimeCalculationOperationSelection {
   voyageLaytimeOperation?: "Loading" | "Discharge";
   hasLoadingCompletion?: boolean;
@@ -1418,6 +1436,45 @@ export async function runLaytimeCalculation(
 
   const result = await parseResponse(response);
   return unwrapData<LaytimeCalculationResult>(result);
+}
+
+export async function createLaytimeStatement(
+  calculationId: string,
+): Promise<LaytimeStatement> {
+  if (!calculationId) throw new Error("Calculation ID is required.");
+  const response = await fetch(`${API_BASE}/laytime-statements`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ calculationId }),
+  });
+  return unwrapData<LaytimeStatement>(await parseResponse(response));
+}
+
+export async function getLaytimeStatements(
+  voyageId: string,
+): Promise<LaytimeStatement[]> {
+  if (!voyageId) throw new Error("Voyage ID is required.");
+  const result = await parseResponse(
+    await fetch(
+      `${API_BASE}/voyages/${encodeURIComponent(voyageId)}/laytime-statements`,
+    ),
+  );
+  return (
+    Array.isArray(result) ? result : (result?.data ?? [])
+  ) as LaytimeStatement[];
+}
+
+export async function getLaytimeStatement(
+  statementId: string,
+): Promise<LaytimeStatement> {
+  if (!statementId) throw new Error("Statement ID is required.");
+  return unwrapData<LaytimeStatement>(
+    await parseResponse(
+      await fetch(
+        `${API_BASE}/laytime-statements/${encodeURIComponent(statementId)}`,
+      ),
+    ),
+  );
 }
 
 export async function createBulkDispute(

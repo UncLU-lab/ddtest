@@ -10,6 +10,7 @@ import { Counterparty } from './entities/counterparty.entity';
 import { CpClause } from './entities/cp-clause.entity';
 import { DisputeCaseBulk } from './entities/dispute-case-bulk.entity';
 import { LaytimeCalculation } from './entities/laytime-calculation.entity';
+import { LaytimeStatement } from './entities/laytime-statement.entity';
 import { NorDocument } from './entities/nor-document.entity';
 import { NorTenderLocationEvidence } from './entities/nor-tender-location-evidence.entity';
 import { SofDocument } from './entities/sof-document.entity';
@@ -25,6 +26,7 @@ const ENTITIES = [
   CpClause,
   DisputeCaseBulk,
   LaytimeCalculation,
+  LaytimeStatement,
   NorDocument,
   NorTenderLocationEvidence,
   SofDocument,
@@ -75,6 +77,9 @@ const EXPECTED_ROUTES = [
   'GET /laytime-calculations/:calculationId/audit',
   'GET /laytime-calculations/:calculationId/periods',
   'POST /laytime-calculations/:calculationId/finalize',
+  'POST /laytime-statements',
+  'GET /laytime-statements/:statementId',
+  'GET /voyages/:voyageId/laytime-statements',
   'GET /bulk-disputes',
   'POST /bulk-disputes',
   'GET /bulk-disputes/:disputeId',

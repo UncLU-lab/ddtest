@@ -15,7 +15,9 @@ import {
   createSofEvent,
   createNorTenderLocationEvidence,
   createBulkDispute,
+  createLaytimeStatement,
   getLaytimeCalculations,
+  getLaytimeStatements,
   getLaytimeOperationResults,
   getSofDocuments,
   getSofEvents,
@@ -27,6 +29,7 @@ import {
   type LaytimeDecisionSnapshot,
   type LaytimeCalculation,
   type LaytimeOperationResult,
+  type LaytimeStatement,
   type SofDocument,
   type SofEvent,
   type NorTenderLocationEvidence,
@@ -1728,6 +1731,10 @@ export default function SOFTimeline() {
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimSuccess, setClaimSuccess] = useState<string | null>(null);
+  const [laytimeStatement, setLaytimeStatement] =
+    useState<LaytimeStatement | null>(null);
+  const [statementRunning, setStatementRunning] = useState(false);
+  const [statementError, setStatementError] = useState<string | null>(null);
   const [timelineSuccess, setTimelineSuccess] = useState<string | null>(null);
   const [locationEvidence, setLocationEvidence] = useState<
     NorTenderLocationEvidence[]
@@ -1827,6 +1834,26 @@ export default function SOFTimeline() {
 
     void loadTimeline();
 
+    return () => {
+      alive = false;
+    };
+  }, [id, refreshKey]);
+
+  useEffect(() => {
+    let alive = true;
+    async function loadStatements() {
+      if (!id) {
+        setLaytimeStatement(null);
+        return;
+      }
+      try {
+        const statements = await getLaytimeStatements(id);
+        if (alive) setLaytimeStatement(statements[0] ?? null);
+      } catch {
+        if (alive) setLaytimeStatement(null);
+      }
+    }
+    void loadStatements();
     return () => {
       alive = false;
     };
@@ -2301,6 +2328,47 @@ export default function SOFTimeline() {
           : hasClaimableAmount
             ? "Create a claim from the persisted laytime calculation."
             : "No claimable amount from this laytime calculation.";
+
+  const statementAuthorityReady = Boolean(
+    laytimeCalculation?.status === "Final" &&
+    laytimeCalculation.settlementAuthorityStatus === "FINAL_AUTHORITATIVE" &&
+    laytimeCalculation.currency,
+  );
+  const statementBlockReason = !laytimeCalculation
+    ? "Run a laytime calculation first."
+    : laytimeCalculation.status !== "Final"
+      ? "The calculation lifecycle status is not Final."
+      : laytimeCalculation.settlementAuthorityStatus !== "FINAL_AUTHORITATIVE"
+        ? "Only FINAL_AUTHORITATIVE calculations can create a statement."
+        : !laytimeCalculation.currency
+          ? "The calculation has no authoritative settlement currency."
+          : null;
+
+  async function handleCreateLaytimeStatement() {
+    if (!laytimeCalculation || !statementAuthorityReady) return;
+    setStatementRunning(true);
+    setStatementError(null);
+    try {
+      const statement = await createLaytimeStatement(laytimeCalculation.id);
+      setLaytimeStatement(statement);
+    } catch (error: any) {
+      setStatementError(
+        error?.message ?? "Unable to create Laytime Statement.",
+      );
+    } finally {
+      setStatementRunning(false);
+    }
+  }
+  const statementSnapshot = laytimeStatement?.statementSnapshot as any;
+  const statementCalculation = statementSnapshot?.calculation;
+  const statementSettlement = statementCalculation?.settlement;
+  const statementAnalysis = statementCalculation?.reversibleAnalysis;
+  const statementFinalAmount =
+    Number(statementSettlement?.demurrageAmount ?? 0) -
+    Number(statementSettlement?.despatchAmount ?? 0);
+  const statementChildren = Array.isArray(statementCalculation?.children)
+    ? statementCalculation.children
+    : [];
   const hasOperationResults = operationResults.length > 0;
 
   async function handleRunLaytimeCalculation() {
@@ -2972,6 +3040,135 @@ export default function SOFTimeline() {
           </div>
         )}
       </section>
+      {laytimeStatement && (
+        <section
+          className="mx-6 mt-3 rounded-lg border bg-white px-4 py-3"
+          aria-label="Laytime Statement"
+          style={{ borderColor: "#BFDBFE" }}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                }}
+              >
+                Authoritative Laytime Statement
+              </p>
+              <h2
+                style={{ fontSize: "16px", fontWeight: 600, color: "#111827" }}
+              >
+                Statement V{laytimeStatement.version}
+              </h2>
+            </div>
+            <span
+              className="rounded-full px-2 py-1"
+              style={{
+                fontSize: "10px",
+                color: "#166534",
+                backgroundColor: "#DCFCE7",
+              }}
+            >
+              {laytimeStatement.settlementAuthorityStatus}
+            </span>
+          </div>
+          <div
+            className="mt-3 grid gap-2 sm:grid-cols-3"
+            style={{ fontSize: "11px", color: "#374151" }}
+          >
+            <span>
+              Voyage:{" "}
+              {statementSnapshot?.voyage?.reference ??
+                laytimeStatement.voyageId}
+            </span>
+            <span>Currency: {laytimeStatement.currency}</span>
+            <span>
+              Source: V{laytimeStatement.sourceCalculationVersion} ·{" "}
+              {formatDateTime(statementCalculation?.calculatedAt)}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            {(["Loading", "Discharge"] as const).map((operation) => {
+              const child = statementChildren.find(
+                (item: any) => item.operation === operation,
+              );
+              return (
+                <div
+                  key={operation}
+                  className="rounded-md border px-3 py-2"
+                  style={{ borderColor: "#E5E7EB" }}
+                >
+                  <p
+                    style={{
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      color: "#111827",
+                    }}
+                  >
+                    {operation}
+                  </p>
+                  <p style={{ fontSize: "11px", color: "#374151" }}>
+                    Allowed: {child?.allowedLaytime ?? "Not available"}
+                  </p>
+                  <p style={{ fontSize: "11px", color: "#374151" }}>
+                    Used: {child?.usedLaytime ?? "Not available"}
+                  </p>
+                  <p style={{ fontSize: "10px", color: "#6B7280" }}>
+                    Reference component only · {child?.id ?? "No child"}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+          <div
+            className="mt-3 rounded-md border px-3 py-2"
+            style={{ borderColor: "#BFDBFE", backgroundColor: "#F8FAFC" }}
+          >
+            <p style={{ fontSize: "11px", fontWeight: 600, color: "#111827" }}>
+              Reversible combined settlement
+            </p>
+            <p style={{ fontSize: "11px", color: "#374151" }}>
+              Allowed:{" "}
+              {formatSecondsAsInterval(
+                statementSettlement?.combinedAllowedSeconds,
+              )}{" "}
+              · Used:{" "}
+              {formatSecondsAsInterval(
+                statementSettlement?.combinedUsedSeconds,
+              )}
+            </p>
+            <p style={{ fontSize: "11px", color: "#374151" }}>
+              Transferable surplus:{" "}
+              {formatSecondsAsInterval(
+                statementAnalysis?.pool?.transferableSurplusSeconds,
+              )}{" "}
+              · Pooled overrun:{" "}
+              {formatSecondsAsInterval(
+                statementSettlement?.combinedOverrunSeconds,
+              )}
+            </p>
+            <p style={{ fontSize: "12px", fontWeight: 600, color: "#166534" }}>
+              Final commercial position:{" "}
+              {formatCurrencyAmount(
+                statementFinalAmount,
+                laytimeStatement.currency,
+              )}
+            </p>
+          </div>
+          <p className="mt-2" style={{ fontSize: "10px", color: "#6B7280" }}>
+            SOF:{" "}
+            {(statementSnapshot?.sofDocuments ?? [])
+              .map(
+                (document: any) =>
+                  `${fileNameFromPath(document.filePath)} · ${document.id}`,
+              )
+              .join("; ") || "Not available"}
+          </p>
+        </section>
+      )}
+
       {claimError && (
         <div
           className="mx-6 mt-3 rounded-lg border px-4 py-3"
@@ -3965,6 +4162,81 @@ export default function SOFTimeline() {
             >
               {claimHelperText}
             </p>
+
+            <div
+              className="mt-3 rounded-md border p-2.5"
+              style={{ borderColor: "#BFDBFE", backgroundColor: "#F8FAFC" }}
+            >
+              <p
+                style={{ fontSize: "11px", fontWeight: 600, color: "#111827" }}
+              >
+                Laytime Statement
+              </p>
+              {laytimeStatement ? (
+                <>
+                  <p
+                    className="mt-1"
+                    style={{ fontSize: "10px", color: "#374151" }}
+                  >
+                    Version {laytimeStatement.version} ·{" "}
+                    {laytimeStatement.currency} ·{" "}
+                    {laytimeStatement.settlementAuthorityStatus}
+                  </p>
+                  <p style={{ fontSize: "10px", color: "#6B7280" }}>
+                    Source calculation V
+                    {laytimeStatement.sourceCalculationVersion}
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-2 w-full rounded-md border bg-white px-2 py-1.5"
+                    style={{ fontSize: "10px", borderColor: "#CBD5E1" }}
+                    onClick={() =>
+                      window.scrollTo({ top: 0, behavior: "smooth" })
+                    }
+                  >
+                    View Laytime Statement
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="mt-2 w-full rounded-md px-2 py-1.5 text-white"
+                    style={{
+                      fontSize: "10px",
+                      backgroundColor: "#1A4ED8",
+                      opacity:
+                        statementAuthorityReady && !statementRunning ? 1 : 0.45,
+                    }}
+                    disabled={!statementAuthorityReady || statementRunning}
+                    onClick={() => void handleCreateLaytimeStatement()}
+                  >
+                    {statementRunning
+                      ? "Creating..."
+                      : "Create Laytime Statement"}
+                  </button>
+                  <p
+                    className="mt-1"
+                    style={{
+                      fontSize: "10px",
+                      color: "#6B7280",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {statementBlockReason}
+                  </p>
+                </>
+              )}
+              {statementError && (
+                <p
+                  role="alert"
+                  className="mt-1"
+                  style={{ fontSize: "10px", color: "#991B1B" }}
+                >
+                  {statementError}
+                </p>
+              )}
+            </div>
 
             <div
               style={{ borderTop: "0.5px solid #E5E7EB", margin: "10px 0" }}
