@@ -4,6 +4,7 @@ import { Counterparty } from '../../modules/bulk/entities/counterparty.entity';
 import { CpClause } from '../../modules/bulk/entities/cp-clause.entity';
 import { DisputeCaseBulk } from '../../modules/bulk/entities/dispute-case-bulk.entity';
 import { LaytimeCalculation } from '../../modules/bulk/entities/laytime-calculation.entity';
+import { LaytimeStatement } from '../../modules/bulk/entities/laytime-statement.entity';
 import { NorDocument } from '../../modules/bulk/entities/nor-document.entity';
 import { NorTenderLocationEvidence } from '../../modules/bulk/entities/nor-tender-location-evidence.entity';
 import { SofDocument } from '../../modules/bulk/entities/sof-document.entity';
@@ -39,6 +40,7 @@ export const databaseEntities = [
   NorDocument,
   NorTenderLocationEvidence,
   LaytimeCalculation,
+  LaytimeStatement,
   CalculationPeriod,
   DisputeCaseBulk,
   Counterparty,

@@ -2,7 +2,7 @@ import { DataSource } from 'typeorm';
 import { databaseEntities } from '.';
 
 describe('database entities', () => {
-  it('registers the database-design tables plus audited NOR location evidence', async () => {
+  it('registers the database-design tables plus audited NOR location evidence and laytime statements', async () => {
     const dataSource = new DataSource({
       type: 'postgres',
       database: 'metadata-only',
@@ -34,6 +34,7 @@ describe('database entities', () => {
       'free_time_clocks',
       'knowledge_base_chunks',
       'laytime_calculations',
+      'laytime_statements',
       'nor_documents',
       'nor_tender_location_evidence',
       'organizations',
