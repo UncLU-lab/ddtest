@@ -6480,7 +6480,108 @@ describe('LaytimeCalculationsService lifecycle', () => {
     expect(parent.status).toBe('Draft');
   });
 
-  it('finalizes only the status of a draft calculation', async () => {
+  it('finalizes an authoritative reversible parent and exact same-version children without changing arithmetic or snapshots', async () => {
+    const { service, calculations, manager } = buildService();
+    const settlement = {
+      version: 1,
+      settlementStatus: 'FINAL_AUTHORITATIVE',
+      reasonCode: 'SETTLED',
+      loadingChildCalculationId: 'loading-child',
+      dischargeChildCalculationId: 'discharge-child',
+    };
+    const parent = {
+      id: 'reversible-parent',
+      voyageId: VOYAGE_ID,
+      version: 4,
+      status: 'Draft',
+      settlementAuthorityStatus: 'FINAL_AUTHORITATIVE',
+      currency: 'USD',
+      demurrageAmount: '0.00',
+      despatchAmount: '0.00',
+      parentCalculationId: null,
+      inputSnapshot: { immutable: true },
+      decisionSnapshot: { reversibleSettlement: settlement },
+    } as unknown as LaytimeCalculation;
+    const children = [
+      {
+        id: 'loading-child',
+        parentCalculationId: parent.id,
+        version: 4,
+        currency: 'USD',
+        status: 'Draft',
+        allowedLaytime: '3 days',
+        usedLaytime: '2 days',
+      },
+      {
+        id: 'discharge-child',
+        parentCalculationId: parent.id,
+        version: 4,
+        currency: 'USD',
+        status: 'Draft',
+        allowedLaytime: '3 days',
+        usedLaytime: '4 days',
+      },
+    ] as LaytimeCalculation[];
+    calculations.findOne.mockResolvedValue(parent);
+    manager.findOneOrFail.mockResolvedValue(parent);
+    manager.find.mockResolvedValue(children);
+
+    await expect(service.finalize(parent.id)).resolves.toMatchObject({
+      status: 'Final',
+      settlementAuthorityStatus: 'FINAL_AUTHORITATIVE',
+      demurrageAmount: '0.00',
+      despatchAmount: '0.00',
+      inputSnapshot: { immutable: true },
+    });
+    expect(children).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 'Final' }),
+        expect.objectContaining({ status: 'Final' }),
+      ]),
+    );
+  });
+
+  it.each([
+    ['PROVISIONAL', 'USD', '0.00', '0.00'],
+    ['NONAUTHORITATIVE', 'USD', '0.00', '0.00'],
+    ['FINAL_AUTHORITATIVE', null, '0.00', '0.00'],
+    ['FINAL_AUTHORITATIVE', 'USD', null, '0.00'],
+  ] as const)(
+    'rejects reversible finalization when authority/currency/amount is invalid',
+    async (authority, currency, demurrageAmount, despatchAmount) => {
+      const { service, calculations, manager } = buildService();
+      const parent = {
+        id: 'invalid-reversible-parent',
+        voyageId: VOYAGE_ID,
+        version: 4,
+        status: 'Draft',
+        settlementAuthorityStatus: authority,
+        currency,
+        demurrageAmount,
+        despatchAmount,
+        parentCalculationId: null,
+        decisionSnapshot: {
+          reversibleSettlement: {
+            version: 1,
+            settlementStatus: authority,
+            reasonCode:
+              authority === 'FINAL_AUTHORITATIVE'
+                ? 'SETTLED'
+                : 'DRAFT_SOF_EVIDENCE',
+            loadingChildCalculationId: 'loading-child',
+            dischargeChildCalculationId: 'discharge-child',
+          },
+        },
+      } as unknown as LaytimeCalculation;
+      calculations.findOne.mockResolvedValue(parent);
+      manager.findOneOrFail.mockResolvedValue(parent);
+
+      await expect(service.finalize(parent.id)).rejects.toThrow();
+      expect(manager.save).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a legacy draft calculation from downstream finalization', async () => {
     const { service, calculations } = buildService();
     const calculation = {
       id: 'draft-calculation',
@@ -6497,22 +6598,10 @@ describe('LaytimeCalculationsService lifecycle', () => {
     } as LaytimeCalculation;
     calculations.findOne.mockResolvedValue(calculation);
 
-    await expect(service.finalize(calculation.id)).resolves.toEqual(
-      expect.objectContaining({ status: 'Final' }),
+    await expect(service.finalize(calculation.id)).rejects.toThrow(
+      'Only a V1 authoritative calculation settlement can be finalized',
     );
-    expect(calculations.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: 'Final',
-        allowedLaytime: '2 days 00:00:00',
-        usedLaytime: '2 days 01:00:00',
-        demurrageAmount: '500.00',
-        despatchAmount: '0.00',
-        inputSnapshot: { norDocuments: [{ id: 'nor-1' }] },
-        decisionSnapshot: { commencement: { basis: 'nor_accepted' } },
-        warnings: ['snapshot warning'],
-        engineVersion: 'laytime-engine-v1',
-      }),
-    );
+    expect(calculations.save).not.toHaveBeenCalled();
   });
 
   it('rejects finalizing an already final calculation', async () => {

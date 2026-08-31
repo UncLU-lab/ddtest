@@ -14,6 +14,7 @@ import { resolveLocalDateTimeInTimeZone } from "../lib/sourceTimeZone";
 const apiMocks = vi.hoisted(() => ({
   createBulkDispute: vi.fn(),
   createLaytimeStatement: vi.fn(),
+  finalizeLaytimeCalculation: vi.fn(),
   createNorTenderLocationEvidence: vi.fn(),
   createSofDocument: vi.fn(),
   createSofEvent: vi.fn(),
@@ -194,6 +195,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   apiMocks.createBulkDispute.mockReset();
   apiMocks.createLaytimeStatement.mockReset();
+  apiMocks.finalizeLaytimeCalculation.mockReset();
   apiMocks.createNorTenderLocationEvidence.mockReset();
   apiMocks.createSofDocument.mockReset();
   apiMocks.createSofEvent.mockReset();
@@ -215,6 +217,7 @@ beforeEach(() => {
   apiMocks.getLaytimeOperationResults.mockResolvedValue([]);
   apiMocks.getLaytimeStatements.mockResolvedValue([]);
   apiMocks.createLaytimeStatement.mockResolvedValue({});
+  apiMocks.finalizeLaytimeCalculation.mockResolvedValue({});
 });
 
 describe("SOFTimeline laytime error handling", () => {
@@ -449,6 +452,40 @@ describe("SOFTimeline laytime error handling", () => {
     expect(
       screen.getByText(/Final commercial position: USD 0\.00/),
     ).toBeInTheDocument();
+  });
+
+  it("finalizes the exact authoritative calculation without recalculating or creating a statement", async () => {
+    const calculation = buildCalculation({
+      settlementAuthorityStatus: "FINAL_AUTHORITATIVE",
+      status: "Draft",
+    });
+    apiMocks.getLaytimeCalculations.mockResolvedValue({ data: [calculation] });
+    apiMocks.finalizeLaytimeCalculation.mockResolvedValue({
+      ...calculation,
+      status: "Final",
+    });
+
+    render(<SOFTimeline />);
+    expect(await screen.findByText("Calculation status")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Finalise calculation" }),
+    );
+    expect(
+      screen.getByText(/Inputs and results will not change/i),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm finalise" }));
+
+    await waitFor(() =>
+      expect(apiMocks.finalizeLaytimeCalculation).toHaveBeenCalledWith(
+        calculation.id,
+      ),
+    );
+    expect((await screen.findAllByText("Final")).length).toBeGreaterThan(0);
+    expect(
+      await screen.findByRole("button", { name: "Create Laytime Statement" }),
+    ).toBeEnabled();
+    expect(apiMocks.runLaytimeCalculation).not.toHaveBeenCalled();
+    expect(apiMocks.createLaytimeStatement).not.toHaveBeenCalled();
   });
 
   it("keeps the created latest calculation when a stale refresh response arrives", async () => {

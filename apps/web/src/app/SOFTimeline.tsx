@@ -16,6 +16,7 @@ import {
   createNorTenderLocationEvidence,
   createBulkDispute,
   createLaytimeStatement,
+  finalizeLaytimeCalculation,
   getLaytimeCalculations,
   getLaytimeStatements,
   getLaytimeOperationResults,
@@ -154,10 +155,14 @@ type ManualEventDetails = {
 };
 
 function compareLaytimeCalculations(
-  left: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id">,
-  right: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id">,
+  left: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id" | "status">,
+  right: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id" | "status">,
 ) {
   if (left.version !== right.version) return left.version - right.version;
+
+  if (left.status !== right.status) {
+    return left.status === "Final" ? 1 : -1;
+  }
 
   const calculatedAtDifference =
     new Date(left.calculatedAt).getTime() -
@@ -1735,6 +1740,14 @@ export default function SOFTimeline() {
     useState<LaytimeStatement | null>(null);
   const [statementRunning, setStatementRunning] = useState(false);
   const [statementError, setStatementError] = useState<string | null>(null);
+  const [calculationFinalizationRunning, setCalculationFinalizationRunning] =
+    useState(false);
+  const [calculationFinalizationError, setCalculationFinalizationError] =
+    useState<string | null>(null);
+  const [
+    showCalculationFinalizationConfirmation,
+    setShowCalculationFinalizationConfirmation,
+  ] = useState(false);
   const [timelineSuccess, setTimelineSuccess] = useState<string | null>(null);
   const [locationEvidence, setLocationEvidence] = useState<
     NorTenderLocationEvidence[]
@@ -2357,6 +2370,42 @@ export default function SOFTimeline() {
       );
     } finally {
       setStatementRunning(false);
+    }
+  }
+
+  const calculationFinalizationReady = Boolean(
+    laytimeCalculation?.status === "Draft" &&
+    laytimeCalculation.settlementAuthorityStatus === "FINAL_AUTHORITATIVE" &&
+    laytimeCalculation.currency,
+  );
+  const calculationFinalizationBlockReason = !laytimeCalculation
+    ? "No persisted calculation is available."
+    : laytimeCalculation.status !== "Draft"
+      ? "This calculation is already Final."
+      : laytimeCalculation.settlementAuthorityStatus !== "FINAL_AUTHORITATIVE"
+        ? "Only FINAL_AUTHORITATIVE calculations can be finalized."
+        : !laytimeCalculation.currency
+          ? "The calculation has no authoritative settlement currency."
+          : null;
+
+  async function handleFinalizeLaytimeCalculation() {
+    if (!laytimeCalculation || !calculationFinalizationReady) return;
+    setCalculationFinalizationRunning(true);
+    setCalculationFinalizationError(null);
+    try {
+      const finalized = await finalizeLaytimeCalculation(laytimeCalculation.id);
+      acceptLaytimeCalculation(finalized, finalized.warnings);
+      setShowCalculationFinalizationConfirmation(false);
+      setTimelineSuccess(
+        `Calculation V${finalized.version} finalized. It can now produce a Laytime Statement.`,
+      );
+      setRefreshKey((current) => current + 1);
+    } catch (error: any) {
+      setCalculationFinalizationError(
+        error?.message ?? "Unable to finalize the calculation.",
+      );
+    } finally {
+      setCalculationFinalizationRunning(false);
     }
   }
   const statementSnapshot = laytimeStatement?.statementSnapshot as any;
@@ -4142,6 +4191,127 @@ export default function SOFTimeline() {
                 valueColor={laytimeClaimAllowed ? "#166534" : "#92400E"}
                 bold
               />
+            )}
+            {laytimeCalculation && (
+              <CalcRow
+                label="Calculation status"
+                value={laytimeCalculation.status}
+                valueColor={
+                  laytimeCalculation.status === "Final" ? "#166534" : "#92400E"
+                }
+                bold
+              />
+            )}
+            {laytimeCalculation && laytimeCalculation.status === "Draft" && (
+              <div
+                className="mt-3 rounded-md border p-2.5"
+                style={{ borderColor: "#FCD34D", backgroundColor: "#FFFBEB" }}
+              >
+                <p
+                  style={{
+                    fontSize: "10px",
+                    fontWeight: 600,
+                    color: "#92400E",
+                  }}
+                >
+                  Calculation status: Draft
+                </p>
+                <button
+                  type="button"
+                  className="mt-2 w-full rounded-md px-2 py-1.5 text-white"
+                  style={{
+                    fontSize: "10px",
+                    backgroundColor: "#1A4ED8",
+                    opacity:
+                      calculationFinalizationReady &&
+                      !calculationFinalizationRunning
+                        ? 1
+                        : 0.45,
+                  }}
+                  disabled={
+                    !calculationFinalizationReady ||
+                    calculationFinalizationRunning
+                  }
+                  onClick={() => {
+                    setCalculationFinalizationError(null);
+                    setShowCalculationFinalizationConfirmation(true);
+                  }}
+                >
+                  {calculationFinalizationRunning
+                    ? "Finalizing..."
+                    : "Finalise calculation"}
+                </button>
+                <p
+                  className="mt-1"
+                  style={{
+                    fontSize: "10px",
+                    color: "#92400E",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {calculationFinalizationReady
+                    ? `Finalise this exact calculation V${laytimeCalculation.version}; later recalculation creates a new version.`
+                    : calculationFinalizationBlockReason}
+                </p>
+                {showCalculationFinalizationConfirmation &&
+                  calculationFinalizationReady && (
+                    <div
+                      className="mt-2 rounded-md border p-2"
+                      style={{
+                        borderColor: "#F59E0B",
+                        backgroundColor: "#FFFFFF",
+                      }}
+                    >
+                      <p
+                        style={{
+                          fontSize: "10px",
+                          color: "#7B341E",
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        Finalise calculation V{laytimeCalculation.version}?
+                        Inputs and results will not change. This historical
+                        version can then produce a Laytime Statement; no
+                        recalculation or statement creation will occur.
+                      </p>
+                      {calculationFinalizationError && (
+                        <p
+                          role="alert"
+                          className="mt-1"
+                          style={{ fontSize: "10px", color: "#991B1B" }}
+                        >
+                          {calculationFinalizationError}
+                        </p>
+                      )}
+                      <div className="flex gap-2 mt-2">
+                        <button
+                          type="button"
+                          className="rounded-md px-2 py-1 text-white"
+                          style={{
+                            fontSize: "10px",
+                            backgroundColor: "#1A4ED8",
+                          }}
+                          disabled={calculationFinalizationRunning}
+                          onClick={() =>
+                            void handleFinalizeLaytimeCalculation()
+                          }
+                        >
+                          Confirm finalise
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-md border px-2 py-1"
+                          style={{ fontSize: "10px", borderColor: "#D1D5DB" }}
+                          onClick={() =>
+                            setShowCalculationFinalizationConfirmation(false)
+                          }
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+              </div>
             )}
             <button
               type="button"

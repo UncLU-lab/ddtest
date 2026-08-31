@@ -808,28 +808,90 @@ export class LaytimeCalculationsService {
     if (existing.status === 'Final') {
       throw new ConflictException(`Laytime calculation ${id} is already final`);
     }
+    if (existing.parentCalculationId) {
+      throw new ConflictException(
+        'An operation child calculation cannot be finalized independently of its parent.',
+      );
+    }
     const existingSettlement = existing.decisionSnapshot
       ?.nonReversibleSettlement as { version?: unknown } | undefined;
     const reversibleSettlement = existing.decisionSnapshot
       ?.reversibleSettlement as ReversibleSettlementResult | undefined;
     if (existingSettlement?.version !== 1) {
       if (reversibleSettlement?.version === 1) {
-        if (!existing.currency) {
-          throw new ConflictException(
-            'CURRENCY_AUTHORITY_REQUIRED: A V1 settlement cannot be finalized without captured calculation currency.',
-          );
-        }
-        if (reversibleSettlement.settlementStatus !== 'FINAL_AUTHORITATIVE') {
-          throw new ConflictException(
-            `Reversible settlement cannot be finalized: ${reversibleSettlement.reasonCode}.`,
-          );
-        }
-        existing.status = 'Final';
-        existing.settlementAuthorityStatus = 'FINAL_AUTHORITATIVE';
-        return this.calculations.save(existing);
+        return this.databaseContext.transaction(async (manager) => {
+          const calculation = await manager.findOneOrFail(LaytimeCalculation, {
+            where: { id },
+          });
+          if (calculation.parentCalculationId) {
+            throw new ConflictException(
+              'An operation child calculation cannot be finalized independently of its parent.',
+            );
+          }
+          if (calculation.settlementAuthorityStatus !== 'FINAL_AUTHORITATIVE') {
+            throw new ConflictException(
+              `Reversible settlement cannot be finalized: ${reversibleSettlement.reasonCode}.`,
+            );
+          }
+          if (!calculation.currency) {
+            throw new ConflictException(
+              'CURRENCY_AUTHORITY_REQUIRED: A V1 settlement cannot be finalized without captured calculation currency.',
+            );
+          }
+          if (
+            calculation.demurrageAmount === null ||
+            calculation.demurrageAmount === undefined ||
+            calculation.despatchAmount === null ||
+            calculation.despatchAmount === undefined
+          ) {
+            throw new ConflictException(
+              'A V1 calculation cannot be finalized without authoritative commercial amounts.',
+            );
+          }
+
+          const children = await manager.find(LaytimeCalculation, {
+            where: { parentCalculationId: calculation.id },
+          });
+          const expectedChildIds = [
+            reversibleSettlement.loadingChildCalculationId,
+            reversibleSettlement.dischargeChildCalculationId,
+          ];
+          if (expectedChildIds.some((childId) => !childId)) {
+            throw new ConflictException(
+              'A reversible V1 calculation cannot be finalized without both operation child results.',
+            );
+          }
+          const expectedChildren = expectedChildIds.map((childId) => {
+            const child = children.find(
+              (candidate) =>
+                candidate.id === childId &&
+                candidate.parentCalculationId === calculation.id,
+            );
+            if (
+              !child ||
+              child.version !== calculation.version ||
+              child.currency !== calculation.currency ||
+              child.allowedLaytime === null ||
+              child.allowedLaytime === undefined ||
+              child.usedLaytime === null ||
+              child.usedLaytime === undefined
+            ) {
+              throw new ConflictException(
+                'Reversible operation child calculation does not belong to this parent calculation version or is incomplete.',
+              );
+            }
+            return child;
+          });
+
+          calculation.status = 'Final';
+          for (const child of expectedChildren) child.status = 'Final';
+          await manager.save(expectedChildren);
+          return manager.save(calculation);
+        });
       }
-      existing.status = 'Final';
-      return this.calculations.save(existing);
+      throw new ConflictException(
+        'Only a V1 authoritative calculation settlement can be finalized for downstream commercial use.',
+      );
     }
 
     return this.databaseContext.transaction(async (manager) => {

@@ -1438,6 +1438,17 @@ export async function runLaytimeCalculation(
   return unwrapData<LaytimeCalculationResult>(result);
 }
 
+export async function finalizeLaytimeCalculation(
+  calculationId: string,
+): Promise<LaytimeCalculation> {
+  if (!calculationId) throw new Error("Calculation ID is required.");
+  const response = await fetch(
+    `${API_BASE}/laytime-calculations/${encodeURIComponent(calculationId)}/finalize`,
+    { method: "POST" },
+  );
+  return unwrapData<LaytimeCalculation>(await parseResponse(response));
+}
+
 export async function createLaytimeStatement(
   calculationId: string,
 ): Promise<LaytimeStatement> {
