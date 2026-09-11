@@ -157,6 +157,22 @@ type ManualEventDetails = {
   notes?: string;
 };
 
+type FreePratiqueAudit = {
+  eventId?: string | null;
+  status?: string | null;
+  grantedTime?: string | null;
+  source?: string | null;
+  wifponApplied?: boolean | null;
+  warnings?: string[] | null;
+};
+
+type FreePratiqueCandidateAudit = {
+  norDocumentId?: string | null;
+  norTenderedEventId?: string | null;
+  tenderTime?: string | null;
+  freePratique?: FreePratiqueAudit | null;
+};
+
 function compareLaytimeCalculations(
   left: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id" | "status">,
   right: Pick<LaytimeCalculation, "version" | "calculatedAt" | "id" | "status">,
@@ -482,6 +498,10 @@ function getEvidenceAuditIds(calc?: LaytimeCalculation | null) {
   const snapshot = getCalculationSnapshot(calc);
   const commencement = snapshot?.commencement ?? null;
   const completion = snapshot?.cargoCompletion ?? null;
+  const selectedFreePratique = commencement?.freePratique as
+    | FreePratiqueAudit
+    | null
+    | undefined;
   const selectedIds = new Set<string>();
   const excludedIds = new Set<string>();
 
@@ -489,16 +509,120 @@ function getEvidenceAuditIds(calc?: LaytimeCalculation | null) {
     selectedIds.add(commencement.readinessEventId);
   if (commencement?.norTenderedEventId)
     selectedIds.add(commencement.norTenderedEventId);
+  if (selectedFreePratique?.eventId)
+    selectedIds.add(selectedFreePratique.eventId);
   if (completion?.selectedEventId) selectedIds.add(completion.selectedEventId);
   for (const candidate of commencement?.rejectedNorCandidates ?? []) {
     if (candidate?.norTenderedEventId)
       excludedIds.add(candidate.norTenderedEventId);
+    const freePratique = candidate?.freePratique as
+      | FreePratiqueAudit
+      | null
+      | undefined;
+    if (freePratique?.eventId) excludedIds.add(freePratique.eventId);
+  }
+  for (const candidate of commencement?.freePratiqueRejectedCandidates ?? []) {
+    const freePratique = candidate?.freePratique as
+      | FreePratiqueAudit
+      | null
+      | undefined;
+    if (freePratique?.eventId) excludedIds.add(freePratique.eventId);
   }
   for (const eventId of completion?.excludedEventIds ?? []) {
     if (eventId) excludedIds.add(eventId);
   }
 
   return { selectedIds, excludedIds, completion };
+}
+
+function getFreePratiqueAudit(calc?: LaytimeCalculation | null) {
+  const commencement = getCalculationSnapshot(calc)?.commencement ?? null;
+  const selected = commencement?.freePratique as
+    | FreePratiqueAudit
+    | null
+    | undefined;
+  const rejectedForFreePratique = Array.isArray(
+    commencement?.freePratiqueRejectedCandidates,
+  )
+    ? (commencement.freePratiqueRejectedCandidates as unknown as FreePratiqueCandidateAudit[])
+    : [];
+  const rejectedForOtherReasons = Array.isArray(
+    commencement?.rejectedNorCandidates,
+  )
+    ? (commencement.rejectedNorCandidates as unknown as FreePratiqueCandidateAudit[]).filter(
+        (candidate) => candidate.freePratique?.eventId,
+      )
+    : [];
+
+  return {
+    available: Boolean(selected),
+    selected: selected ?? null,
+    rejectedCandidates: [
+      ...rejectedForFreePratique,
+      ...rejectedForOtherReasons,
+    ],
+  };
+}
+
+function formatFreePratiqueStatus(value?: string | null) {
+  switch (value) {
+    case "granted-before-nor":
+      return "Granted before NOR";
+    case "granted-after-nor":
+      return "Granted after NOR";
+    case "waived-by-wifpon":
+      return "WIFPON waiver applied";
+    case "unavailable":
+      return "Unavailable";
+    default:
+      return value ? humanizeLabel(value) : "Not available";
+  }
+}
+
+function getPersistedTimeSummary(calc?: LaytimeCalculation | null) {
+  const snapshot = getCalculationSnapshot(calc);
+  const reversibleSettlement = snapshot?.reversibleSettlement ?? null;
+
+  if (reversibleSettlement) {
+    if (reversibleSettlement.settlementStatus !== "FINAL_AUTHORITATIVE") {
+      return {
+        excess: "Not authoritative — see operation results",
+        saved: "Not authoritative — see operation results",
+      };
+    }
+
+    return {
+      excess: formatSecondsAsInterval(
+        reversibleSettlement.combinedOverrunSeconds,
+      ),
+      saved: formatSecondsAsInterval(
+        reversibleSettlement.combinedSavedSeconds,
+      ),
+    };
+  }
+
+  const settlement = snapshot?.nonReversibleSettlement ?? null;
+  const expectedOperations = Array.isArray(settlement?.expectedOperations)
+    ? settlement.expectedOperations
+    : [];
+
+  if (expectedOperations.length !== 1) {
+    return {
+      excess: calc ? "Not applicable" : "—",
+      saved: calc ? "Not applicable" : "—",
+    };
+  }
+
+  const operation = expectedOperations[0];
+  if (operation !== "Loading" && operation !== "Discharge") {
+    return { excess: "—", saved: "—" };
+  }
+
+  const operationSummary = settlement?.operations?.[operation] ?? null;
+  return {
+    excess: formatSecondsAsInterval(operationSummary?.excessSeconds),
+    saved: formatSecondsAsInterval(operationSummary?.savedSeconds),
+  };
 }
 
 function getSingleOperationSummary(calc?: LaytimeCalculation | null): {
@@ -932,56 +1056,37 @@ function formatOperationLabel(value?: string | null) {
   return value;
 }
 
-function sofErrorMessage(error: any, fallback: string) {
-  if (error?.status === 400)
-    return "Check the event time, event type, and operation, then try again.";
-  if (error?.status === 404)
-    return "The SOF record could not be found. Refresh the timeline and try again.";
-  return error?.message || fallback;
-}
-
-function normalizeEngineEventType(value: string) {
-  const trimmed = value.trim();
-
-  if (!trimmed) {
-    return trimmed;
+function sofErrorMessage(
+  error: any,
+  fallback: string,
+  context: "load" | "save" = "save",
+) {
+  if (error?.status === 400) {
+    return context === "load"
+      ? "The SOF timeline request was not accepted. Refresh the timeline and try again."
+      : "Check the event time, event type, and operation, then try again.";
+  }
+  if (error?.status === 404) {
+    return context === "load"
+      ? "The SOF record could not be found. Refresh the timeline and try again."
+      : "The SOF record could not be found. Refresh and try again.";
+  }
+  if (error?.status === 409) {
+    return "This SOF document cannot be changed in its current state. Refresh or select a Draft document.";
   }
 
-  const normalized = trimmed
-    .replace(/[_-]+/g, " ")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+  const message =
+    typeof error?.message === "string" ? error.message.replace(/\s+/g, " ").trim() : "";
+  const safeMessage =
+    message &&
+    message.length <= 180 &&
+    !/(stack|trace|typeorm|sql|query failed|validationerror|\bdto\b|cannot read properties|\bat\s+\w+\.)/i.test(
+      message,
+    )
+      ? message
+      : null;
 
-  const aliases: Record<string, string> = {
-    "nor tendered": "NOR_TENDERED",
-    "vessel ready in all respects": "VESSEL_READY_IN_ALL_RESPECTS",
-    "free pratique granted": "FREE_PRATIQUE_GRANTED",
-    "free pratique": "FREE_PRATIQUE_GRANTED",
-    "cargo started": "CARGO_STARTED",
-    "cargo completed": "CARGO_COMPLETED",
-    "loading completed": "LOADING_COMPLETED",
-    "discharge completed": "DISCHARGE_COMPLETED",
-    "completion of cargo": "COMPLETION_OF_CARGO",
-    "hatches closed": "HATCHES_CLOSED",
-    "hatch closed": "HATCHES_CLOSED",
-    "hatches secured": "CARGO_SECURED",
-    "cargo secured": "CARGO_SECURED",
-    "hoses disconnected": "HOSES_DISCONNECTED",
-    "rain stoppage": "RAIN_STOPPAGE",
-    "rain commenced": "RAIN_COMMENCED",
-    "rain stopped": "RAIN_STOPPED",
-    "weather stoppage": "WEATHER_STOPPAGE",
-    "weather cleared": "WEATHER_CLEARED",
-    breakdown: "BREAKDOWN",
-    "breakdown repaired": "BREAKDOWN_REPAIRED",
-    "stoppage start": "STOPPAGE_START",
-    "stoppage end": "STOPPAGE_END",
-    "work stopped": "WORK_STOPPED",
-    "work resumed": "WORK_RESUMED",
-  };
-
-  return aliases[normalized] ?? trimmed;
+  return safeMessage ?? fallback;
 }
 
 function formatDurationValue(value?: string | null) {
@@ -1075,7 +1180,9 @@ const ENGINE_EVENT_PRESETS = [
   { value: "STOPPAGE_START", label: "Stoppage started" },
   { value: "STOPPAGE_END", label: "Stoppage ended" },
   { value: "RAIN_STOPPAGE", label: "Rain stoppage" },
+  { value: "RAIN_COMMENCED", label: "Rain commenced" },
   { value: "RAIN_STOPPED", label: "Rain stopped" },
+  { value: "WEATHER_STOPPAGE", label: "Weather stoppage" },
   { value: "WEATHER_CLEARED", label: "Weather cleared" },
 ] as const;
 
@@ -1965,6 +2072,7 @@ export default function SOFTimeline() {
           sofErrorMessage(
             error,
             "Unable to load the Statement of Facts timeline.",
+            "load",
           ),
         );
       } finally {
@@ -2412,6 +2520,8 @@ export default function SOFTimeline() {
   ].filter(Boolean) as string[];
 
   const calculationSnapshot = getCalculationSnapshot(laytimeCalculation);
+  const freePratiqueAudit = getFreePratiqueAudit(laytimeCalculation);
+  const persistedTimeSummary = getPersistedTimeSummary(laytimeCalculation);
   const locationQualification =
     (calculationSnapshot?.commencement as any)?.location ?? null;
   const wibonDecision = (calculationSnapshot as any)?.wibon ?? null;
@@ -4097,7 +4207,54 @@ export default function SOFTimeline() {
                   </tr>
                 </thead>
                 <tbody>
-                  {displayEvents.length === 0 ? (
+                  {timelineLoading ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-10 text-center">
+                        <p
+                          style={{
+                            fontSize: "13px",
+                            color: "#374151",
+                            fontWeight: 500,
+                          }}
+                        >
+                          Loading SOF events...
+                        </p>
+                        <p
+                          style={{
+                            fontSize: "11px",
+                            color: "#6B7280",
+                            marginTop: "4px",
+                          }}
+                        >
+                          Fetching the persisted Statement of Facts timeline.
+                        </p>
+                      </td>
+                    </tr>
+                  ) : timelineError ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-10 text-center">
+                        <p
+                          role="alert"
+                          style={{
+                            fontSize: "13px",
+                            color: "#991B1B",
+                            fontWeight: 500,
+                          }}
+                        >
+                          Unable to load the SOF timeline.
+                        </p>
+                        <p
+                          style={{
+                            fontSize: "11px",
+                            color: "#7F1D1D",
+                            marginTop: "4px",
+                          }}
+                        >
+                          {timelineError}
+                        </p>
+                      </td>
+                    </tr>
+                  ) : displayEvents.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="px-4 py-10 text-center">
                         <p
@@ -4482,6 +4639,16 @@ export default function SOFTimeline() {
               bold
             />
             <CalcRow
+              label="Excess time"
+              value={persistedTimeSummary.excess}
+              valueColor="#B45309"
+            />
+            <CalcRow
+              label="Time saved"
+              value={persistedTimeSummary.saved}
+              valueColor="#22543D"
+            />
+            <CalcRow
               label="Net position"
               value={netPositionValue}
               valueColor="#B45309"
@@ -4719,6 +4886,123 @@ export default function SOFTimeline() {
 
             {/* Receiver clock */}
           </div>
+
+          {freePratiqueAudit.available && (
+            <div
+              className="rounded-xl border p-[14px_16px]"
+              style={{
+                borderColor: "#E5E7EB",
+                borderWidth: "0.5px",
+                backgroundColor: "#ffffff",
+              }}
+            >
+              <p
+                className="mb-3"
+                style={{
+                  fontSize: "10px",
+                  color: "#6B7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                Free-pratique evidence
+              </p>
+              <CalcRow
+                label="Selected evidence"
+                value={
+                  freePratiqueAudit.selected?.eventId
+                    ? `Free pratique granted · ${formatDateTime(
+                        freePratiqueAudit.selected.grantedTime,
+                      )}`
+                    : "No grant evidence selected"
+                }
+                valueColor={
+                  freePratiqueAudit.selected?.eventId ? "#22543D" : "#6B7280"
+                }
+                bold
+              />
+              <CalcRow
+                label="Backend status"
+                value={formatFreePratiqueStatus(
+                  freePratiqueAudit.selected?.status,
+                )}
+              />
+              <CalcRow
+                label="Evidence source"
+                value={freePratiqueAudit.selected?.source ?? "Not available"}
+              />
+              <CalcRow
+                label="Rejected / non-selected NOR candidates"
+                value={String(freePratiqueAudit.rejectedCandidates.length)}
+                valueColor={
+                  freePratiqueAudit.rejectedCandidates.length > 0
+                    ? "#9A3412"
+                    : "#374151"
+                }
+              />
+              {freePratiqueAudit.rejectedCandidates.slice(0, 5).map(
+                (candidate, index) => (
+                  <p
+                    key={`${candidate.norDocumentId ?? candidate.norTenderedEventId ?? "candidate"}-${candidate.freePratique?.eventId ?? "none"}-${index}`}
+                    style={{
+                      fontSize: "10px",
+                      color: "#6B7280",
+                      lineHeight: 1.4,
+                      marginTop: "5px",
+                    }}
+                  >
+                    {candidate.norDocumentId ??
+                      candidate.norTenderedEventId ??
+                      "NOR candidate"}
+                    {" · "}
+                    {candidate.freePratique?.eventId
+                      ? `Free-pratique evidence ${formatFreePratiqueStatus(
+                          candidate.freePratique.status,
+                        )}`
+                      : "No free-pratique grant evidence selected"}
+                  </p>
+                ),
+              )}
+              {freePratiqueAudit.rejectedCandidates.length > 5 && (
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#6B7280",
+                    lineHeight: 1.4,
+                    marginTop: "5px",
+                  }}
+                >
+                  Additional non-selected candidates are retained in the
+                  persisted calculation audit.
+                </p>
+              )}
+              {freePratiqueAudit.selected?.wifponApplied && (
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#7B341E",
+                    lineHeight: 1.4,
+                    marginTop: "8px",
+                  }}
+                >
+                  WIFPON waiver was recorded by the backend; this does not mean
+                  a free-pratique grant event was present.
+                </p>
+              )}
+              {freePratiqueAudit.selected?.warnings?.[0] && (
+                <p
+                  style={{
+                    fontSize: "10px",
+                    color: "#7B341E",
+                    lineHeight: 1.4,
+                    marginTop: "8px",
+                  }}
+                >
+                  {freePratiqueAudit.selected.warnings[0]}
+                </p>
+              )}
+            </div>
+          )}
 
           {operationResultsSectionVisible && (
             <div
