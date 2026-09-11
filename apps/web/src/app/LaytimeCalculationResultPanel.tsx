@@ -11,6 +11,7 @@ import {
 import { formatCurrencyAmount } from "../lib/currency";
 import { CalculationExplanation } from "./CalculationExplanation";
 import { PersistedLaytimeTimeline } from "./LaytimeTimeline";
+import { WhatIfAnalysisPanel } from "./WhatIfAnalysisPanel";
 
 type ResultCalculation = LaytimeCalculation | LaytimeOperationResult;
 
@@ -656,6 +657,7 @@ export function LaytimeCalculationResultPanel({ calculation }: Props) {
         ? <NonReversibleSummary calculation={calculation} audit={audits[calculation.id]} />
         : <ResultCard calculation={calculation} audit={audits[calculation.id]} parent />}
       {!isNonReversibleSummary && <ReversibleSummary calculation={calculation} audit={audits[calculation.id]} />}
+      <WhatIfAnalysisPanel calculation={calculation} audit={audits[calculation.id]} />
       {loading && <p style={{ fontSize: "12px", color: "#6B7280" }}>Loading persisted operation results and audit details...</p>}
       {error && <p className="rounded-lg border px-3 py-2" style={{ fontSize: "12px", color: "#92400E", borderColor: "#FCD34D", backgroundColor: "#FFFBEB" }}>{error}</p>}
       {children.map((child) => <ResultCard key={child.id} calculation={child} audit={audits[child.id]} referenceOnly={decisionSnapshot(calculation)?.reversibleSettlement?.settlementStatus === "FINAL_AUTHORITATIVE"} authorityStatus={isNonReversibleSummary ? (child.settlementAuthorityStatus ?? "PROVISIONAL") : undefined} />)}
