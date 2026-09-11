@@ -136,6 +136,22 @@ function buildAudit(overrides: Record<string, unknown> = {}) {
   } as unknown as LaytimeCalculationAudit;
 }
 
+function buildReferenceSnapshot(status?: string): Record<string, any> {
+  const base = baseSnapshot();
+  return {
+    ...base,
+    commencement: null,
+    cargoCompletion: null,
+    periods: [],
+    referencePrimaryOperation: {
+      commencement: base.commencement,
+      cargoCompletion: base.cargoCompletion,
+      periods: base.periods,
+    },
+    reversibleSettlement: status ? { settlementStatus: status } : {},
+  };
+}
+
 function openExplanation() {
   fireEvent.click(screen.getByText("Calculation explanation"));
 }
@@ -180,17 +196,12 @@ describe("CalculationExplanation", () => {
   });
 
   it("explains a reversible result that is not authoritative", () => {
-    const snapshot = baseSnapshot();
+    const snapshot = buildReferenceSnapshot("NONAUTHORITATIVE");
+    snapshot.reversibleSettlement.reason = "The reversible settlement contract is invalid.";
     render(
       <CalculationExplanation
         calculation={buildCalculation({
-          decisionSnapshot: {
-            ...snapshot,
-            reversibleSettlement: {
-              settlementStatus: "NONAUTHORITATIVE",
-              reason: "The reversible settlement contract is invalid.",
-            },
-          },
+          decisionSnapshot: snapshot,
           settlementAuthorityStatus: "NONAUTHORITATIVE",
         })}
       />,
@@ -199,7 +210,36 @@ describe("CalculationExplanation", () => {
 
     expect(screen.getAllByText("NON-AUTHORITATIVE").length).toBeGreaterThan(0);
     expect(screen.getByText(/The reversible settlement contract is invalid\./)).toBeInTheDocument();
+    expect(screen.getByText(/pooled reversible settlement is non-authoritative for this calculation/i)).toBeInTheDocument();
     expect(screen.getByText("Commercial result")).toBeInTheDocument();
+  });
+
+  it("describes an authoritative pooled reversible settlement as the commercial authority", () => {
+    render(
+      <CalculationExplanation
+        calculation={buildCalculation({
+          decisionSnapshot: buildReferenceSnapshot("FINAL_AUTHORITATIVE"),
+          settlementAuthorityStatus: "FINAL_AUTHORITATIVE",
+        })}
+      />,
+    );
+    openExplanation();
+
+    expect(screen.getByText(/pooled reversible settlement is the commercial authority/i)).toBeInTheDocument();
+    expect(screen.getByText(/Loading and Discharge results are supporting evidence/i)).toBeInTheDocument();
+  });
+
+  it("uses neutral wording when pooled reversible authority is missing or legacy", () => {
+    render(
+      <CalculationExplanation
+        calculation={buildCalculation({
+          decisionSnapshot: buildReferenceSnapshot(),
+        })}
+      />,
+    );
+    openExplanation();
+
+    expect(screen.getByText(/pooled reversible settlement authority is not available in this calculation version/i)).toBeInTheDocument();
   });
 
   it("keeps provisional authority visible and safely handles missing legacy audit data", () => {
@@ -237,6 +277,19 @@ describe("CalculationExplanation", () => {
     openExplanation();
 
     expect(screen.getAllByText("Legacy Pause").length).toBeGreaterThan(0);
+  });
+
+  it("labels selected NOR location status separately from candidate-evaluation warnings", () => {
+    const snapshot = baseSnapshot();
+    snapshot.commencement.validityWarnings = [
+      "NOR location qualification is unavailable because no eligible candidate-associated location evidence exists.",
+    ];
+    render(<CalculationExplanation calculation={buildCalculation({ decisionSnapshot: snapshot })} />);
+    openExplanation();
+
+    expect(screen.getByText("Selected NOR candidate location qualification")).toBeInTheDocument();
+    expect(screen.getByText(/The status above belongs to the selected NOR candidate/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/NOR location qualification is unavailable/i).length).toBeGreaterThan(0);
   });
 
   it("deduplicates repeated persisted warnings while retaining their grouped presentation", () => {

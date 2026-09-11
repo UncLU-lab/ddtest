@@ -201,6 +201,29 @@ function getAuthorityStatus(
     : "PROVISIONAL";
 }
 
+function pooledAuthorityExplanation(
+  calculation: ResultCalculation,
+  snapshot: PersistedRecord | null,
+  authorityStatusOverride?: ReversibleSettlementStatus,
+) {
+  const status =
+    snapshot?.reversibleSettlement?.settlementStatus ??
+    calculation.settlementAuthorityStatus ??
+    authorityStatusOverride;
+
+  switch (status) {
+    case "FINAL_AUTHORITATIVE":
+      return "The pooled reversible settlement is the commercial authority for this calculation; Loading and Discharge results are supporting evidence.";
+    case "NONAUTHORITATIVE":
+      return "The pooled reversible settlement is non-authoritative for this calculation; Loading and Discharge results remain supporting evidence.";
+    case "PROVISIONAL":
+      return "The pooled reversible settlement is provisional for this calculation and is not a final commercial authority.";
+    case "LEGACY":
+    default:
+      return "The pooled reversible settlement authority is not available in this calculation version.";
+  }
+}
+
 function valueLabel(value: unknown) {
   if (typeof value === "boolean") return formatBoolean(value);
   return textValue(value);
@@ -427,7 +450,6 @@ function CommencementSection({
         input?.operationSelection?.voyageLaytimeOperation ??
         input?.operationResult?.operation
       } />
-      <BulletList values={uniqueStrings(commencement.validityWarnings ?? [])} label="Persisted commencement warnings" />
     </ExplanationSection>
   );
 }
@@ -445,12 +467,19 @@ function NorReadinessSection({
   const rejectedNorCandidates = asRecords(commencement.rejectedNorCandidates);
   const locationRejectedCandidates = asRecords(commencement.locationRejectedCandidates);
   const location = commencement.location;
+  const commencementWarnings = uniqueStrings(commencement.validityWarnings ?? []);
+  const hasCandidateEvaluationContext =
+    rejectedNorCandidates.length > 0 || locationRejectedCandidates.length > 0;
+  const hasLocationWarning = commencementWarnings.some((warning) =>
+    /NOR location qualification/i.test(warning),
+  );
   const hasDetails =
     hasValue(commencement.norDocumentId) ||
     hasValue(commencement.norTenderedEventId) ||
     hasValue(commencement.readinessEventId) ||
     rejectedNorCandidates.length > 0 ||
     locationRejectedCandidates.length > 0 ||
+    commencementWarnings.length > 0 ||
     (location && typeof location === "object");
   if (!hasDetails) return null;
   return (
@@ -474,13 +503,18 @@ function NorReadinessSection({
       )}
       {location && typeof location === "object" && (
         <div className="mt-2 rounded-lg border px-3 py-2" style={{ borderColor: "#E5E7EB", backgroundColor: "#F9FAFB" }}>
-          <p style={{ fontSize: "11px", color: "#374151", fontWeight: 600 }}>NOR location qualification</p>
+          <p style={{ fontSize: "11px", color: "#374151", fontWeight: 600 }}>Selected NOR candidate location qualification</p>
           <ValueRow label="Overall status" value={humanize(location.overallStatus)} />
           <ValueRow label="Association basis" value={humanize(location.associationBasis)} />
           <ValueRow label="Berth qualification" value={location.berth?.reason ?? location.berth?.status} />
           <ValueRow label="Port qualification" value={location.port?.reason ?? location.port?.status} />
           <ValueRow label="Selected location evidence" value={location.selectedEvidence?.id ?? location.selectedEvidence?.source} />
           <ValueRow label="Location evidence time" value={formatDateTime(location.selectedEvidence?.evidenceTime)} />
+          {hasLocationWarning && hasCandidateEvaluationContext && (
+            <Notice>
+              The status above belongs to the selected NOR candidate. Persisted location warnings may refer to rejected or non-selected NOR candidates evaluated for this calculation.
+            </Notice>
+          )}
         </div>
       )}
       {rejectedNorCandidates.length > 0 && (
@@ -509,6 +543,10 @@ function NorReadinessSection({
           ))}
         </div>
       )}
+      <BulletList
+        values={commencementWarnings}
+        label={hasCandidateEvaluationContext ? "Persisted candidate-evaluation warnings" : "Persisted commencement warnings"}
+      />
     </ExplanationSection>
   );
 }
@@ -815,7 +853,7 @@ export function CalculationExplanation({
         </p>
         {usesPrimaryReference && (
           <Notice>
-            Commencement, completion, and period detail below come from the persisted primary-operation reference evidence. The pooled reversible settlement remains the commercial authority.
+            Commencement, completion, and period detail below come from the persisted primary-operation reference evidence. {pooledAuthorityExplanation(calculation, rawSnapshot, authorityStatus)}
           </Notice>
         )}
         {!hasAudit && (
