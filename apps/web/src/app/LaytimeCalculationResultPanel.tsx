@@ -9,6 +9,7 @@ import {
   type ReversibleSettlementStatus,
 } from "../lib/api";
 import { formatCurrencyAmount } from "../lib/currency";
+import { CalculationExplanation } from "./CalculationExplanation";
 import { PersistedLaytimeTimeline } from "./LaytimeTimeline";
 
 type ResultCalculation = LaytimeCalculation | LaytimeOperationResult;
@@ -205,20 +206,6 @@ function EvidenceNote({ children }: { children: ReactNode }) {
     <p className="mt-2 rounded-lg border px-3 py-2" style={{ fontSize: "11px", lineHeight: 1.45, borderColor: "#E5E7EB", backgroundColor: "#F9FAFB", color: "#475569" }}>
       {children}
     </p>
-  );
-}
-
-function WarningList({ warnings }: { warnings: string[] }) {
-  if (warnings.length === 0) return null;
-  return (
-    <section className="rounded-xl border p-4" style={{ borderColor: "#FCD34D", backgroundColor: "#FFFBEB" }}>
-      <p style={{ fontSize: "11px", color: "#92400E", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>
-        Calculation warnings
-      </p>
-      <ul className="mt-2 space-y-1" style={{ fontSize: "12px", color: "#78350F" }}>
-        {warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}
-      </ul>
-    </section>
   );
 }
 
@@ -483,10 +470,6 @@ function ResultCard({
       : savedSeconds !== null && savedSeconds > 0
         ? `Saved ${formatSeconds(savedSeconds)}`
         : "Balanced";
-  const warnings = Array.from(new Set([
-    ...(calculation.warnings ?? []),
-    ...(audit?.warnings ?? []),
-  ].filter((warning): warning is string => typeof warning === "string" && warning.trim())));
   const persistedAuthority = authorityStatus ?? calculation.settlementAuthorityStatus ?? (parent && reversibleEnabled ? settlementStatus : null);
   const statusLabel = referenceOnly
     ? "Reference only · parent settlement authoritative"
@@ -550,12 +533,17 @@ function ResultCard({
         referenceOnly={referenceOnly}
         authorityStatus={authorityStatus}
       />
+      <CalculationExplanation
+        calculation={calculation}
+        audit={audit}
+        referenceOnly={referenceOnly}
+        authorityStatus={authorityStatus}
+      />
       <DecisionEvidence calculation={calculation} audit={audit} />
       <PeriodTable calculation={calculation} audit={audit} />
       <WeatherExplanation calculation={calculation} audit={audit} />
       <ShexExplanation calculation={calculation} audit={audit} />
       <AtutcExplanation calculation={calculation} audit={audit} />
-      <WarningList warnings={warnings} />
     </>
   );
 }
@@ -599,10 +587,6 @@ function NonReversibleSummary({ calculation, audit }: { calculation: ResultCalcu
             ? "Operation amounts cannot be aggregated because calculation currencies do not match. No FX conversion is applied."
           : "Operation amounts are shown separately. Voyage monetary totals require an authoritative calculation currency."}
       </EvidenceNote>
-      <WarningList warnings={Array.from(new Set([
-        ...(calculation.warnings ?? []),
-        ...(audit?.warnings ?? []),
-      ].filter((warning): warning is string => typeof warning === "string" && warning.trim())))} />
     </section>
   );
 }
