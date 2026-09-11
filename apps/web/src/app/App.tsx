@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Routes, Route, useNavigate, useParams } from "react-router";
+import { BrowserRouter, Navigate, Routes, Route, useLocation, useNavigate, useParams } from "react-router";
 import { ShipmentsProvider } from "./data/ShipmentsContext";
 
 import Layout from "./Layout";
@@ -7,6 +7,7 @@ import ShipmentDetail from "./ShipmentDetail";
 import SOFTimeline from "./SOFTimeline";
 import ClaimsList from "./ClaimsList";
 import ClaimsAuditConsole from "./ClaimsAuditConsole";
+import ClaimCreatePanel from "./ClaimCreatePanel";
 import CommercialIntelligence from "./CommercialIntelligence";
 import TerminalAnalytics from "./TerminalAnalytics";
 import CargoRiskMonitor, { VesselCreateForm, VesselDetail } from "./CargoRiskMonitor";
@@ -24,7 +25,28 @@ import AuthGate from "./AuthGate";
 
 function ClaimsListRoute() {
   const navigate = useNavigate();
-  return <ClaimsList onOpenClaim={(claimId) => navigate(`/claims/${claimId}`)} />;
+  return (
+    <ClaimsList
+      onOpenClaim={(claimId) => navigate(`/claims/${claimId}`)}
+      onNewClaim={() => navigate("/claims/new")}
+    />
+  );
+}
+
+function ClaimCreateRoute() {
+  const navigate = useNavigate();
+  const search = new URLSearchParams(useLocation().search);
+  const initialVoyageId = search.get("voyageId") ?? undefined;
+
+  return (
+    <div style={{ padding: "24px", backgroundColor: "#F9FAFB", minHeight: "100%" }}>
+      <ClaimCreatePanel
+        initialVoyageId={initialVoyageId}
+        onCancel={() => navigate("/claims")}
+        onCreated={(claim) => navigate(`/claims/${claim.id}`)}
+      />
+    </div>
+  );
 }
 
 function ClaimDetailRoute() {
@@ -102,9 +124,9 @@ export default function App() {
                 <Route path="/shipments/:id/sof" element={<SOFTimeline />} />
 
                 <Route path="/claims" element={<ClaimsListRoute />} />
+                <Route path="/claims/new" element={<ClaimCreateRoute />} />
                 <Route path="/claims/:claimId" element={<ClaimDetailRoute />} />
                 <Route path="/claims/audit" element={<ClaimsAuditRoute />} />
-                <Route path="/claims/new" element={<RedirectRoute to="/claims" />} />
 
                 <Route path="/analytics" element={<CommercialIntelligenceRoute />} />
                 <Route path="/analytics/terminal" element={<TerminalAnalyticsRoute />} />

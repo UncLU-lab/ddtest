@@ -9,6 +9,7 @@ import {
 import { PageHeader } from "./Layout";
 import { CharterPartyTermsPanel } from "./CharterPartyTermsPanel";
 import { LaytimeCalculationResultPanel } from "./LaytimeCalculationResultPanel";
+import ShipmentClaimsPanel from "./ShipmentClaimsPanel";
 import { RISK_LABEL, RISK_BADGE } from "./data/shipments";
 import { useShipments } from "./data/ShipmentsContext";
 import {
@@ -1264,8 +1265,8 @@ export default function ShipmentDetail() {
     });
   }
 
-  const onOpenClaim = () => {
-    navigate("/claims/new");
+  const onOpenClaim = (claimId?: string) => {
+    navigate(claimId ? `/claims/${claimId}` : `/claims/new?voyageId=${encodeURIComponent(shipment.id)}`);
   };
 
   const onLaytimeCalc = () => {
@@ -1833,6 +1834,9 @@ export default function ShipmentDetail() {
           Main body
       ───────────────────────────────────────────────────────────────────── */}
 
+      {activeTab === "claims" ? (
+        <ShipmentClaimsPanel voyageId={shipment.id} onOpenClaim={(claimId) => onOpenClaim(claimId)} />
+      ) : (
       <div
         className="flex gap-3.5 flex-1"
         style={{
@@ -2601,6 +2605,7 @@ export default function ShipmentDetail() {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

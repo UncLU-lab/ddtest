@@ -19,6 +19,7 @@ type ClaimViewModel = {
   type: string;
   amountDisputed: string;
   amountDisputedValue: number | null;
+  settlementAmount: string;
   statusLabel: string;
   statusVariant: ClaimStatusVariant;
   createdAtValue: string | null;
@@ -48,19 +49,23 @@ function parseAmount(value: unknown): number | null {
   return null;
 }
 
-function formatMoney(value: unknown): string {
+function formatMoney(value: unknown, currency?: string | null): string {
   const parsed = parseAmount(value);
 
-  if (parsed === null) {
+  if (parsed === null || !currency) {
     return "Not available";
   }
 
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(parsed);
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(parsed);
+  } catch {
+    return `${currency} ${parsed.toFixed(2)}`;
+  }
 }
 
 function formatDate(value: unknown): { label: string; raw: string | null } {
@@ -120,10 +125,15 @@ function toClaimViewModel(dispute: BulkDispute): ClaimViewModel {
   return {
     id: dispute.id?.trim() || "Not available",
     voyageId: dispute.voyageId?.trim() || "Not available",
-    type: String(dispute.type?.trim?.() || dispute.type || "Not available"),
+    type: dispute.type === "demurrage_counter"
+      ? "Demurrage counterclaim"
+      : dispute.type === "despatch_claim"
+        ? "Despatch claim"
+        : String(dispute.type?.trim?.() || dispute.type || "Not available"),
     amountDisputed:
-      amountDisputedValue === null ? "Not available" : formatMoney(amountDisputedValue),
+      amountDisputedValue === null ? "Not available" : formatMoney(amountDisputedValue, dispute.currency),
     amountDisputedValue,
+    settlementAmount: formatMoney(dispute.finalSettlementAmount, dispute.currency),
     statusLabel: getStatusLabel(dispute.status),
     statusVariant: normalizeStatusVariant(dispute.status),
     createdAtValue: createdDate.raw,
@@ -282,7 +292,7 @@ export default function ClaimsList({
   onNewClaim?: () => void;
 }) {
   const [statusFilter, setStatusFilter] = useState("All statuses");
-  const [counterpartyFilter, setCounterpartyFilter] = useState("All counterparties");
+  const [typeFilter, setTypeFilter] = useState("All claim types");
   const [claims, setClaims] = useState<BulkDispute[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -321,11 +331,6 @@ export default function ClaimsList({
 
   const claimRows = useMemo(() => claims.map(toClaimViewModel), [claims]);
   const pipeline = useMemo(() => groupClaimsByStatus(claimRows), [claimRows]);
-  const totalDisputedValue = useMemo(
-    () =>
-      claimRows.reduce((sum, row) => sum + (row.amountDisputedValue ?? 0), 0),
-    [claimRows]
-  );
   const uniqueStatuses = useMemo(
     () => Array.from(new Set(claimRows.map((row) => row.statusLabel))).filter(Boolean),
     [claimRows]
@@ -353,15 +358,17 @@ export default function ClaimsList({
     () => ["All statuses", ...uniqueStatuses],
     [uniqueStatuses]
   );
-  const counterpartyOptions = ["All counterparties", "Not available"];
+  const typeOptions = useMemo(
+    () => ["All claim types", ...Array.from(new Set(claimRows.map((row) => row.type)))],
+    [claimRows]
+  );
 
   const filteredRows = claimRows.filter((row) => {
     const statusMatch =
       statusFilter === "All statuses" || row.statusLabel === statusFilter;
-    const counterpartyMatch =
-      counterpartyFilter === "All counterparties" || counterpartyFilter === "Not available";
+    const typeMatch = typeFilter === "All claim types" || row.type === typeFilter;
 
-    return statusMatch && counterpartyMatch;
+    return statusMatch && typeMatch;
   });
 
   const loadedClaimsCount = claimRows.length;
@@ -422,10 +429,10 @@ export default function ClaimsList({
             sub: "Persisted bulk-disputes from the API",
           },
           {
-            label: "Total disputed value",
-            value: formatMoney(totalDisputedValue),
+            label: "Currencies present",
+            value: String(new Set(claims.map((claim) => claim.currency).filter(Boolean)).size),
             vc: "#C53030",
-            sub: "Sum of loaded amountDisputed values",
+            sub: "No cross-currency totals are calculated",
           },
           {
             label: "Unique statuses",
@@ -524,11 +531,7 @@ export default function ClaimsList({
           </span>
           <div className="flex items-center gap-2">
             <FilterSelect value={statusFilter} onChange={setStatusFilter} options={statusOptions} />
-            <FilterSelect
-              value={counterpartyFilter}
-              onChange={setCounterpartyFilter}
-              options={counterpartyOptions}
-            />
+            <FilterSelect value={typeFilter} onChange={setTypeFilter} options={typeOptions} />
           </div>
         </div>
 
@@ -546,6 +549,7 @@ export default function ClaimsList({
                   { label: "Amount disputed", w: "140px" },
                   { label: "Status", w: "140px" },
                   { label: "Created date", w: "140px" },
+                  { label: "Settlement", w: "140px" },
                 ].map(({ label, w }) => (
                   <th key={label} className="py-2.5 px-3 text-left" style={{ width: w }}>
                     <span
@@ -565,21 +569,21 @@ export default function ClaimsList({
             <tbody>
               {isLoading && (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center" style={{ fontSize: "12px", color: "#9CA3AF" }}>
+                  <td colSpan={7} className="py-8 text-center" style={{ fontSize: "12px", color: "#9CA3AF" }}>
                     Loading persisted claims...
                   </td>
                 </tr>
               )}
               {!isLoading && loadError && claimRows.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center" style={{ fontSize: "12px", color: "#9CA3AF" }}>
+                  <td colSpan={7} className="py-8 text-center" style={{ fontSize: "12px", color: "#9CA3AF" }}>
                     {loadError}
                   </td>
                 </tr>
               )}
               {!isLoading && !loadError && filteredRows.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center" style={{ fontSize: "12px", color: "#9CA3AF" }}>
+                  <td colSpan={7} className="py-8 text-center" style={{ fontSize: "12px", color: "#9CA3AF" }}>
                     No claims match the selected filters.
                   </td>
                 </tr>
@@ -619,6 +623,9 @@ export default function ClaimsList({
                     </td>
                     <td className="py-3 px-3">
                       <span style={{ fontSize: "12px", color: "#374151" }}>{row.createdDate}</span>
+                    </td>
+                    <td className="py-3 px-3">
+                      <span style={{ fontSize: "12px", color: "#374151" }}>{row.settlementAmount}</span>
                     </td>
                   </tr>
                 ))}

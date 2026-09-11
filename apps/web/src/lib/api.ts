@@ -665,6 +665,8 @@ export interface BulkDispute {
   status?: string;
   createdDate?: string;
   createdAt?: string;
+  resolvedDate?: string | null;
+  finalSettlementAmount?: number | string | null;
   [key: string]: unknown;
 }
 
@@ -1544,7 +1546,7 @@ export async function getLaytimeStatement(
 
 export async function createBulkDispute(
   dto: CreateBulkDisputeDto,
-): Promise<any> {
+): Promise<BulkDispute> {
   const response = await fetch(`${API_BASE}/bulk-disputes`, {
     method: "POST",
     headers: {
@@ -1554,12 +1556,15 @@ export async function createBulkDispute(
   });
 
   const result = await parseResponse(response);
-  return unwrapData<any>(result);
+  return unwrapData<BulkDispute>(result);
 }
 
 export async function getBulkDisputes(params?: {
   page?: number;
   limit?: number;
+  voyageId?: string;
+  status?: CreateBulkDisputeDto["status"];
+  type?: CreateBulkDisputeDto["type"];
 }): Promise<Paginated<BulkDispute>> {
   const response = await fetch(
     `${API_BASE}/bulk-disputes${buildQueryString(params)}`,
