@@ -9,6 +9,7 @@ import {
   type ReversibleSettlementStatus,
 } from "../lib/api";
 import { formatCurrencyAmount } from "../lib/currency";
+import { PersistedLaytimeTimeline } from "./LaytimeTimeline";
 
 type ResultCalculation = LaytimeCalculation | LaytimeOperationResult;
 
@@ -543,6 +544,12 @@ function ResultCard({
         )}
       </section>
 
+      <PersistedLaytimeTimeline
+        calculation={calculation}
+        audit={audit}
+        referenceOnly={referenceOnly}
+        authorityStatus={authorityStatus}
+      />
       <DecisionEvidence calculation={calculation} audit={audit} />
       <PeriodTable calculation={calculation} audit={audit} />
       <WeatherExplanation calculation={calculation} audit={audit} />
