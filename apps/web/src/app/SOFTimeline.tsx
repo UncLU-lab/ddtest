@@ -2287,7 +2287,6 @@ export default function SOFTimeline() {
 
     const durationError = validateDurationHours(form.duration);
     if (durationError) {
-      setTimelineError(durationError);
       setEventSaveError(durationError);
       setSavingEvent(false);
       return;
@@ -2357,7 +2356,6 @@ export default function SOFTimeline() {
         error,
         "Unable to save this SOF event. Check the event time and try again.",
       );
-      setTimelineError(message);
       setEventSaveError(message);
     } finally {
       setSavingEvent(false);
