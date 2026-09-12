@@ -141,6 +141,7 @@ function buildCommonScenario(
     label,
     vessel: overrides.vessel,
     voyage: overrides.voyage,
+    charterParty: overrides.charterParty,
     voyageCreatedAt: overrides.voyageCreatedAt ?? scenarioTime(day, 0),
     voyageUpdatedAt: overrides.voyageUpdatedAt ?? scenarioTime(day, 1),
     charterCreatedAt: overrides.charterCreatedAt ?? scenarioTime(day, 2),
@@ -149,6 +150,7 @@ function buildCommonScenario(
       overrides.calculationTimestamp ?? scenarioTime(day, 4),
     nor: overrides.nor,
     sofDocument: overrides.sofDocument,
+    additionalSofDocuments: overrides.additionalSofDocuments,
     sofEvents: overrides.sofEvents,
     extraClauses: overrides.extraClauses ?? [],
     expected: overrides.expected,
@@ -1155,17 +1157,19 @@ async function seedScenario(deps: {
   if (scenario.nor) {
     await ensureNor(norRepo, voyage.id, scenario);
   }
-  const sofDocuments = await Promise.all([
-    ensureSofDocument(
+  const sofDocuments = [
+    await ensureSofDocument(
       sofDocumentRepo,
       voyage.id,
       scenario,
       scenario.sofDocument,
     ),
-    ...(scenario.additionalSofDocuments ?? []).map((document) =>
-      ensureSofDocument(sofDocumentRepo, voyage.id, scenario, document),
-    ),
-  ]);
+  ];
+  for (const document of scenario.additionalSofDocuments ?? []) {
+    sofDocuments.push(
+      await ensureSofDocument(sofDocumentRepo, voyage.id, scenario, document),
+    );
+  }
   const sofDocument = sofDocuments[0];
   await ensureSofEvents(sofEventRepo, sofDocuments, scenario);
 
