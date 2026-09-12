@@ -35,7 +35,8 @@ type ScenarioId =
   | 'CODEX-TEST-07'
   | 'CODEX-TEST-08'
   | 'CODEX-TEST-09'
-  | 'CODEX-TEST-10';
+  | 'CODEX-TEST-10'
+  | 'STAGE-CLAIM-001';
 
 type Operation = 'Loading' | 'Discharge' | null;
 
@@ -57,11 +58,15 @@ type ScenarioDefinition = {
     laycanStart: string;
     laycanEnd: string;
     laytimeOperation: 'Loading' | 'Discharge';
-    laytimeAllowed: number;
+    laytimeAllowed: number | null;
     demurrageRate: number;
     dispatchRate: number;
     timeCountingBasis: 'SHINC' | 'SHEX';
     norNoticePeriod: string;
+  };
+  charterParty?: {
+    laytimeOperationScope?: 'LoadingAndDischarge';
+    settlementCurrency?: 'USD';
   };
   voyageCreatedAt: Date;
   voyageUpdatedAt: Date;
@@ -71,15 +76,22 @@ type ScenarioDefinition = {
   nor: {
     tenderTime: Date;
     acceptedTime: Date | null;
-  };
+  } | null;
   sofDocument: {
     id: string;
     filePath: string;
     operation: Operation;
     status: 'Final';
   };
+  additionalSofDocuments?: Array<{
+    id: string;
+    filePath: string;
+    operation: Operation;
+    status: 'Final';
+  }>;
   sofEvents: Array<{
     id: string;
+    sofId?: string;
     eventTime: Date;
     eventType: string;
     operation: Operation;
@@ -104,7 +116,7 @@ function scenarioTime(day: number, hour: number, minute = 0): Date {
 }
 
 function seedUuid(reference: ScenarioId, slot: number): string {
-  const index = Number(reference.slice(-2));
+  const index = reference === 'STAGE-CLAIM-001' ? 1100 : Number(reference.slice(-2));
   const numeric = index * 100 + slot;
   return `00000000-0000-4000-8000-${String(numeric).padStart(12, '0')}`;
 }
@@ -753,6 +765,156 @@ const scenarios: ScenarioDefinition[] = [
       ],
     },
   }),
+  buildCommonScenario('STAGE-CLAIM-001', 'Staging-only authoritative reversible claim fixture', {
+    vessel: {
+      imo: '7001100',
+      name: 'STAGE-CLAIM-001 Vessel',
+      flag: 'Liberia',
+      type: 'Bulk Carrier',
+      dwt: 72000,
+    },
+    voyage: {
+      cargoQuantity: '40000.00',
+      cargoType: 'Iron Ore Fines',
+      loadPort: 'AUMEL',
+      dischargePort: 'CNSHA',
+      laycanStart: '2026-11-01',
+      laycanEnd: '2026-11-30',
+      laytimeOperation: 'Discharge',
+      laytimeAllowed: null,
+      demurrageRate: 20000,
+      dispatchRate: 0,
+      timeCountingBasis: 'SHINC',
+      norNoticePeriod: 'immediate',
+    },
+    charterParty: {
+      laytimeOperationScope: 'LoadingAndDischarge',
+      settlementCurrency: 'USD',
+    },
+    nor: null,
+    sofDocument: {
+      id: seedUuid('STAGE-CLAIM-001', 5),
+      filePath: 'seed/stage-claim-001/loading-sof.txt',
+      operation: 'Loading',
+      status: 'Final',
+    },
+    additionalSofDocuments: [
+      {
+        id: seedUuid('STAGE-CLAIM-001', 6),
+        filePath: 'seed/stage-claim-001/discharge-sof.txt',
+        operation: 'Discharge',
+        status: 'Final',
+      },
+    ],
+    sofEvents: [
+      {
+        id: seedUuid('STAGE-CLAIM-001', 11),
+        sofId: seedUuid('STAGE-CLAIM-001', 5),
+        eventTime: new Date('2026-11-01T08:00:00Z'),
+        eventType: 'NOR_TENDERED',
+        operation: 'Loading',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 12),
+        sofId: seedUuid('STAGE-CLAIM-001', 5),
+        eventTime: new Date('2026-11-01T08:00:00Z'),
+        eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+        operation: 'Loading',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 13),
+        sofId: seedUuid('STAGE-CLAIM-001', 5),
+        eventTime: new Date('2026-11-01T08:00:00Z'),
+        eventType: 'FREE_PRATIQUE_GRANTED',
+        operation: 'Loading',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 14),
+        sofId: seedUuid('STAGE-CLAIM-001', 5),
+        eventTime: new Date('2026-11-01T08:00:00Z'),
+        eventType: 'CARGO_STARTED',
+        operation: 'Loading',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 15),
+        sofId: seedUuid('STAGE-CLAIM-001', 5),
+        eventTime: new Date('2026-11-02T20:00:00Z'),
+        eventType: 'CARGO_COMPLETED',
+        operation: 'Loading',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 21),
+        sofId: seedUuid('STAGE-CLAIM-001', 6),
+        eventTime: new Date('2026-11-05T08:00:00Z'),
+        eventType: 'NOR_TENDERED',
+        operation: 'Discharge',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 22),
+        sofId: seedUuid('STAGE-CLAIM-001', 6),
+        eventTime: new Date('2026-11-05T08:00:00Z'),
+        eventType: 'VESSEL_READY_IN_ALL_RESPECTS',
+        operation: 'Discharge',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 23),
+        sofId: seedUuid('STAGE-CLAIM-001', 6),
+        eventTime: new Date('2026-11-05T08:00:00Z'),
+        eventType: 'FREE_PRATIQUE_GRANTED',
+        operation: 'Discharge',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 24),
+        sofId: seedUuid('STAGE-CLAIM-001', 6),
+        eventTime: new Date('2026-11-05T08:00:00Z'),
+        eventType: 'CARGO_STARTED',
+        operation: 'Discharge',
+      },
+      {
+        id: seedUuid('STAGE-CLAIM-001', 25),
+        sofId: seedUuid('STAGE-CLAIM-001', 6),
+        eventTime: new Date('2026-11-06T20:00:00Z'),
+        eventType: 'CARGO_COMPLETED',
+        operation: 'Discharge',
+      },
+    ],
+    extraClauses: [
+      {
+        clauseType: 'laytime_rate',
+        rawText: 'Loading laytime allowed: 24 hours',
+        parameters: { operation: 'Loading', hours: 24, noticeHours: 0 },
+      },
+      {
+        clauseType: 'laytime_rate',
+        rawText: 'Discharge laytime allowed: 24 hours',
+        parameters: { operation: 'Discharge', hours: 24, noticeHours: 0 },
+      },
+      {
+        clauseType: 'demurrage_rate',
+        rawText: 'Loading demurrage: USD 20,000 per day',
+        parameters: { operation: 'Loading', rate: 20000 },
+      },
+      {
+        clauseType: 'demurrage_rate',
+        rawText: 'Discharge demurrage: USD 20,000 per day',
+        parameters: { operation: 'Discharge', rate: 20000 },
+      },
+      {
+        clauseType: 'reversible_laytime',
+        rawText: 'Laytime reversible between Loading and Discharge; Version 1 pooled allowance settlement.',
+        parameters: {
+          enabled: true,
+          settlementVersion: 1,
+          allowanceMode: 'sum_operation_allowances',
+        },
+      },
+    ],
+    expected: {
+      usedLaytime: '3 days 00:00:00',
+      demurrageAmount: '20000.00',
+      despatchAmount: '0.00',
+    },
+  }),
 ];
 
 function toJson(value: unknown): string {
@@ -789,7 +951,7 @@ function buildFullText(scenario: ScenarioDefinition): string {
     scenario.label,
     `Voyage reference: ${scenario.reference}`,
     `Laytime operation: ${scenario.voyage.laytimeOperation}`,
-    `Laytime allowed: ${scenario.voyage.laytimeAllowed}h`,
+    `Laytime allowed: ${scenario.voyage.laytimeAllowed === null ? 'Not configured' : `${scenario.voyage.laytimeAllowed}h`}`,
     `Demurrage: $${scenario.voyage.demurrageRate.toLocaleString()}/day`,
     `Dispatch: $${scenario.voyage.dispatchRate.toLocaleString()}/day`,
     `Time counting basis: ${scenario.voyage.timeCountingBasis}`,
@@ -856,6 +1018,15 @@ async function main(): Promise<void> {
     const charterPartiesService = app.get(CharterPartiesService);
     const sofDocumentsService = app.get(SofDocumentsService);
     const calculationsService = app.get(LaytimeCalculationsService);
+    const requestedReference = process.env.SEED_TEST_SHIPMENT_REFERENCE?.trim();
+    const scenariosToSeed = requestedReference
+      ? scenarios.filter((scenario) => scenario.reference === requestedReference)
+      : scenarios;
+    if (requestedReference && scenariosToSeed.length !== 1) {
+      throw new Error(
+        `No test-shipment seed scenario exists for ${requestedReference}.`,
+      );
+    }
 
     const results = await tenantContext.run(
       {
@@ -868,7 +1039,7 @@ async function main(): Promise<void> {
         databaseContext.runInTransaction(async () => {
           const seeded: Array<Record<string, unknown>> = [];
 
-          for (const scenario of scenarios) {
+          for (const scenario of scenariosToSeed) {
             logger.log(`Starting ${scenario.reference}`);
             const result = await seedScenario({
               scenario,
@@ -892,7 +1063,7 @@ async function main(): Promise<void> {
         }),
     );
 
-    logger.log(`Seeded or verified ${results.length} CODEX test voyages.`);
+    logger.log(`Seeded or verified ${results.length} test voyage(s).`);
     for (const result of results) {
       logger.log(toJson(result));
     }
@@ -981,13 +1152,22 @@ async function seedScenario(deps: {
     voyage,
     scenario,
   );
-  await ensureNor(norRepo, voyage.id, scenario);
-  const sofDocument = await ensureSofDocument(
-    sofDocumentRepo,
-    voyage.id,
-    scenario,
-  );
-  await ensureSofEvents(sofEventRepo, sofDocument.id, scenario);
+  if (scenario.nor) {
+    await ensureNor(norRepo, voyage.id, scenario);
+  }
+  const sofDocuments = await Promise.all([
+    ensureSofDocument(
+      sofDocumentRepo,
+      voyage.id,
+      scenario,
+      scenario.sofDocument,
+    ),
+    ...(scenario.additionalSofDocuments ?? []).map((document) =>
+      ensureSofDocument(sofDocumentRepo, voyage.id, scenario, document),
+    ),
+  ]);
+  const sofDocument = sofDocuments[0];
+  await ensureSofEvents(sofEventRepo, sofDocuments, scenario);
 
   const existingCalculations = await calculationsService.findForVoyage(
     voyage.id,
@@ -1019,7 +1199,7 @@ async function seedScenario(deps: {
     vessel,
     voyage,
     charterParty,
-    sofDocument,
+    sofDocuments,
     calculationsService,
     voyagesService,
     charterPartiesService,
@@ -1136,6 +1316,8 @@ async function ensureCharterPartyAndClauses(
       dispatchRate: scenario.voyage.dispatchRate.toFixed(2),
       timeCountingBasis: scenario.voyage.timeCountingBasis,
       norNoticePeriod: scenario.voyage.norNoticePeriod,
+      laytimeOperationScope: scenario.charterParty?.laytimeOperationScope ?? null,
+      settlementCurrency: scenario.charterParty?.settlementCurrency ?? null,
       createdAt: scenario.charterCreatedAt,
     }),
   );
@@ -1184,8 +1366,10 @@ async function ensureExtraClauses(
   });
 
   for (const clause of extraClauses) {
-    const found = existing.find(
-      (item) => item.clauseType === clause.clauseType,
+    const operation = clause.parameters.operation;
+    const found = existing.find((item) =>
+      item.clauseType === clause.clauseType &&
+      (operation === undefined || item.parameters.operation === operation),
     );
     if (found) {
       if (
@@ -1215,10 +1399,14 @@ async function ensureNor(
   voyageId: string,
   scenario: ScenarioDefinition,
 ): Promise<NorDocument> {
+  const nor = scenario.nor;
+  if (!nor) {
+    throw new Error(`${scenario.reference} does not define a NOR document.`);
+  }
   const existing = await norRepo.findOne({
     where: {
       voyageId,
-      tenderTime: scenario.nor.tenderTime,
+      tenderTime: nor.tenderTime,
     },
   });
 
@@ -1230,8 +1418,8 @@ async function ensureNor(
     norRepo.create({
       voyageId,
       filePath: `seed/${scenario.reference.toLowerCase()}/nor.txt`,
-      tenderTime: scenario.nor.tenderTime,
-      acceptedTime: scenario.nor.acceptedTime,
+      tenderTime: nor.tenderTime,
+      acceptedTime: nor.acceptedTime,
     }),
   );
 }
@@ -1240,18 +1428,19 @@ async function ensureSofDocument(
   sofDocumentRepo: Repository<SofDocument>,
   voyageId: string,
   scenario: ScenarioDefinition,
+  document: ScenarioDefinition['sofDocument'],
 ): Promise<SofDocument> {
   const existing = await sofDocumentRepo.findOne({
     where: {
-      id: scenario.sofDocument.id,
+      id: document.id,
     },
   });
 
   if (existing) {
     if (
-      existing.operation !== scenario.sofDocument.operation ||
-      existing.status !== scenario.sofDocument.status ||
-      existing.filePath !== scenario.sofDocument.filePath
+      existing.operation !== document.operation ||
+      existing.status !== document.status ||
+      existing.filePath !== document.filePath
     ) {
       throw new Error(
         `Existing SOF document ${existing.id} on ${scenario.reference} does not match the expected seed data.`,
@@ -1263,15 +1452,15 @@ async function ensureSofDocument(
   const existingByPath = await sofDocumentRepo.findOne({
     where: {
       voyageId,
-      filePath: scenario.sofDocument.filePath,
+      filePath: document.filePath,
     },
   });
 
   if (existingByPath) {
     if (
-      existingByPath.operation !== scenario.sofDocument.operation ||
-      existingByPath.status !== scenario.sofDocument.status ||
-      existingByPath.filePath !== scenario.sofDocument.filePath
+      existingByPath.operation !== document.operation ||
+      existingByPath.status !== document.status ||
+      existingByPath.filePath !== document.filePath
     ) {
       throw new Error(
         `Existing SOF document ${existingByPath.id} on ${scenario.reference} does not match the expected seed data.`,
@@ -1282,22 +1471,26 @@ async function ensureSofDocument(
 
   return sofDocumentRepo.save(
     sofDocumentRepo.create({
-      id: scenario.sofDocument.id,
+      id: document.id,
       voyageId,
-      filePath: scenario.sofDocument.filePath,
+      filePath: document.filePath,
       uploadDate: scenario.documentUploadDate,
-      status: scenario.sofDocument.status,
-      operation: scenario.sofDocument.operation,
+      status: document.status,
+      operation: document.operation,
     }),
   );
 }
 
 async function ensureSofEvents(
   sofEventRepo: Repository<SofEvent>,
-  sofId: string,
+  sofDocuments: SofDocument[],
   scenario: ScenarioDefinition,
 ): Promise<void> {
   for (const event of scenario.sofEvents) {
+    const sofId = event.sofId ?? sofDocuments[0]?.id;
+    if (!sofId || !sofDocuments.some((document) => document.id === sofId)) {
+      throw new Error(`SOF event ${event.id} on ${scenario.reference} has no seeded SOF document.`);
+    }
     const existing = await sofEventRepo.findOne({
       where: {
         id: event.id,
@@ -1343,7 +1536,7 @@ async function verifyScenario(deps: {
   vessel: Vessel;
   voyage: Voyage;
   charterParty: CharterParty;
-  sofDocument: SofDocument;
+  sofDocuments: SofDocument[];
   calculationsService: LaytimeCalculationsService;
   voyagesService: VoyagesService;
   charterPartiesService: CharterPartiesService;
@@ -1355,7 +1548,7 @@ async function verifyScenario(deps: {
     scenario,
     voyage,
     charterParty,
-    sofDocument,
+    sofDocuments,
     calculationsService,
     voyagesService,
     charterPartiesService,
@@ -1374,11 +1567,15 @@ async function verifyScenario(deps: {
     skip: 0,
     limit: 10,
   } as never);
-  const sofEventPage = await sofDocumentsService.findEvents(sofDocument.id, {
-    page: 1,
-    skip: 0,
-    limit: 20,
-  } as never);
+  const sofEventPages = await Promise.all(
+    sofDocuments.map((document) =>
+      sofDocumentsService.findEvents(document.id, {
+        page: 1,
+        skip: 0,
+        limit: 20,
+      } as never),
+    ),
+  );
   const calculationPage = await calculationsService.findForVoyage(voyage.id, {
     page: 1,
     skip: 0,
@@ -1402,12 +1599,12 @@ async function verifyScenario(deps: {
     'charter party fetch failed',
   );
   assertValue(
-    sofPage.data.some((document) => document.id === sofDocument.id),
+    sofDocuments.every((document) => sofPage.data.some((item) => item.id === document.id)),
     scenario.reference,
     'SOF document fetch did not return the seeded document',
   );
   assertValue(
-    sofEventPage.data.length === scenario.sofEvents.length,
+    sofEventPages.reduce((total, page) => total + page.data.length, 0) === scenario.sofEvents.length,
     scenario.reference,
     'SOF event fetch did not return the expected number of events',
   );
@@ -1475,6 +1672,41 @@ async function verifyScenario(deps: {
     );
   }
 
+  if (scenario.reference === 'STAGE-CLAIM-001') {
+    const settlement = (calculation.decisionSnapshot as Record<string, unknown> | null)
+      ?.reversibleSettlement as Record<string, unknown> | undefined;
+    assertValue(
+      settlement?.settlementStatus === 'FINAL_AUTHORITATIVE',
+      scenario.reference,
+      'reversible settlement is not final authoritative',
+    );
+    assertValue(
+      settlement?.loadingAllowance !== null && settlement?.dischargeAllowance !== null,
+      scenario.reference,
+      'reversible settlement is missing an explicit operation allowance',
+    );
+    assertValue(
+      (settlement?.loadingAllowance as Record<string, unknown> | undefined)?.source === 'operation-specific' &&
+        (settlement?.dischargeAllowance as Record<string, unknown> | undefined)?.source === 'operation-specific',
+      scenario.reference,
+      'reversible settlement used a global allowance fallback',
+    );
+    assertValue(
+      calculation.currency === 'USD',
+      scenario.reference,
+      'authoritative settlement currency was not persisted',
+    );
+
+    const children = await calculationsService.findOperationChildren(calculation.id);
+    assertValue(
+      children.length === 2 &&
+        children.some((child) => child.operation === 'Loading') &&
+        children.some((child) => child.operation === 'Discharge'),
+      scenario.reference,
+      'reversible parent does not have both operation child calculations',
+    );
+  }
+
   logger.log(
     [
       scenario.reference,
@@ -1515,6 +1747,18 @@ function assertScenarioCharterParty(
     charterParty.voyageId !== undefined,
     scenario.reference,
     'existing charter party missing voyage relation',
+  );
+  assertValue(
+    (charterParty.laytimeOperationScope ?? null) ===
+      (scenario.charterParty?.laytimeOperationScope ?? null),
+    scenario.reference,
+    'existing charter party laytime operation scope mismatch',
+  );
+  assertValue(
+    (charterParty.settlementCurrency ?? null) ===
+      (scenario.charterParty?.settlementCurrency ?? null),
+    scenario.reference,
+    'existing charter party settlement currency mismatch',
   );
 }
 
